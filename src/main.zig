@@ -1,7 +1,8 @@
 const std = @import("std");
 const wl = @import("wayland").client.wl;
 const zwlr = @import("wayland").client.zwlr;
-const Config = @import("config.zig").Config;
+const config = @import("config.zig");
+const Config = config.Config;
 const c = @cImport({
     @cInclude("wayland-egl.h");
     @cInclude("EGL/egl.h");
@@ -31,6 +32,10 @@ var running = true;
 var cfg: Config = .{};
 
 pub fn main() !void {
+    var config_result = config.load(std.heap.page_allocator);
+    defer config_result.deinit();
+    cfg = config_result.config;
+
     const display = try wl.Display.connect(null);
     defer display.disconnect();
 
