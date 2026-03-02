@@ -1,0 +1,17 @@
+.{
+    .name = .shoal,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.15.0",
+    .paths = .{""},
+    .dependencies = .{
+        .wayland = .{
+            .url = "git+https://codeberg.org/ifreund/zig-wayland?ref=main#260778a0f2f6af0a2c6bd311a60cb1aa4311ef7a",
+            .hash = "wayland-0.5.0-dev-lQa1kv_ZAQCZfnVZMocokZ78QJbH6NaM5RUC9ODQPhx5",
+        },
+        .zclay = .{
+            .url = "git+https://github.com/johan0A/clay-zig-bindings?ref=main#6247096649f547a55e90dcdc1e821c72186f6d09",
+            .hash = "zclay-0.2.2-Ej1rkPDRAADuk7U5Y1YjpoFfE5Puvf5JIDyyjtnz3aVc",
+        },
+    },
+    .fingerprint = 0xfdab4966dbf31d14,
+}
