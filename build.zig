@@ -51,14 +51,15 @@ pub fn build(b: *Build) void {
         }),
     });
 
-    // System libraries
-    exe.linkSystemLibrary("wayland-client");
-    exe.linkSystemLibrary("wayland-egl");
-    exe.linkSystemLibrary("EGL");
-    exe.linkSystemLibrary("GLESv2");
-    exe.linkSystemLibrary("freetype");
-    exe.linkSystemLibrary("harfbuzz");
-    exe.linkSystemLibrary("fontconfig");
+    // System libraries — link on the root module so @cImport can find headers
+    const root_mod = exe.root_module;
+    root_mod.linkSystemLibrary("wayland-client", .{});
+    root_mod.linkSystemLibrary("wayland-egl", .{});
+    root_mod.linkSystemLibrary("EGL", .{});
+    root_mod.linkSystemLibrary("GLESv2", .{});
+    root_mod.linkSystemLibrary("freetype2", .{});
+    root_mod.linkSystemLibrary("harfbuzz", .{});
+    root_mod.linkSystemLibrary("fontconfig", .{});
 
     b.installArtifact(exe);
 

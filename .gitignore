@@ -4,3 +4,4 @@ zig-cache/
 .direnv/
 result
 result-*
+*.o

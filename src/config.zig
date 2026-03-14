@@ -1,16 +1,22 @@
 const std = @import("std");
 const log = std.log.scoped(.config);
+const theme_mod = @import("theme.zig");
+const modules_mod = @import("modules.zig");
+pub const Theme = theme_mod.Theme;
+pub const BarConfig = modules_mod.BarConfig;
+pub const ModuleType = modules_mod.ModuleType;
 
 pub const Config = struct {
-    layer: Layer = .bottom,
+    layer: Layer = .top,
     anchor: Anchor = .{ .top = true, .left = true, .right = true },
     width: u32 = 0,
-    height: u32 = 32,
-    exclusive_zone: i32 = 32,
-    margin: Margin = .{},
+    height: u32 = 40,
+    exclusive_zone: i32 = 44,
+    margin: Margin = .{ .top = 4, .left = 6, .right = 6 },
     namespace: [:0]const u8 = "shoal",
     keyboard_interactivity: KeyboardInteractivity = .none,
-    background: Color = .{ .r = 0.12, .g = 0.12, .b = 0.18, .a = 0.95 },
+    theme: Theme = theme_mod.default(),
+    bar: BarConfig = .{},
 
     pub const Layer = enum {
         background,
@@ -37,13 +43,6 @@ pub const Config = struct {
         right: i32 = 0,
         bottom: i32 = 0,
         left: i32 = 0,
-    };
-
-    pub const Color = struct {
-        r: f32 = 0.0,
-        g: f32 = 0.0,
-        b: f32 = 0.0,
-        a: f32 = 1.0,
     };
 };
 
@@ -93,9 +92,93 @@ fn loadFile(allocator: std.mem.Allocator, explicit_path: ?[:0]const u8) !Config 
 
     const contents = try file.readToEndAlloc(allocator, 1 << 20);
 
-    return std.json.parseFromSliceLeaky(Config, allocator, contents, .{
-        .ignore_unknown_fields = true,
-    });
+    // Parse as generic JSON value for flexible extraction
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, contents, .{});
+    const root = parsed.value;
+    if (root != .object) return error.InvalidConfig;
+    const map = root.object;
+
+    var config = Config{};
+
+    // Surface properties
+    if (map.get("layer")) |v| {
+        if (v == .string) config.layer = std.meta.stringToEnum(Config.Layer, v.string) orelse config.layer;
+    }
+    if (map.get("width")) |v| {
+        if (v == .integer) config.width = @intCast(@max(0, v.integer));
+    }
+    if (map.get("height")) |v| {
+        if (v == .integer) config.height = @intCast(@max(0, v.integer));
+    }
+    if (map.get("exclusive_zone")) |v| {
+        if (v == .integer) config.exclusive_zone = @intCast(v.integer);
+    }
+    if (map.get("namespace")) |v| {
+        if (v == .string) config.namespace = try allocator.dupeZ(u8, v.string);
+    }
+    if (map.get("keyboard_interactivity")) |v| {
+        if (v == .string) config.keyboard_interactivity = std.meta.stringToEnum(Config.KeyboardInteractivity, v.string) orelse config.keyboard_interactivity;
+    }
+    if (map.get("anchor")) |v| {
+        if (v == .object) {
+            const a = v.object;
+            config.anchor = .{
+                .top = if (a.get("top")) |b| b == .bool and b.bool else false,
+                .bottom = if (a.get("bottom")) |b| b == .bool and b.bool else false,
+                .left = if (a.get("left")) |b| b == .bool and b.bool else false,
+                .right = if (a.get("right")) |b| b == .bool and b.bool else false,
+            };
+        }
+    }
+    if (map.get("margin")) |v| {
+        if (v == .object) {
+            const m = v.object;
+            config.margin = .{
+                .top = if (m.get("top")) |i| @as(i32, @intCast(i.integer)) else 0,
+                .right = if (m.get("right")) |i| @as(i32, @intCast(i.integer)) else 0,
+                .bottom = if (m.get("bottom")) |i| @as(i32, @intCast(i.integer)) else 0,
+                .left = if (m.get("left")) |i| @as(i32, @intCast(i.integer)) else 0,
+            };
+        }
+    }
+
+    // Theme (base16 colors + font config)
+    if (map.get("theme")) |theme_val| {
+        config.theme = theme_mod.fromJson(allocator, theme_val) catch config.theme;
+    }
+
+    // Bar module layout
+    if (map.get("modules_left")) |v| {
+        if (parseModuleList(allocator, v)) |list| config.bar.modules_left = list;
+    }
+    if (map.get("modules_center")) |v| {
+        if (parseModuleList(allocator, v)) |list| config.bar.modules_center = list;
+    }
+    if (map.get("modules_right")) |v| {
+        if (parseModuleList(allocator, v)) |list| config.bar.modules_right = list;
+    }
+    if (map.get("clock_format")) |v| {
+        if (v == .string) config.bar.clock_format = try allocator.dupe(u8, v.string);
+    }
+
+    return config;
+}
+
+fn parseModuleList(allocator: std.mem.Allocator, val: std.json.Value) ?[]const ModuleType {
+    if (val != .array) return null;
+    const items = val.array.items;
+    const list = allocator.alloc(ModuleType, items.len) catch return null;
+    for (items, 0..) |item, i| {
+        if (item != .string) {
+            allocator.free(list);
+            return null;
+        }
+        list[i] = std.meta.stringToEnum(ModuleType, item.string) orelse {
+            allocator.free(list);
+            return null;
+        };
+    }
+    return list;
 }
 
 fn resolveConfigPath(allocator: std.mem.Allocator) ![:0]const u8 {
@@ -119,7 +202,6 @@ const CliOverrides = struct {
     exclusive_zone: ?i32 = null,
     namespace: ?[:0]const u8 = null,
     keyboard_interactivity: ?Config.KeyboardInteractivity = null,
-    background: ?Config.Color = null,
     margin: ?Config.Margin = null,
     help: bool = false,
 };
@@ -149,8 +231,6 @@ fn parseArgs(allocator: std.mem.Allocator) !CliOverrides {
             overrides.namespace = args.next() orelse return error.MissingValue;
         } else if (eql(arg, "--keyboard-interactivity")) {
             overrides.keyboard_interactivity = parseEnum(Config.KeyboardInteractivity, args.next() orelse return error.MissingValue) orelse return error.InvalidValue;
-        } else if (eql(arg, "--background")) {
-            overrides.background = parseHexColor(args.next() orelse return error.MissingValue) orelse return error.InvalidValue;
         } else if (eql(arg, "--margin")) {
             overrides.margin = parseMargin(args.next() orelse return error.MissingValue) orelse return error.InvalidValue;
         } else {
@@ -170,7 +250,6 @@ fn applyOverrides(config: *Config, overrides: CliOverrides) void {
     if (overrides.exclusive_zone) |v| config.exclusive_zone = v;
     if (overrides.namespace) |v| config.namespace = v;
     if (overrides.keyboard_interactivity) |v| config.keyboard_interactivity = v;
-    if (overrides.background) |v| config.background = v;
     if (overrides.margin) |v| config.margin = v;
 }
 
@@ -231,25 +310,6 @@ fn parseMargin(s: [:0]const u8) ?Config.Margin {
     };
 }
 
-/// Parse hex color: #RRGGBB or #RRGGBBAA
-fn parseHexColor(s: [:0]const u8) ?Config.Color {
-    const hex = if (s.len > 0 and s[0] == '#') s[1..] else return null;
-
-    if (hex.len != 6 and hex.len != 8) return null;
-
-    const r = std.fmt.parseUnsigned(u8, hex[0..2], 16) catch return null;
-    const g = std.fmt.parseUnsigned(u8, hex[2..4], 16) catch return null;
-    const b = std.fmt.parseUnsigned(u8, hex[4..6], 16) catch return null;
-    const a: u8 = if (hex.len == 8) std.fmt.parseUnsigned(u8, hex[6..8], 16) catch return null else 255;
-
-    return .{
-        .r = @as(f32, @floatFromInt(r)) / 255.0,
-        .g = @as(f32, @floatFromInt(g)) / 255.0,
-        .b = @as(f32, @floatFromInt(b)) / 255.0,
-        .a = @as(f32, @floatFromInt(a)) / 255.0,
-    };
-}
-
 fn printUsage() void {
     const usage =
         \\Usage: shoal [OPTIONS]
@@ -264,7 +324,6 @@ fn printUsage() void {
         \\  --margin <t,r,b,l>              Margin in pixels (single value or top,right,bottom,left)
         \\  --namespace <name>              Surface namespace
         \\  --keyboard-interactivity <mode> Keyboard mode (none|exclusive|on_demand)
-        \\  --background <#RRGGBBAA>        Background color as hex
         \\  -h, --help                      Show this help
         \\
         \\Config is loaded in order: defaults → XDG config file → --config file → CLI overrides
