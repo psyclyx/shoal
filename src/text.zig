@@ -154,9 +154,9 @@ pub const GlyphAtlas = struct {
         };
     }
 
-    /// Double the atlas size (up to the cap). Creates a new texture, copies
-    /// old pixel data into the top-left corner via FBO readback + subimage
-    /// upload. Bumps `generation` so FontFace caches know to invalidate.
+    /// Double the atlas size (up to the cap). Replaces the texture with an
+    /// empty one and resets the packing cursor. Bumps `generation` so
+    /// FontFace caches invalidate and re-rasterize glyphs on next access.
     fn grow(self: *GlyphAtlas) bool {
         const new_width = self.width * 2;
         const new_height = self.height * 2;
@@ -170,47 +170,6 @@ pub const GlyphAtlas = struct {
             self.width, self.height, new_width, new_height,
         });
 
-        // Read back old texture data.
-        const old_size = self.width * self.height;
-        const old_pixels: []u8 = std.heap.page_allocator.alloc(u8, old_size) catch {
-            log.err("failed to allocate buffer for atlas resize", .{});
-            return false;
-        };
-        defer std.heap.page_allocator.free(old_pixels);
-
-        c.glBindTexture(c.GL_TEXTURE_2D, self.texture);
-        c.glPixelStorei(c.GL_PACK_ALIGNMENT, 1);
-
-        // Use a framebuffer to read pixels from the texture (GLES3 does not
-        // have glGetTexImage). Attach the old texture to an FBO and use
-        // glReadPixels.
-        var fbo: c.GLuint = 0;
-        c.glGenFramebuffers(1, &fbo);
-        c.glBindFramebuffer(c.GL_FRAMEBUFFER, fbo);
-        c.glFramebufferTexture2D(c.GL_FRAMEBUFFER, c.GL_COLOR_ATTACHMENT0, c.GL_TEXTURE_2D, self.texture, 0);
-
-        if (c.glCheckFramebufferStatus(c.GL_FRAMEBUFFER) == c.GL_FRAMEBUFFER_COMPLETE) {
-            c.glReadPixels(
-                0,
-                0,
-                @intCast(self.width),
-                @intCast(self.height),
-                c.GL_RED,
-                c.GL_UNSIGNED_BYTE,
-                old_pixels.ptr,
-            );
-        } else {
-            log.err("framebuffer incomplete during atlas resize", .{});
-            c.glBindFramebuffer(c.GL_FRAMEBUFFER, 0);
-            c.glDeleteFramebuffers(1, &fbo);
-            c.glBindTexture(c.GL_TEXTURE_2D, 0);
-            return false;
-        }
-
-        c.glBindFramebuffer(c.GL_FRAMEBUFFER, 0);
-        c.glDeleteFramebuffers(1, &fbo);
-
-        // Delete old texture and create a new one.
         c.glDeleteTextures(1, &self.texture);
 
         var new_tex: c.GLuint = 0;
@@ -233,24 +192,12 @@ pub const GlyphAtlas = struct {
             null,
         );
 
-        // Upload old data into the top-left corner.
-        c.glTexSubImage2D(
-            c.GL_TEXTURE_2D,
-            0,
-            0,
-            0,
-            @intCast(self.width),
-            @intCast(self.height),
-            c.GL_RED,
-            c.GL_UNSIGNED_BYTE,
-            old_pixels.ptr,
-        );
-
-        // Bumped generation — FontFace.getGlyph will clear its cache on next
-        // access and re-rasterize glyphs with correct UVs.
         self.texture = new_tex;
         self.width = new_width;
         self.height = new_height;
+        self.cursor_x = 0;
+        self.cursor_y = 0;
+        self.row_height = 0;
         self.generation += 1;
 
         return true;
