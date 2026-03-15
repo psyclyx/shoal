@@ -1,4 +1,5 @@
 const std = @import("std");
+const hiccup = @import("hiccup.zig");
 const log = std.log.scoped(.janet);
 
 pub const c = @cImport({
@@ -99,6 +100,7 @@ pub const Dispatch = struct {
     fn_get_fx_executor: Janet = undefined,
     fn_bump_generation: Janet = undefined,
     fn_set_current_db: Janet = undefined,
+    fn_get_view_fn: Janet = undefined,
 
     /// Load the shoal boot file into a fresh environment. Sets up registries.
     pub fn initBoot(self: *Dispatch) !void {
@@ -118,9 +120,13 @@ pub const Dispatch = struct {
         self.fn_get_fx_executor = envLookup(self.env, "get-fx-executor") orelse return error.BootMissingGetFxExecutor;
         self.fn_bump_generation = envLookup(self.env, "bump-generation") orelse return error.BootMissingBumpGeneration;
         self.fn_set_current_db = envLookup(self.env, "set-current-db") orelse return error.BootMissingSetCurrentDb;
+        self.fn_get_view_fn = envLookup(self.env, "get-view-fn") orelse return error.BootMissingGetViewFn;
 
         // GC root the db so it survives between event cycles
         c.janet_gcroot(self.db);
+
+        // Initialize the hiccup walker (pre-intern keywords)
+        hiccup.init();
 
         log.info("shoal boot loaded, dispatch ready", .{});
     }
@@ -400,6 +406,22 @@ pub const Dispatch = struct {
     /// Set the current db for subscription evaluation. Call before view fn.
     pub fn prepareRender(self: *Dispatch) void {
         _ = self.pcall1(self.fn_set_current_db, self.db);
+    }
+
+    /// Call the registered view function and walk the resulting hiccup tree.
+    /// Call prepareRender() first to set up the db for subscriptions.
+    /// Returns true if a view was rendered, false if no view fn registered.
+    pub fn renderView(self: *Dispatch) bool {
+        // Get the view function
+        const view_fn_val = self.pcall0(self.fn_get_view_fn) orelse return false;
+        if (c.janet_checktype(view_fn_val, c.JANET_NIL) != 0) return false;
+
+        // Call the view function (no args) → hiccup tree
+        const hiccup_tree = self.pcall0(view_fn_val) orelse return false;
+
+        // Walk the hiccup tree, emitting Clay calls
+        hiccup.walkHiccup(hiccup_tree);
+        return true;
     }
 
     /// Protected call with 0 arguments. Returns result or null on error.

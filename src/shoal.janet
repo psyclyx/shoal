@@ -139,3 +139,17 @@
   "Clear all cached subscription values."
   []
   (eachk k sub-cache (put sub-cache k nil)))
+
+# --- View ---
+
+(var- *view-fn* nil)
+
+(defn reg-view
+  "Register the root view function. Called with no args, returns hiccup tree."
+  [view-fn]
+  (set *view-fn* view-fn))
+
+(defn get-view-fn
+  "Return the registered root view function, or nil."
+  []
+  *view-fn*)
