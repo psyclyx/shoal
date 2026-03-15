@@ -236,11 +236,13 @@ pub fn main() !void {
 
     log.info("shoal running on {d} output(s)", .{surface_count});
 
-    // Force initial render
+    // Force initial render — request frame callback BEFORE render so the
+    // callback is associated with this commit (wl_surface.frame takes effect
+    // on the next wl_surface.commit, which eglSwapBuffers triggers).
     for (surfaces[0..surface_count]) |*surf| {
         if (surf.egl_surface != c.EGL_NO_SURFACE) {
-            _ = renderSurface(surf);
             requestFrame(surf);
+            _ = renderSurface(surf);
         }
     }
 
@@ -345,10 +347,10 @@ fn frameListener(_: *wl.Callback, event: wl.Callback.Event, surf: *Surface) void
         .done => {
             surf.frame_pending = false;
             if (surf.needs_render) {
+                requestFrame(surf);
                 if (renderSurface(surf)) {
                     surf.needs_render = false;
                 }
-                requestFrame(surf);
             }
         },
     }
@@ -360,12 +362,13 @@ fn markAllDirty() void {
         if (!surf.configured or surf.egl_surface == c.EGL_NO_SURFACE) continue;
         surf.needs_render = true;
         if (!surf.frame_pending) {
-            // First change after idle — render immediately for responsiveness,
-            // then request a frame callback to throttle subsequent updates.
+            // First change after idle — request frame callback BEFORE render
+            // so it's associated with this commit, then render immediately
+            // for responsiveness.
+            requestFrame(surf);
             if (renderSurface(surf)) {
                 surf.needs_render = false;
             }
-            requestFrame(surf);
         }
     }
 }
