@@ -110,8 +110,7 @@
 
 (defn- tp/apply-signal [db data]
   (def tp (get db :tp {}))
-  (put db :tp (merge tp {:signal {:name (get data :name "")
-                                  :pending true}})))
+  (put db :tp (merge tp {:signal {:name (get data :name "")}})))
 
 (defn- tp/apply-event [db data]
   (match (data :event)
