@@ -426,7 +426,7 @@ pub const Dispatch = struct {
         const cancel_val = janetGet(val, kw("cancel"));
         if (c.janet_checktype(cancel_val, c.JANET_NIL) == 0) {
             const timer_id = janetGet(val, kw("id"));
-            if (c.janet_checktype(timer_id, c.JANET_NIL) != 0) {
+            if (c.janet_checktype(timer_id, c.JANET_NIL) == 0) {
                 self.cancelTimer(timer_id);
             }
             return;
@@ -1311,14 +1311,16 @@ pub const Dispatch = struct {
         const reconnect_event_items = [2]Janet{ kw("_ipc-reconnect"), spec };
         const reconnect_event = makeTuple(&reconnect_event_items);
 
-        // Use a named timer so repeated failures don't stack timers
+        // Use the connection name as timer id so repeated failures replace
+        // rather than stack timers (named timers auto-replace in handleTimerFx)
         const name_val = janetGet(spec, kw("name"));
-        _ = name_val; // timer id is the reconnect event keyword itself
 
         const timer_spec = c.janet_table(4);
         c.janet_table_put(timer_spec, kw("delay"), c.janet_wrap_number(delay));
         c.janet_table_put(timer_spec, kw("event"), reconnect_event);
-        // TODO: ideally use a unique timer id per connection name
+        if (c.janet_checktype(name_val, c.JANET_NIL) == 0) {
+            c.janet_table_put(timer_spec, kw("id"), name_val);
+        }
         self.handleTimerFx(c.janet_wrap_table(timer_spec));
     }
 

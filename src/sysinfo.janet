@@ -5,9 +5,6 @@
 
 # -- CPU --
 
-(var- cpu-prev-idle 0)
-(var- cpu-prev-total 0)
-
 (reg-event-handler :cpu/tick
   (fn [cofx event]
     (def line
@@ -26,14 +23,17 @@
         (var total 0)
         (each v vals (set total (+ total v)))
         (def idle (+ (get vals 3 0) (get vals 4 0)))
-        (def dt (- total cpu-prev-total))
-        (def di (- idle cpu-prev-idle))
+        (def prev (get (cofx :db) :cpu {}))
+        (def prev-idle (get prev :prev-idle 0))
+        (def prev-total (get prev :prev-total 0))
+        (def dt (- total prev-total))
+        (def di (- idle prev-idle))
         (def pct (if (> dt 0)
                    (math/round (* 100 (/ (- dt di) dt)))
                    0))
-        (set cpu-prev-idle idle)
-        (set cpu-prev-total total)
-        {:db (put (cofx :db) :cpu {:percent (math/floor pct)})}))))
+        {:db (put (cofx :db) :cpu {:percent pct
+                                    :prev-idle idle
+                                    :prev-total total})}))))
 
 (reg-event-handler :cpu/start
   (fn [cofx event]
