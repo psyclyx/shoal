@@ -17,6 +17,8 @@ const c = @cImport({
     @cInclude("GLES3/gl3.h");
 });
 
+const BTN_LEFT: u32 = 0x110;
+
 const log = std.log.scoped(.shoal);
 
 const MAX_OUTPUTS = 8;
@@ -92,6 +94,16 @@ const Surface = struct {
 // Wayland globals
 var compositor: ?*wl.Compositor = null;
 var layer_shell: ?*zwlr.LayerShellV1 = null;
+var seat: ?*wl.Seat = null;
+var pointer: ?*wl.Pointer = null;
+
+// Pointer state
+var pointer_x: f32 = -1;
+var pointer_y: f32 = -1;
+var pointer_surface: ?*wl.Surface = null;
+var pointer_button_pressed: bool = false;
+var pointer_button_just_released: bool = false;
+
 // Per-output surfaces
 var surfaces: [MAX_OUTPUTS]Surface = [_]Surface{.{}} ** MAX_OUTPUTS;
 var surface_count: usize = 0;
@@ -385,6 +397,15 @@ fn renderSurface(surf: *Surface) bool {
     c.glActiveTexture(c.GL_TEXTURE0);
     c.glBindTexture(c.GL_TEXTURE_2D, text_renderer.getAtlasTexture());
 
+    // Set pointer state for Clay hit testing — only the surface the pointer
+    // is on gets valid coordinates, others get off-screen (-1, -1).
+    const is_pointer_surface = pointer_surface != null and surf.wl_surface == pointer_surface;
+    if (is_pointer_surface) {
+        Layout.setPointerState(.{ pointer_x, pointer_y }, pointer_button_pressed);
+    } else {
+        Layout.setPointerState(.{ -1, -1 }, false);
+    }
+
     renderer.begin(w, h);
     layout.setDimensions(w, h);
 
@@ -394,6 +415,23 @@ fn renderSurface(surf: *Surface) bool {
     _ = dispatch.renderView();
     layout.endLayout();
     hiccup_mod.endPass();
+
+    // After layout: check for click events on this surface
+    if (is_pointer_surface and pointer_button_just_released) {
+        pointer_button_just_released = false;
+        for (clay.getPointerOverIds()) |eid| {
+            const str_len: usize = @intCast(@max(0, eid.string_id.length));
+            if (str_len > 0) {
+                // GC safety: root the string before makeEventArgs, which
+                // allocates a keyword and tuple buffer (either can trigger GC).
+                const str_val = janet.c.janet_stringv(eid.string_id.chars, @as(i32, @intCast(str_len)));
+                janet.c.janet_gcroot(str_val);
+                defer _ = janet.c.janet_gcunroot(str_val);
+                dispatch.enqueue(janet.makeEventArgs("click", &.{str_val}));
+            }
+        }
+        _ = dispatch.processQueue();
+    }
 
     renderer.end();
     _ = c.eglSwapBuffers(egl_display, surf.egl_surface);
@@ -438,6 +476,9 @@ fn registryListener(registry_: *wl.Registry, event: wl.Registry.Event, _: *const
                 compositor = registry_.bind(global.name, wl.Compositor, @min(global.version, 6)) catch return;
             } else if (std.mem.eql(u8, iface, std.mem.span(zwlr.LayerShellV1.interface.name))) {
                 layer_shell = registry_.bind(global.name, zwlr.LayerShellV1, @min(global.version, 5)) catch return;
+            } else if (std.mem.eql(u8, iface, std.mem.span(wl.Seat.interface.name))) {
+                seat = registry_.bind(global.name, wl.Seat, @min(global.version, 9)) catch return;
+                seat.?.setListener(*const void, seatListener, &{});
             } else if (std.mem.eql(u8, iface, std.mem.span(wl.Output.interface.name))) {
                 if (surface_count < MAX_OUTPUTS) {
                     const output = registry_.bind(global.name, wl.Output, @min(global.version, 4)) catch return;
@@ -486,5 +527,68 @@ fn layerSurfaceListener(_: *zwlr.LayerSurfaceV1, event: zwlr.LayerSurfaceV1.Even
         .closed => {
             running = false;
         },
+    }
+}
+
+fn seatListener(_: *wl.Seat, event: wl.Seat.Event, _: *const void) void {
+    switch (event) {
+        .capabilities => |caps| {
+            if (caps.capabilities.pointer) {
+                if (pointer == null) {
+                    pointer = seat.?.getPointer() catch return;
+                    pointer.?.setListener(*const void, pointerListener, &{});
+                }
+            } else {
+                if (pointer) |p| {
+                    p.release();
+                    pointer = null;
+                    pointer_surface = null;
+                    pointer_x = -1;
+                    pointer_y = -1;
+                    pointer_button_pressed = false;
+                    pointer_button_just_released = false;
+                }
+            }
+        },
+        .name => {},
+    }
+}
+
+fn pointerListener(_: *wl.Pointer, event: wl.Pointer.Event, _: *const void) void {
+    switch (event) {
+        .enter => |ev| {
+            pointer_surface = ev.surface;
+            pointer_x = @floatCast(ev.surface_x.toDouble());
+            pointer_y = @floatCast(ev.surface_y.toDouble());
+        },
+        .leave => |_| {
+            pointer_surface = null;
+            pointer_x = -1;
+            pointer_y = -1;
+            pointer_button_pressed = false;
+        },
+        .motion => |ev| {
+            pointer_x = @floatCast(ev.surface_x.toDouble());
+            pointer_y = @floatCast(ev.surface_y.toDouble());
+        },
+        .button => |ev| {
+            if (ev.button == BTN_LEFT) {
+                switch (ev.state) {
+                    .pressed => {
+                        pointer_button_pressed = true;
+                    },
+                    .released => {
+                        pointer_button_pressed = false;
+                        pointer_button_just_released = true;
+                    },
+                    _ => {},
+                }
+            }
+        },
+        .frame => {
+            // Pointer state has been atomically updated — mark dirty for re-render
+            markAllDirty();
+        },
+        else => {},
     }
 }
