@@ -10,6 +10,7 @@
   freetype,
   harfbuzz,
   fontconfig,
+  janet,
   zig_0_15,
 }:
 
@@ -34,6 +35,7 @@ stdenv.mkDerivation (finalAttrs: {
     freetype
     harfbuzz
     fontconfig
+    janet
   ];
 
   zigBuildFlags = [

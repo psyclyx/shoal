@@ -5,3 +5,7 @@ zig-cache/
 result
 result-*
 *.o
+prompt.md
+inbox/
+docs/archive/
+docs/scratch/

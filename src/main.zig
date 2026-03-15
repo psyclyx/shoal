@@ -12,6 +12,7 @@ const Layout = @import("layout.zig").Layout;
 const animation = @import("animation.zig");
 const modules_mod = @import("modules.zig");
 const ModuleManager = modules_mod.ModuleManager;
+const janet = @import("janet.zig");
 
 const c = @cImport({
     @cInclude("wayland-egl.h");
@@ -128,6 +129,16 @@ pub fn main() !void {
     var config_result = config_mod.load(allocator);
     defer config_result.deinit();
     cfg = config_result.config;
+
+    // Initialize the Janet VM
+    try janet.init();
+    defer janet.deinit();
+
+    // Smoke test: evaluate a Janet expression
+    const env = janet.coreEnv();
+    const result = try janet.doString(env, "(+ 1 2)", "smoke-test");
+    const val = try janet.unwrapNumber(result);
+    log.info("Janet smoke test: (+ 1 2) = {d}", .{val});
 
     const display = try wl.Display.connect(null);
     defer display.disconnect();
