@@ -144,6 +144,10 @@ pub const Dispatch = struct {
         // Set global dispatch pointer for Janet C functions
         global_dispatch = self;
 
+        // GC root the db before any janet_dostring calls — the db table is
+        // only referenced from the Zig struct (invisible to Janet's GC).
+        c.janet_gcroot(self.db);
+
         // Register C functions before evaluating boot source
         c.janet_cfuns(self.env, null, &anim_cfun);
 
@@ -214,9 +218,6 @@ pub const Dispatch = struct {
         self.fn_bump_generation = envLookup(self.env, "bump-generation") orelse return error.BootMissingBumpGeneration;
         self.fn_set_current_db = envLookup(self.env, "set-current-db") orelse return error.BootMissingSetCurrentDb;
         self.fn_get_view_fn = envLookup(self.env, "get-view-fn") orelse return error.BootMissingGetViewFn;
-
-        // GC root the db so it survives between event cycles
-        c.janet_gcroot(self.db);
 
         // Initialize the hiccup walker (pre-intern keywords)
         hiccup.init();

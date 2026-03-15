@@ -153,10 +153,10 @@ fn parseSurfaceFields(allocator: std.mem.Allocator, config: *Config, map: std.js
         if (v == .object) {
             const m = v.object;
             config.margin = .{
-                .top = if (m.get("top")) |i| @as(i32, @intCast(i.integer)) else 0,
-                .right = if (m.get("right")) |i| @as(i32, @intCast(i.integer)) else 0,
-                .bottom = if (m.get("bottom")) |i| @as(i32, @intCast(i.integer)) else 0,
-                .left = if (m.get("left")) |i| @as(i32, @intCast(i.integer)) else 0,
+                .top = if (m.get("top")) |i| if (i == .integer) @as(i32, @intCast(i.integer)) else 0 else 0,
+                .right = if (m.get("right")) |i| if (i == .integer) @as(i32, @intCast(i.integer)) else 0 else 0,
+                .bottom = if (m.get("bottom")) |i| if (i == .integer) @as(i32, @intCast(i.integer)) else 0 else 0,
+                .left = if (m.get("left")) |i| if (i == .integer) @as(i32, @intCast(i.integer)) else 0 else 0,
             };
         }
     }

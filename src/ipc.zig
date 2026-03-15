@@ -124,8 +124,12 @@ pub const IpcPool = struct {
         // Create Unix socket and connect
         const fd = socketConnect(path_str[0..path_len]) orelse {
             log.warn("ipc connect: failed to connect to {s}", .{path_str[0..path_len]});
-            // Schedule reconnect if configured
+            // Schedule reconnect if configured — root spec first since
+            // scheduleReconnect allocates (makeTuple) and spec is only on
+            // the C stack (unrooted fx map value, invisible to GC).
             if (reconnect_delay > 0) {
+                c.janet_gcroot(spec);
+                defer _ = c.janet_gcunroot(spec);
                 scheduleReconnect(spec, reconnect_delay, sink);
             }
             return;
