@@ -264,6 +264,11 @@ pub const Dispatch = struct {
         return out;
     }
 
+    /// Evaluate Janet source in the dispatch environment.
+    pub fn eval(self: *Dispatch, source: [:0]const u8, source_path: [:0]const u8) !Janet {
+        return doString(self.env, source, source_path);
+    }
+
     pub fn deinitDispatch(self: *Dispatch) void {
         _ = c.janet_gcunroot(self.db);
     }
@@ -294,7 +299,7 @@ fn tupleFirst(val: Janet) ?Janet {
 }
 
 /// Look up a keyword-keyed value in a Janet table or struct.
-fn janetGet(collection: Janet, key: Janet) Janet {
+pub fn janetGet(collection: Janet, key: Janet) Janet {
     if (c.janet_checktype(collection, c.JANET_TABLE) != 0) {
         const tbl = c.janet_unwrap_table(collection);
         return c.janet_table_get(tbl, key);
@@ -329,33 +334,59 @@ fn envLookup(env: *JanetTable, name: [:0]const u8) ?Janet {
 }
 
 /// Wrap a Zig string as a Janet keyword.
-fn kw(name: [:0]const u8) Janet {
+pub fn kw(name: [:0]const u8) Janet {
     return c.janet_ckeywordv(name.ptr);
 }
 
 /// Get current monotonic time in seconds.
 fn monotonicNow() f64 {
-    var ts: std.posix.timespec = undefined;
-    std.posix.clock_gettime(.MONOTONIC, &ts) catch return 0;
+    const ts = std.posix.clock_gettime(.MONOTONIC) catch return 0;
     return @as(f64, @floatFromInt(ts.sec)) + @as(f64, @floatFromInt(ts.nsec)) / 1_000_000_000.0;
 }
 
 /// Convert a Janet value to a string for logging.
 fn janetToStr(val: Janet) [*:0]const u8 {
-    return c.janet_tostring(val);
+    return @ptrCast(c.janet_to_string(val));
+}
+
+/// Construct a Janet tuple from a slice of values.
+pub fn makeTuple(items: []const Janet) Janet {
+    const buf = c.janet_tuple_begin(@intCast(items.len));
+    for (items, 0..) |item, i| {
+        buf[@intCast(i)] = item;
+    }
+    return c.janet_wrap_tuple(c.janet_tuple_end(buf));
+}
+
+/// Construct a single-keyword event tuple like [:init]
+pub fn makeEvent(name: [:0]const u8) Janet {
+    const items = [1]Janet{kw(name)};
+    return makeTuple(&items);
+}
+
+/// Construct an event tuple with arguments like [:event-id arg1 arg2 ...]
+pub fn makeEventArgs(name: [:0]const u8, args: []const Janet) Janet {
+    const n = args.len + 1;
+    const buf = c.janet_tuple_begin(@intCast(n));
+    buf[0] = kw(name);
+    for (args, 0..) |arg, i| {
+        buf[@intCast(i + 1)] = arg;
+    }
+    return c.janet_wrap_tuple(c.janet_tuple_end(buf));
 }
 
 const IndexedView = struct {
-    items: ?[*]const Janet,
+    items: ?[*c]const Janet,
     len: i32,
 };
 
 /// Get an indexed view (items + len) from a tuple or array.
 fn janetIndexedView(val: Janet) IndexedView {
-    var items: [*]const Janet = undefined;
+    var items: [*c]const Janet = null;
     var len: i32 = 0;
     if (c.janet_indexed_view(val, &items, &len) != 0) {
         return .{ .items = items, .len = len };
     }
     return .{ .items = null, .len = 0 };
 }
+

@@ -138,6 +138,26 @@ pub fn main() !void {
     try dispatch.initBoot();
     defer dispatch.deinitDispatch();
 
+    // -- End-to-end dispatch test --
+    // Register an :init handler that sets {:initialized true} in the db
+    _ = try dispatch.eval(
+        \\(reg-event-handler :init
+        \\  (fn [cofx event]
+        \\    {:db (merge (cofx :db) {:initialized true})}))
+    , "init-handler");
+
+    // Dispatch :init and verify the db was updated
+    dispatch.dispatch(janet.makeEvent("init"));
+    const init_val = janet.janetGet(dispatch.db, janet.kw("initialized"));
+    if (janet.c.janet_checktype(init_val, janet.c.JANET_BOOLEAN) != 0 and
+        janet.c.janet_unwrap_boolean(init_val) != 0)
+    {
+        log.info("dispatch test PASSED: db updated with :initialized true", .{});
+    } else {
+        log.err("dispatch test FAILED: db not updated after :init dispatch", .{});
+        return error.DispatchTestFailed;
+    }
+
     const display = try wl.Display.connect(null);
     defer display.disconnect();
 
