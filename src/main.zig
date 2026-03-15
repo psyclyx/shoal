@@ -4,14 +4,10 @@ const zwlr = @import("wayland").client.zwlr;
 const clay = @import("clay");
 const config_mod = @import("config.zig");
 const Config = config_mod.Config;
-const Theme = config_mod.Theme;
-const theme_mod = @import("theme.zig");
 const Renderer = @import("renderer.zig").Renderer;
 const TextRenderer = @import("text.zig").TextRenderer;
 const Layout = @import("layout.zig").Layout;
 const animation = @import("animation.zig");
-const modules_mod = @import("modules.zig");
-const ModuleManager = modules_mod.ModuleManager;
 const janet = @import("janet.zig");
 
 const c = @cImport({
@@ -115,14 +111,10 @@ var renderer: Renderer = undefined;
 var text_renderer: TextRenderer = undefined;
 var layout: Layout = undefined;
 var frame_clock: animation.FrameClock = animation.FrameClock.init();
-var module_manager: ModuleManager = undefined;
 var dispatch: janet.Dispatch = undefined;
 
 // Font ID for the primary font
-var primary_font_id: u16 = 0;
 
-// Animation state
-var bg_color: animation.Animated([4]f32) = animation.Animated([4]f32).init(.{ 0, 0, 0, 1 });
 
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
@@ -244,7 +236,7 @@ pub fn main() !void {
     text_renderer = try TextRenderer.init(allocator);
     defer text_renderer.deinit();
 
-    primary_font_id = text_renderer.loadFont(cfg.theme.font_family, cfg.theme.font_size) catch |err| blk: {
+    _ = text_renderer.loadFont(cfg.theme.font_family, cfg.theme.font_size) catch |err| blk: {
         log.warn("failed to load font \"{s}\": {}, falling back to monospace", .{ cfg.theme.font_family, err });
         break :blk text_renderer.loadFont("monospace", cfg.theme.font_size) catch return error.FontLoadFailed;
     };
@@ -252,16 +244,9 @@ pub fn main() !void {
     layout = try Layout.init(allocator, &text_renderer, &renderer);
     defer layout.deinit(allocator);
 
-    module_manager = try ModuleManager.init(allocator, cfg.moduleLayout());
-    defer module_manager.deinit();
-
-    // Initialize animated background from theme
-    bg_color.set(cfg.theme.background());
-
     log.info("shoal running on {d} output(s)", .{surface_count});
 
-    // Force initial module update + render
-    _ = module_manager.updateAll();
+    // Force initial render
     for (surfaces[0..surface_count]) |*surf| {
         if (surf.egl_surface != c.EGL_NO_SURFACE) {
             _ = renderSurface(surf);
@@ -283,12 +268,10 @@ pub fn main() !void {
 
         _ = display.flush();
 
-        // Poll Wayland fd + tidepool fd + spawn fds with timeout based on timers
-        const tp_fd = module_manager.provider.getFd();
-        var poll_fds: [42]std.posix.pollfd = undefined; // 2 base + 16 spawns + 8 ipc + headroom
+        // Poll Wayland fd + spawn fds + IPC fds with timeout based on timers
+        var poll_fds: [26]std.posix.pollfd = undefined; // 1 base + 16 spawns + 8 ipc + 1 headroom
         poll_fds[0] = .{ .fd = wl_fd, .events = std.posix.POLL.IN, .revents = 0 };
-        poll_fds[1] = .{ .fd = tp_fd orelse -1, .events = std.posix.POLL.IN, .revents = 0 };
-        var nfds: usize = if (tp_fd != null) 2 else 1;
+        var nfds: usize = 1;
         const spawn_fd_start = nfds;
         nfds += dispatch.fillSpawnPollFds(poll_fds[nfds..]);
         const ipc_fd_start = nfds;
@@ -337,12 +320,9 @@ pub fn main() !void {
             }
         }
 
-        // Check for data updates (tidepool, module timers, animations)
+        // Tick animations
         const dt = frame_clock.tick();
-        var changed = false;
-        if (bg_color.update(dt)) changed = true;
-        if (dispatch.tickAnimations(dt)) changed = true;
-        if (module_manager.updateAll()) changed = true;
+        var changed = dispatch.tickAnimations(dt);
 
         // Process any completion events from finished animations
         if (dispatch.processQueue()) {
@@ -411,83 +391,13 @@ fn renderSurface(surf: *Surface) bool {
     layout.setDimensions(w, h);
 
     layout.beginLayout();
-    // Try Janet view fn first; fall back to legacy declareUI
     dispatch.prepareRender();
-    if (!dispatch.renderView()) {
-        declareUI(surf.output_name[0..surf.output_name_len]);
-    }
+    _ = dispatch.renderView();
     layout.endLayout();
 
     renderer.end();
     _ = c.eglSwapBuffers(egl_display, surf.egl_surface);
     return true;
-}
-
-fn declareUI(output_name: []const u8) void {
-    const bg = bg_color.get();
-    const theme = &cfg.theme;
-
-    clay.UI()(.{
-        .id = clay.ElementId.ID("root"),
-        .layout = .{
-            .sizing = .{ .w = .grow, .h = .grow },
-            .padding = .{ .left = 8, .right = 8, .top = 0, .bottom = 0 },
-            .child_alignment = .{ .y = .center },
-            .direction = .left_to_right,
-        },
-        .background_color = theme_mod.toClay(bg),
-        .corner_radius = .all(8),
-    })({
-        clay.UI()(.{
-            .id = clay.ElementId.ID("left"),
-            .layout = .{
-                .sizing = .{ .w = .grow },
-                .child_gap = 6,
-                .child_alignment = .{ .y = .center },
-            },
-        })({
-            module_manager.renderSection(
-                module_manager.modules_left,
-                theme,
-                primary_font_id,
-                cfg.theme.font_size,
-                output_name,
-            );
-        });
-
-        clay.UI()(.{
-            .id = clay.ElementId.ID("center"),
-            .layout = .{
-                .sizing = .{ .w = .grow },
-                .child_alignment = .{ .x = .center, .y = .center },
-            },
-        })({
-            module_manager.renderSection(
-                module_manager.modules_center,
-                theme,
-                primary_font_id,
-                cfg.theme.font_size,
-                output_name,
-            );
-        });
-
-        clay.UI()(.{
-            .id = clay.ElementId.ID("right"),
-            .layout = .{
-                .sizing = .{ .w = .grow },
-                .child_gap = 6,
-                .child_alignment = .{ .x = .right, .y = .center },
-            },
-        })({
-            module_manager.renderSection(
-                module_manager.modules_right,
-                theme,
-                primary_font_id,
-                cfg.theme.font_size,
-                output_name,
-            );
-        });
-    });
 }
 
 // --- Type mapping ---

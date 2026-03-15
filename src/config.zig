@@ -1,10 +1,7 @@
 const std = @import("std");
 const log = std.log.scoped(.config);
 const theme_mod = @import("theme.zig");
-const modules_mod = @import("modules.zig");
 pub const Theme = theme_mod.Theme;
-pub const ModuleType = modules_mod.ModuleType;
-pub const ModuleLayout = modules_mod.ModuleLayout;
 
 pub const Config = struct {
     // Theme (global)
@@ -19,21 +16,6 @@ pub const Config = struct {
     margin: Margin = .{ .top = 4, .left = 6, .right = 6 },
     namespace: [:0]const u8 = "shoal",
     keyboard_interactivity: KeyboardInteractivity = .none,
-
-    // Module layout
-    modules_left: []const ModuleType = &.{.workspaces},
-    modules_center: []const ModuleType = &.{.title},
-    modules_right: []const ModuleType = &.{ .pulseaudio, .cpu, .memory, .network, .clock },
-    clock_format: []const u8 = "%H:%M",
-
-    pub fn moduleLayout(self: Config) ModuleLayout {
-        return .{
-            .modules_left = self.modules_left,
-            .modules_center = self.modules_center,
-            .modules_right = self.modules_right,
-            .clock_format = self.clock_format,
-        };
-    }
 
     pub const Layer = enum {
         background,
@@ -179,36 +161,6 @@ fn parseSurfaceFields(allocator: std.mem.Allocator, config: *Config, map: std.js
         }
     }
 
-    // Module layout
-    if (map.get("modules_left")) |v| {
-        if (parseModuleList(allocator, v)) |list| config.modules_left = list;
-    }
-    if (map.get("modules_center")) |v| {
-        if (parseModuleList(allocator, v)) |list| config.modules_center = list;
-    }
-    if (map.get("modules_right")) |v| {
-        if (parseModuleList(allocator, v)) |list| config.modules_right = list;
-    }
-    if (map.get("clock_format")) |v| {
-        if (v == .string) config.clock_format = try allocator.dupe(u8, v.string);
-    }
-}
-
-fn parseModuleList(allocator: std.mem.Allocator, val: std.json.Value) ?[]const ModuleType {
-    if (val != .array) return null;
-    const items = val.array.items;
-    const list = allocator.alloc(ModuleType, items.len) catch return null;
-    for (items, 0..) |item, i| {
-        if (item != .string) {
-            allocator.free(list);
-            return null;
-        }
-        list[i] = std.meta.stringToEnum(ModuleType, item.string) orelse {
-            allocator.free(list);
-            return null;
-        };
-    }
-    return list;
 }
 
 fn resolveConfigPath(allocator: std.mem.Allocator) ![:0]const u8 {
