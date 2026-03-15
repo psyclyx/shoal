@@ -280,6 +280,8 @@ pub const Dispatch = struct {
 
         // Call handler: (handler-fn cofx event) → fx-map
         const fx_map = self.pcall(handler_fn, &.{ cofx, event }) orelse return;
+        c.janet_gcroot(fx_map);
+        defer _ = c.janet_gcunroot(fx_map);
 
         // Execute effects
         self.executeFx(fx_map);
@@ -844,6 +846,8 @@ pub const Dispatch = struct {
 
         // Call the view function (no args) → hiccup tree
         const hiccup_tree = self.pcall(view_fn_val, &.{}) orelse return false;
+        c.janet_gcroot(hiccup_tree);
+        defer _ = c.janet_gcunroot(hiccup_tree);
 
         // Walk the hiccup tree, emitting Clay calls
         hiccup.walkHiccup(hiccup_tree);
