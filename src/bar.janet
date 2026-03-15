@@ -26,10 +26,11 @@
 # -- Workspace tags --
 
 (defn- tag-view [idx tag]
+  (def id (string "tag-" idx))
   (if (tag :focused)
-    [:row {:w 22 :h 22 :bg accent :radius 5 :align-x :center :align-y :center}
+    [:row {:id id :w 22 :h 22 :bg accent :radius 5 :align-x :center :align-y :center}
       [:text {:color bg :size 13} (string idx)]]
-    [:row {:w 22 :h 22 :radius 5 :align-x :center :align-y :center}
+    [:row {:id id :w 22 :h 22 :radius 5 :align-x :center :align-y :center}
       [:text {:color text-color :size 13} (string idx)]]))
 
 (defn- workspaces-view []
@@ -85,5 +86,15 @@
       (mem-view)
       (bat-view)
       (clock-view)]])
+
+# -- Click handler --
+
+(reg-event-handler :click
+  (fn [cofx event]
+    (def id (get event 1 ""))
+    (when (string/has-prefix? "tag-" id)
+      (def tag (scan-number (string/slice id 4)))
+      (when tag
+        {:dispatch [:tp/focus-tag tag]}))))
 
 (reg-view bar-view)
