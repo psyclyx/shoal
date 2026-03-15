@@ -25,16 +25,24 @@
     (reg-event-handler :id [:cofx :key1 :key2] handler-fn)
 
   Handler fn signature: (fn [cofx event] → fx-map or nil)
-  When cofx keys are declared, those cofx injectors run before the handler."
+  When cofx keys are declared, those cofx injectors run before the handler.
+
+  Multiple handlers can be registered for the same event-id. They are composed:
+  each handler sees the db as updated by previous handlers, and fx maps are merged."
   [event-id & args]
-  (match args
-    [cofx-keys handler-fn]
-    (put handlers event-id {:fn handler-fn :cofx cofx-keys})
+  (def entry
+    (match args
+      [cofx-keys handler-fn]
+      {:fn handler-fn :cofx cofx-keys}
 
-    [handler-fn]
-    (put handlers event-id {:fn handler-fn :cofx []})
+      [handler-fn]
+      {:fn handler-fn :cofx []}
 
-    _ (error "reg-event-handler: expected (id fn) or (id cofx-keys fn)")))
+      _ (error "reg-event-handler: expected (id fn) or (id cofx-keys fn)")))
+  (def existing (get handlers event-id))
+  (if existing
+    (put handlers event-id (array/push (if (array? existing) existing @[existing]) entry))
+    (put handlers event-id entry)))
 
 (defn reg-cofx
   "Register a cofx injector. Called before handlers that declare this cofx key.
@@ -55,9 +63,41 @@
 # --- Query API (for Zig to call) ---
 
 (defn get-handler
-  "Look up a handler entry by event-id. Returns {:fn ... :cofx ...} or nil."
+  "Look up a handler entry by event-id. Returns {:fn ... :cofx ...} or nil.
+  When multiple handlers are registered, returns a composed handler."
   [event-id]
-  (get handlers event-id))
+  (def entry (get handlers event-id))
+  (when entry
+    (if (array? entry)
+      # Compose multiple handlers: thread db, accumulate fx
+      (let [all-cofx (distinct (mapcat |($ :cofx) entry))]
+        {:fn (fn [cofx event]
+               (var fx @{})
+               (var dispatches @[])
+               (var timers @[])
+               (each h entry
+                 (def result ((h :fn) cofx event))
+                 (when result
+                   (when (result :db)
+                     (put cofx :db (result :db)))
+                   # Accumulate :dispatch and :dispatch-n
+                   (when (result :dispatch)
+                     (array/push dispatches (result :dispatch)))
+                   (when (result :dispatch-n)
+                     (array/concat dispatches (result :dispatch-n)))
+                   # Accumulate :timer into array
+                   (when (result :timer)
+                     (array/push timers (result :timer)))
+                   (merge-into fx result)))
+               # Replace with accumulated values
+               (when (> (length dispatches) 0)
+                 (put fx :dispatch-n dispatches)
+                 (put fx :dispatch nil))
+               (when (> (length timers) 0)
+                 (put fx :timer timers))
+               (if (next fx) fx nil))
+         :cofx all-cofx})
+      entry)))
 
 (defn get-cofx-injector
   "Look up a cofx injector by cofx-id. Returns fn or nil."

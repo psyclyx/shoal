@@ -15,8 +15,8 @@
                :year (d :year)
                :week-day (d :week-day)})}))
 
-# Start the clock on init — piggyback on existing :init via :dispatch
-(reg-event-handler :clock/start
+# Start the clock on :init
+(reg-event-handler :init
   (fn [cofx event]
     {:dispatch [:clock/tick]
      :timer {:delay 1.0 :event [:clock/tick] :repeat true :id :clock}}))

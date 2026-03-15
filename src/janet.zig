@@ -415,10 +415,23 @@ pub const Dispatch = struct {
     ///   {:id :name :cancel true}             — cancel a timer by id
     /// Optional :id key for named timers (enables cancellation/replacement).
     fn handleTimerFx(self: *Dispatch, val: Janet) void {
+        // Handle array of timer specs
+        if (c.janet_checktype(val, c.JANET_TUPLE) != 0 or
+            c.janet_checktype(val, c.JANET_ARRAY) != 0)
+        {
+            const view = janetIndexedView(val);
+            if (view.items) |items| {
+                for (0..@intCast(view.len)) |i| {
+                    self.handleTimerFx(items[i]);
+                }
+            }
+            return;
+        }
+
         if (c.janet_checktype(val, c.JANET_TABLE) == 0 and
             c.janet_checktype(val, c.JANET_STRUCT) == 0)
         {
-            log.warn("timer fx: expected table", .{});
+            log.warn("timer fx: expected table or array", .{});
             return;
         }
 
@@ -530,6 +543,13 @@ pub const Dispatch = struct {
             return @max(ms, 0);
         }
         return null;
+    }
+
+    pub fn hasActiveAnims(self: *const Dispatch) bool {
+        for (self.anims) |slot| {
+            if (slot.active) return true;
+        }
+        return false;
     }
 
     // -------------------------------------------------------------------

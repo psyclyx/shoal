@@ -131,12 +131,8 @@ pub fn main() !void {
     try dispatch.initBoot();
     defer dispatch.deinitDispatch();
 
-    // Dispatch :init event — tidepool connects, data sources are started below
+    // Dispatch :init — all modules register :init handlers (composed automatically)
     dispatch.enqueue(janet.makeEvent("init"));
-    dispatch.enqueue(janet.makeEvent("clock/start"));
-    dispatch.enqueue(janet.makeEvent("cpu/start"));
-    dispatch.enqueue(janet.makeEvent("mem/start"));
-    dispatch.enqueue(janet.makeEvent("bat/start"));
     _ = dispatch.processQueue();
 
     const display = try wl.Display.connect(null);
@@ -276,8 +272,11 @@ pub fn main() !void {
         nfds += dispatch.fillSpawnPollFds(poll_fds[nfds..]);
         const ipc_fd_start = nfds;
         nfds += dispatch.fillIpcPollFds(poll_fds[nfds..]);
-        const poll_timeout: i32 = dispatch.nextTimerTimeoutMs() orelse 100;
-        _ = std.posix.poll(poll_fds[0..nfds], @min(poll_timeout, 100)) catch 0;
+        const poll_timeout: i32 = if (dispatch.hasActiveAnims())
+            16 // ~60fps for active animations
+        else
+            dispatch.nextTimerTimeoutMs() orelse -1; // -1 = block until event
+        _ = std.posix.poll(poll_fds[0..nfds], poll_timeout) catch 0;
 
         if (poll_fds[0].revents & std.posix.POLL.IN != 0) {
             if (display.readEvents() != .SUCCESS) break;

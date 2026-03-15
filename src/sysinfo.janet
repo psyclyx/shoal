@@ -35,7 +35,7 @@
                                     :prev-idle idle
                                     :prev-total total})}))))
 
-(reg-event-handler :cpu/start
+(reg-event-handler :init
   (fn [cofx event]
     {:dispatch [:cpu/tick]
      :timer {:delay 2.0 :event [:cpu/tick] :repeat true :id :cpu}}))
@@ -78,7 +78,7 @@
                                     :total-mb total-mb
                                     :percent (math/floor (* 100 (/ (- total-kb avail-kb) total-kb)))})}))))
 
-(reg-event-handler :mem/start
+(reg-event-handler :init
   (fn [cofx event]
     {:dispatch [:mem/tick]
      :timer {:delay 5.0 :event [:mem/tick] :repeat true :id :mem}}))
@@ -110,7 +110,7 @@
                                     :present true})})
       {:db (put (cofx :db) :bat {:present false})})))
 
-(reg-event-handler :bat/start
+(reg-event-handler :init
   (fn [cofx event]
     {:dispatch [:bat/tick]
      :timer {:delay 10.0 :event [:bat/tick] :repeat true :id :bat}}))
