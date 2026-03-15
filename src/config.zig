@@ -124,13 +124,13 @@ fn parseSurfaceFields(allocator: std.mem.Allocator, config: *Config, map: std.js
         if (v == .string) config.layer = std.meta.stringToEnum(Config.Layer, v.string) orelse config.layer;
     }
     if (map.get("width")) |v| {
-        if (v == .integer) config.width = @intCast(@max(0, v.integer));
+        if (v == .integer) config.width = std.math.cast(u32, @max(0, v.integer)) orelse config.width;
     }
     if (map.get("height")) |v| {
-        if (v == .integer) config.height = @intCast(@max(0, v.integer));
+        if (v == .integer) config.height = std.math.cast(u32, @max(0, v.integer)) orelse config.height;
     }
     if (map.get("exclusive_zone")) |v| {
-        if (v == .integer) config.exclusive_zone = @intCast(v.integer);
+        if (v == .integer) config.exclusive_zone = std.math.cast(i32, v.integer) orelse config.exclusive_zone;
     }
     if (map.get("namespace")) |v| {
         if (v == .string) config.namespace = try allocator.dupeZ(u8, v.string);
@@ -153,10 +153,10 @@ fn parseSurfaceFields(allocator: std.mem.Allocator, config: *Config, map: std.js
         if (v == .object) {
             const m = v.object;
             config.margin = .{
-                .top = if (m.get("top")) |i| if (i == .integer) @as(i32, @intCast(i.integer)) else 0 else 0,
-                .right = if (m.get("right")) |i| if (i == .integer) @as(i32, @intCast(i.integer)) else 0 else 0,
-                .bottom = if (m.get("bottom")) |i| if (i == .integer) @as(i32, @intCast(i.integer)) else 0 else 0,
-                .left = if (m.get("left")) |i| if (i == .integer) @as(i32, @intCast(i.integer)) else 0 else 0,
+                .top = if (m.get("top")) |i| if (i == .integer) std.math.cast(i32, i.integer) orelse 0 else 0 else 0,
+                .right = if (m.get("right")) |i| if (i == .integer) std.math.cast(i32, i.integer) orelse 0 else 0 else 0,
+                .bottom = if (m.get("bottom")) |i| if (i == .integer) std.math.cast(i32, i.integer) orelse 0 else 0 else 0,
+                .left = if (m.get("left")) |i| if (i == .integer) std.math.cast(i32, i.integer) orelse 0 else 0 else 0,
             };
         }
     }
