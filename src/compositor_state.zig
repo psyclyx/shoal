@@ -44,6 +44,8 @@ pub const OutputInfo = struct {
     y: i32 = 0,
     w: i32 = 0,
     h: i32 = 0,
+    name: [64]u8 = undefined,
+    name_len: usize = 0,
     tags: [11]TagInfo = [_]TagInfo{.{}} ** 11,
     layout: [32]u8 = undefined,
     layout_len: usize = 0,
@@ -57,6 +59,10 @@ pub const OutputInfo = struct {
     total_content_w: f32 = 0,
     column_widths: [32]f32 = [_]f32{0} ** 32,
     column_count: usize = 0,
+
+    pub fn getName(self: *const OutputInfo) []const u8 {
+        return self.name[0..self.name_len];
+    }
 
     pub fn getLayout(self: *const OutputInfo) []const u8 {
         return self.layout[0..self.layout_len];
@@ -117,6 +123,14 @@ pub const CompositorState = struct {
     pub fn getOutput(self: *const CompositorState, x: i32, y: i32) ?*const OutputInfo {
         for (self.outputs[0..self.output_count]) |*o| {
             if (o.x == x and o.y == y) return o;
+        }
+        return null;
+    }
+
+    pub fn getOutputByName(self: *const CompositorState, name: []const u8) ?*const OutputInfo {
+        if (name.len == 0) return null;
+        for (self.outputs[0..self.output_count]) |*o| {
+            if (o.name_len > 0 and std.mem.eql(u8, o.name[0..o.name_len], name)) return o;
         }
         return null;
     }

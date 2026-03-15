@@ -39,9 +39,11 @@ const Surface = struct {
     configured: bool = false,
     frame_pending: bool = false,
     frame_requested_ms: i64 = 0,
-    // Output geometry from wl_output events (for matching tidepool outputs)
+    // Output identity from wl_output events (for matching tidepool outputs)
     output_x: i32 = 0,
     output_y: i32 = 0,
+    output_name: [64]u8 = undefined,
+    output_name_len: usize = 0,
 
     const frame_watchdog_ms: i64 = 500;
 
@@ -355,7 +357,7 @@ fn renderSurface(surf: *Surface) bool {
     layout.setDimensions(w, h);
 
     layout.beginLayout();
-    declareUI(surf.output_x, surf.output_y);
+    declareUI(surf.output_name[0..surf.output_name_len]);
     layout.endLayout();
 
     renderer.end();
@@ -363,7 +365,7 @@ fn renderSurface(surf: *Surface) bool {
     return true;
 }
 
-fn declareUI(output_x: i32, output_y: i32) void {
+fn declareUI(output_name: []const u8) void {
     const bg = bg_color.get();
     const theme = &cfg.theme;
 
@@ -391,8 +393,7 @@ fn declareUI(output_x: i32, output_y: i32) void {
                 theme,
                 primary_font_id,
                 cfg.theme.font_size,
-                output_x,
-                output_y,
+                output_name,
             );
         });
 
@@ -408,8 +409,7 @@ fn declareUI(output_x: i32, output_y: i32) void {
                 theme,
                 primary_font_id,
                 cfg.theme.font_size,
-                output_x,
-                output_y,
+                output_name,
             );
         });
 
@@ -426,8 +426,7 @@ fn declareUI(output_x: i32, output_y: i32) void {
                 theme,
                 primary_font_id,
                 cfg.theme.font_size,
-                output_x,
-                output_y,
+                output_name,
             );
         });
     });
@@ -493,6 +492,13 @@ fn outputListener(_: *wl.Output, event: wl.Output.Event, surf: *Surface) void {
         .geometry => |geo| {
             surf.output_x = geo.x;
             surf.output_y = geo.y;
+        },
+        .name => |name_ev| {
+            const name = std.mem.span(name_ev.name);
+            const len = @min(name.len, surf.output_name.len);
+            @memcpy(surf.output_name[0..len], name[0..len]);
+            surf.output_name_len = len;
+            log.info("output name: {s} at ({d},{d})", .{ surf.output_name[0..surf.output_name_len], surf.output_x, surf.output_y });
         },
         else => {},
     }

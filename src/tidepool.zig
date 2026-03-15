@@ -349,7 +349,13 @@ pub const TidepoolClient = struct {
                     // Find or create output entry
                     const out_x = jsonI32(out_map, "x");
                     const out_y = jsonI32(out_map, "y");
+                    const out_name = jsonStr(out_map, "name");
                     const oi = self.findOrCreateOutput(out_x, out_y);
+                    if (out_name.len > 0) {
+                        const nlen = @min(out_name.len, oi.name.len);
+                        @memcpy(oi.name[0..nlen], out_name[0..nlen]);
+                        oi.name_len = nlen;
+                    }
 
                     // Reset this output's tags
                     for (&oi.tags) |*t| t.* = .{};
@@ -423,7 +429,13 @@ pub const TidepoolClient = struct {
 
                 const out_x = jsonI32(out_map, "x");
                 const out_y = jsonI32(out_map, "y");
+                const out_name = jsonStr(out_map, "name");
                 const oi = self.findOrCreateOutput(out_x, out_y);
+                if (out_name.len > 0) {
+                    const nlen = @min(out_name.len, oi.name.len);
+                    @memcpy(oi.name[0..nlen], out_name[0..nlen]);
+                    oi.name_len = nlen;
+                }
 
                 const is_focused = blk: {
                     const f = out_map.get("focused") orelse break :blk false;
@@ -622,6 +634,12 @@ pub const TidepoolClient = struct {
         }
         // Overflow — reuse last
         return &self.state.outputs[self.state.outputs.len - 1];
+    }
+
+    fn jsonStr(map: std.json.ObjectMap, key: []const u8) []const u8 {
+        const v = map.get(key) orelse return "";
+        if (v != .string) return "";
+        return v.string;
     }
 
     fn jsonI32(map: std.json.ObjectMap, key: []const u8) i32 {

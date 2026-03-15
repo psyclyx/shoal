@@ -891,11 +891,10 @@ pub const ModuleManager = struct {
         theme: *const Theme,
         font_id: u16,
         font_size: u16,
-        output_x: i32,
-        output_y: i32,
+        output_name: []const u8,
     ) void {
         const state_ptr: ?*const cs.CompositorState = if (self.compositor_state != null) &self.compositor_state.? else null;
-        const output_ptr: ?*const cs.OutputInfo = if (state_ptr) |s| s.getOutput(output_x, output_y) orelse s.getFocusedOutput() else null;
+        const output_ptr: ?*const cs.OutputInfo = if (state_ptr) |s| s.getOutputByName(output_name) orelse s.getFocusedOutput() else null;
         for (modules) |*m| {
             if (m.getText(state_ptr)) |text| {
                 // Text module — wrap in section styling
