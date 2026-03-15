@@ -3,27 +3,102 @@
 let
   cfg = config.programs.shoal;
 
-  # Check if stylix is available and enabled
   hasStylix = (config ? stylix) && (config.stylix.enable or false);
 
-  # Build the config JSON
+  surfaceType = lib.types.submodule {
+    options = {
+      layer = lib.mkOption {
+        type = lib.types.enum [ "background" "bottom" "top" "overlay" ];
+        default = "top";
+      };
+
+      anchor = lib.mkOption {
+        type = lib.types.submodule {
+          options = {
+            top = lib.mkOption { type = lib.types.bool; default = true; };
+            bottom = lib.mkOption { type = lib.types.bool; default = false; };
+            left = lib.mkOption { type = lib.types.bool; default = true; };
+            right = lib.mkOption { type = lib.types.bool; default = true; };
+          };
+        };
+        default = {};
+      };
+
+      width = lib.mkOption {
+        type = lib.types.ints.unsigned;
+        default = 0;
+      };
+
+      height = lib.mkOption {
+        type = lib.types.ints.unsigned;
+        default = 40;
+      };
+
+      exclusive_zone = lib.mkOption {
+        type = lib.types.int;
+        default = 44;
+      };
+
+      margin = lib.mkOption {
+        type = lib.types.submodule {
+          options = {
+            top = lib.mkOption { type = lib.types.int; default = 0; };
+            right = lib.mkOption { type = lib.types.int; default = 0; };
+            bottom = lib.mkOption { type = lib.types.int; default = 0; };
+            left = lib.mkOption { type = lib.types.int; default = 0; };
+          };
+        };
+        default = {};
+      };
+
+      namespace = lib.mkOption {
+        type = lib.types.str;
+        default = "shoal";
+      };
+
+      keyboard_interactivity = lib.mkOption {
+        type = lib.types.enum [ "none" "exclusive" "on_demand" ];
+        default = "none";
+      };
+
+      modules_left = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [ "workspaces" ];
+        description = "Modules for the left section";
+      };
+
+      modules_center = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [ "title" ];
+        description = "Modules for the center section";
+      };
+
+      modules_right = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [ "pulseaudio" "cpu" "memory" "network" "clock" ];
+        description = "Modules for the right section";
+      };
+
+      clock_format = lib.mkOption {
+        type = lib.types.str;
+        default = "%H:%M";
+        description = "Clock format string";
+      };
+    };
+  };
+
+  # Build config JSON from theme + surfaces
+  surfaceList = lib.mapAttrsToList (_: surf: {
+    inherit (surf)
+      layer width height exclusive_zone margin namespace
+      keyboard_interactivity modules_left modules_center
+      modules_right clock_format;
+    anchor = lib.filterAttrs (_: v: v) surf.anchor;
+  }) cfg.surfaces;
+
   configJson = builtins.toJSON (
-    (lib.filterAttrs (n: v: v != null) {
-      layer = cfg.layer;
-      anchor = cfg.anchor;
-      width = cfg.width;
-      height = cfg.height;
-      exclusive_zone = cfg.exclusive_zone;
-      margin = cfg.margin;
-      namespace = cfg.namespace;
-      keyboard_interactivity = cfg.keyboard_interactivity;
-      modules_left = cfg.modules_left;
-      modules_center = cfg.modules_center;
-      modules_right = cfg.modules_right;
-      clock_format = cfg.clock_format;
-    }) // lib.optionalAttrs (cfg.theme != {}) {
-      theme = cfg.theme;
-    }
+    { surfaces = surfaceList; }
+    // lib.optionalAttrs (cfg.theme != {}) { theme = cfg.theme; }
   );
 
 in {
@@ -34,121 +109,49 @@ in {
       default = pkgs.shoal;
     };
 
-    # Surface options
-    layer = lib.mkOption {
-      type = lib.types.nullOr (lib.types.enum [ "background" "bottom" "top" "overlay" ]);
-      default = null;
-      description = "Layer shell layer";
-    };
-
-    anchor = lib.mkOption {
-      type = lib.types.nullOr (lib.types.submodule {
-        options = {
-          top = lib.mkOption { type = lib.types.bool; default = false; };
-          bottom = lib.mkOption { type = lib.types.bool; default = false; };
-          left = lib.mkOption { type = lib.types.bool; default = false; };
-          right = lib.mkOption { type = lib.types.bool; default = false; };
-        };
-      });
-      default = null;
-      description = "Anchor edges";
-    };
-
-    width = lib.mkOption {
-      type = lib.types.nullOr lib.types.ints.unsigned;
-      default = null;
-    };
-
-    height = lib.mkOption {
-      type = lib.types.nullOr lib.types.ints.unsigned;
-      default = null;
-    };
-
-    exclusive_zone = lib.mkOption {
-      type = lib.types.nullOr lib.types.int;
-      default = null;
-    };
-
-    margin = lib.mkOption {
-      type = lib.types.nullOr (lib.types.submodule {
-        options = {
-          top = lib.mkOption { type = lib.types.int; default = 0; };
-          right = lib.mkOption { type = lib.types.int; default = 0; };
-          bottom = lib.mkOption { type = lib.types.int; default = 0; };
-          left = lib.mkOption { type = lib.types.int; default = 0; };
-        };
-      });
-      default = null;
-    };
-
-    namespace = lib.mkOption {
-      type = lib.types.nullOr lib.types.str;
-      default = null;
-    };
-
-    keyboard_interactivity = lib.mkOption {
-      type = lib.types.nullOr (lib.types.enum [ "none" "exclusive" "on_demand" ]);
-      default = null;
-    };
-
-    # Bar module layout
-    modules_left = lib.mkOption {
-      type = lib.types.nullOr (lib.types.listOf lib.types.str);
-      default = null;
-      description = "Modules for the left section of the bar";
-      example = [ "workspaces" ];
-    };
-
-    modules_center = lib.mkOption {
-      type = lib.types.nullOr (lib.types.listOf lib.types.str);
-      default = null;
-      description = "Modules for the center section of the bar";
-      example = [ "title" ];
-    };
-
-    modules_right = lib.mkOption {
-      type = lib.types.nullOr (lib.types.listOf lib.types.str);
-      default = null;
-      description = "Modules for the right section of the bar";
-      example = [ "pulseaudio" "cpu" "memory" "network" "clock" ];
-    };
-
-    clock_format = lib.mkOption {
-      type = lib.types.nullOr lib.types.str;
-      default = null;
-      description = "Clock format string (strftime-like: %H %I %M %S %m %d %Y %y %p)";
-      example = "%I:%M %p";
-    };
-
-    # Theme options - base16 colors
-    theme = lib.mkOption {
-      type = lib.types.attrsOf lib.types.str;
+    surfaces = lib.mkOption {
+      type = lib.types.attrsOf surfaceType;
       default = {};
-      description = "Base16 theme colors. Keys are base00-base0F, values are hex color strings like '#1e1e2e'.";
-      example = {
-        base00 = "#1e1e2e";
-        base05 = "#cdd6f4";
-        base0D = "#89b4fa";
-      };
+      description = "Named surfaces. Each surface creates a layer-shell surface on all outputs.";
+    };
+
+    theme = lib.mkOption {
+      type = lib.types.attrsOf (lib.types.either lib.types.str lib.types.ints.positive);
+      default = {};
+      description = "Base16 theme colors and font config.";
     };
   };
 
   config = lib.mkIf cfg.enable (lib.mkMerge [
     {
       home.packages = [ cfg.package ];
+
+      systemd.user.services.shoal = {
+        Unit = {
+          Description = "Shoal wayland shell";
+          PartOf = [ "graphical-session.target" ];
+          After = [ "graphical-session.target" ];
+        };
+        Service = {
+          ExecStart = lib.getExe cfg.package;
+          Restart = "on-failure";
+          RestartSec = 2;
+        };
+        Install.WantedBy = [ "graphical-session.target" ];
+      };
     }
 
-    # Generate config file if any options are set
-    (lib.mkIf (cfg.theme != {} || cfg.layer != null || cfg.width != null || cfg.height != null
-               || cfg.modules_left != null || cfg.modules_center != null || cfg.modules_right != null) {
+    # Generate config file when surfaces or theme are configured
+    (lib.mkIf (cfg.surfaces != {} || cfg.theme != {}) {
       xdg.configFile."shoal/config.json".text = configJson;
     })
 
-    # Stylix integration: inject base16 colors as theme defaults
+    # Stylix integration
     (lib.mkIf hasStylix {
       programs.shoal.theme = let
         colors = config.lib.stylix.colors;
-      in lib.mkDefault {
+        fonts = config.stylix.fonts;
+      in lib.mkDefault ({
         base00 = "#${colors.base00}";
         base01 = "#${colors.base01}";
         base02 = "#${colors.base02}";
@@ -165,7 +168,9 @@ in {
         base0D = "#${colors.base0D}";
         base0E = "#${colors.base0E}";
         base0F = "#${colors.base0F}";
-      };
+        font_family = fonts.monospace.name;
+        font_size = fonts.sizes.desktop;
+      });
     })
   ]);
 }

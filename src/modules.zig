@@ -2,7 +2,9 @@ const std = @import("std");
 const clay = @import("clay");
 const theme_mod = @import("theme.zig");
 const Theme = theme_mod.Theme;
-const tidepool = @import("tidepool.zig");
+const cs = @import("compositor_state.zig");
+const provider_mod = @import("provider.zig");
+const DataProvider = provider_mod.DataProvider;
 
 const libc = @cImport({
     @cInclude("time.h");
@@ -23,6 +25,8 @@ pub const ModuleType = enum {
     pulseaudio,
     workspaces,
     title,
+    minimap,
+    signal,
     custom,
 };
 
@@ -39,6 +43,8 @@ pub const Module = union(ModuleType) {
     pulseaudio: PulseAudio,
     workspaces: Workspaces,
     title: Title,
+    minimap: Minimap,
+    signal: Signal,
     custom: Custom,
 
     pub fn update(self: *Module) void {
@@ -47,9 +53,17 @@ pub const Module = union(ModuleType) {
         }
     }
 
-    pub fn render(self: *const Module, theme: *const Theme, font_id: u16, font_size: u16) void {
+    /// Returns text content if this module produces text, null for widget modules.
+    pub fn getText(self: *Module, state: ?*const cs.CompositorState) ?[]const u8 {
+        return switch (self.*) {
+            inline else => |*v| v.getText(state),
+        };
+    }
+
+    /// Widget render — only called for modules where getText returns null.
+    pub fn render(self: *const Module, state: ?*const cs.CompositorState, theme: *const Theme, font_id: u16, font_size: u16) void {
         switch (self.*) {
-            inline else => |*v| v.render(theme, font_id, font_size),
+            inline else => |*v| v.render(state, theme, font_id, font_size),
         }
     }
 
@@ -71,10 +85,10 @@ pub const Module = union(ModuleType) {
 };
 
 // ---------------------------------------------------------------------------
-// Config types
+// Module layout config
 // ---------------------------------------------------------------------------
 
-pub const BarConfig = struct {
+pub const ModuleLayout = struct {
     modules_left: []const ModuleType = &.{.workspaces},
     modules_center: []const ModuleType = &.{.title},
     modules_right: []const ModuleType = &.{ .pulseaudio, .cpu, .memory, .network, .clock },
@@ -164,10 +178,11 @@ pub const Clock = struct {
         self.text_len = pos;
     }
 
-    pub fn render(self: *const Clock, theme: *const Theme, font_id: u16, font_size: u16) void {
-        if (self.text_len == 0) return;
-        renderAccentPill(self.text[0..self.text_len], theme, font_id, font_size);
+    pub fn getText(self: *const Clock, _: ?*const cs.CompositorState) ?[]const u8 {
+        return if (self.text_len > 0) self.text[0..self.text_len] else null;
     }
+
+    pub fn render(_: *const Clock, _: ?*const cs.CompositorState, _: *const Theme, _: u16, _: u16) void {}
 };
 
 // ---------------------------------------------------------------------------
@@ -215,10 +230,11 @@ pub const Cpu = struct {
         self.text_len = result.len;
     }
 
-    pub fn render(self: *const Cpu, theme: *const Theme, font_id: u16, font_size: u16) void {
-        if (self.text_len == 0) return;
-        renderPill(self.text[0..self.text_len], theme, font_id, font_size);
+    pub fn getText(self: *const Cpu, _: ?*const cs.CompositorState) ?[]const u8 {
+        return if (self.text_len > 0) self.text[0..self.text_len] else null;
     }
+
+    pub fn render(_: *const Cpu, _: ?*const cs.CompositorState, _: *const Theme, _: u16, _: u16) void {}
 };
 
 // ---------------------------------------------------------------------------
@@ -262,10 +278,11 @@ pub const Memory = struct {
         }
     }
 
-    pub fn render(self: *const Memory, theme: *const Theme, font_id: u16, font_size: u16) void {
-        if (self.text_len == 0) return;
-        renderPill(self.text[0..self.text_len], theme, font_id, font_size);
+    pub fn getText(self: *const Memory, _: ?*const cs.CompositorState) ?[]const u8 {
+        return if (self.text_len > 0) self.text[0..self.text_len] else null;
     }
+
+    pub fn render(_: *const Memory, _: ?*const cs.CompositorState, _: *const Theme, _: u16, _: u16) void {}
 };
 
 // ---------------------------------------------------------------------------
@@ -308,10 +325,11 @@ pub const Battery = struct {
         }
     }
 
-    pub fn render(self: *const Battery, theme: *const Theme, font_id: u16, font_size: u16) void {
-        if (!self.present or self.text_len == 0) return;
-        renderPill(self.text[0..self.text_len], theme, font_id, font_size);
+    pub fn getText(self: *const Battery, _: ?*const cs.CompositorState) ?[]const u8 {
+        return if (self.present and self.text_len > 0) self.text[0..self.text_len] else null;
     }
+
+    pub fn render(_: *const Battery, _: ?*const cs.CompositorState, _: *const Theme, _: u16, _: u16) void {}
 };
 
 // ---------------------------------------------------------------------------
@@ -380,10 +398,11 @@ pub const PulseAudio = struct {
         self.text_len = result.len;
     }
 
-    pub fn render(self: *const PulseAudio, theme: *const Theme, font_id: u16, font_size: u16) void {
-        if (self.text_len == 0) return;
-        renderPill(self.text[0..self.text_len], theme, font_id, font_size);
+    pub fn getText(self: *const PulseAudio, _: ?*const cs.CompositorState) ?[]const u8 {
+        return if (self.text_len > 0) self.text[0..self.text_len] else null;
     }
+
+    pub fn render(_: *const PulseAudio, _: ?*const cs.CompositorState, _: *const Theme, _: u16, _: u16) void {}
 };
 
 // ---------------------------------------------------------------------------
@@ -458,19 +477,20 @@ pub const Network = struct {
         self.text_len = result.len;
     }
 
-    pub fn render(self: *const Network, theme: *const Theme, font_id: u16, font_size: u16) void {
-        if (self.text_len == 0) return;
-        renderPill(self.text[0..self.text_len], theme, font_id, font_size);
+    pub fn getText(self: *const Network, _: ?*const cs.CompositorState) ?[]const u8 {
+        return if (self.text_len > 0) self.text[0..self.text_len] else null;
     }
+
+    pub fn render(_: *const Network, _: ?*const cs.CompositorState, _: *const Theme, _: u16, _: u16) void {}
 };
 
 // ---------------------------------------------------------------------------
-// Workspaces (driven by TidepoolClient in ModuleManager)
+// Workspaces (compositor state driven — widget module)
 // ---------------------------------------------------------------------------
 
 pub const Workspaces = struct {
     last_update_ms: i64 = 0,
-    interval_ms: i64 = 0, // event-driven
+    interval_ms: i64 = 0,
 
     pub fn init() Workspaces {
         return .{};
@@ -478,21 +498,71 @@ pub const Workspaces = struct {
 
     pub fn update(_: *Workspaces) void {}
 
-    pub fn render(_: *const Workspaces, theme: *const Theme, font_id: u16, font_size: u16) void {
-        // Actual rendering happens via ModuleManager.renderWorkspaces
-        _ = theme;
-        _ = font_id;
-        _ = font_size;
+    pub fn getText(_: *const Workspaces, _: ?*const cs.CompositorState) ?[]const u8 {
+        return null;
+    }
+
+    pub fn render(_: *const Workspaces, state: ?*const cs.CompositorState, theme: *const Theme, font_id: u16, font_size: u16) void {
+        const s = state orelse return;
+
+        clay.UI()(.{
+            .id = clay.ElementId.ID("ws_group"),
+            .layout = .{
+                .child_gap = 3,
+                .child_alignment = .{ .y = .center },
+            },
+        })({
+            for (s.tags[1..10], 0..) |tag, i| {
+                if (!tag.focused and !tag.occupied) continue;
+
+                var num_buf: [2]u8 = undefined;
+                const num_str = std.fmt.bufPrint(&num_buf, "{d}", .{i + 1}) catch continue;
+
+                if (tag.focused) {
+                    clay.UI()(.{
+                        .id = clay.ElementId.IDI("tag", @intCast(i)),
+                        .layout = .{
+                            .sizing = .{ .w = .fixed(24), .h = .fixed(24) },
+                            .child_alignment = .{ .x = .center, .y = .center },
+                        },
+                        .background_color = theme_mod.toClay(theme.accent()),
+                        .corner_radius = .all(6),
+                    })({
+                        clay.text(num_str, .{
+                            .color = theme_mod.toClay(theme.background()),
+                            .font_id = font_id,
+                            .font_size = font_size,
+                        });
+                    });
+                } else {
+                    clay.UI()(.{
+                        .id = clay.ElementId.IDI("tag", @intCast(i)),
+                        .layout = .{
+                            .sizing = .{ .w = .fixed(24), .h = .fixed(24) },
+                            .child_alignment = .{ .x = .center, .y = .center },
+                        },
+                        .background_color = theme_mod.toClay(theme.surface()),
+                        .corner_radius = .all(6),
+                    })({
+                        clay.text(num_str, .{
+                            .color = theme_mod.toClay(theme.subtle()),
+                            .font_id = font_id,
+                            .font_size = font_size,
+                        });
+                    });
+                }
+            }
+        });
     }
 };
 
 // ---------------------------------------------------------------------------
-// Title (driven by TidepoolClient in ModuleManager)
+// Title (compositor state driven — text module)
 // ---------------------------------------------------------------------------
 
 pub const Title = struct {
     last_update_ms: i64 = 0,
-    interval_ms: i64 = 0, // event-driven
+    interval_ms: i64 = 0,
 
     pub fn init() Title {
         return .{};
@@ -500,11 +570,200 @@ pub const Title = struct {
 
     pub fn update(_: *Title) void {}
 
-    pub fn render(_: *const Title, theme: *const Theme, font_id: u16, font_size: u16) void {
-        _ = theme;
-        _ = font_id;
-        _ = font_size;
+    pub fn getText(_: *const Title, state: ?*const cs.CompositorState) ?[]const u8 {
+        const s = state orelse return null;
+        const t = s.getTitle();
+        return if (t.len > 0) t else null;
     }
+
+    pub fn render(_: *const Title, _: ?*const cs.CompositorState, _: *const Theme, _: u16, _: u16) void {}
+};
+
+// ---------------------------------------------------------------------------
+// Minimap (compositor state driven — widget module)
+// ---------------------------------------------------------------------------
+
+pub const Minimap = struct {
+    last_update_ms: i64 = 0,
+    interval_ms: i64 = 0,
+
+    pub fn init() Minimap {
+        return .{};
+    }
+
+    pub fn update(_: *Minimap) void {}
+
+    pub fn getText(_: *const Minimap, _: ?*const cs.CompositorState) ?[]const u8 {
+        return null;
+    }
+
+    pub fn render(_: *const Minimap, state: ?*const cs.CompositorState, theme: *const Theme, _: u16, _: u16) void {
+        const s = state orelse return;
+        const output = s.getFocusedOutput() orelse return;
+        if (output.column_count == 0) return;
+
+        const usable_w: f32 = @floatFromInt(output.usable_w);
+        const usable_h: f32 = @floatFromInt(output.usable_h);
+        if (usable_w <= 0 or usable_h <= 0) return;
+
+        const total_w = output.total_content_w;
+        if (total_w <= 0) return;
+
+        const minimap_h: f32 = 28;
+        const aspect = total_w / usable_h;
+        const minimap_w: f32 = @min(200, @max(60, minimap_h * aspect));
+        const scale_x = minimap_w / total_w;
+        const scale_y = minimap_h / usable_h;
+
+        var active_tag: u8 = 0;
+        for (output.tags, 0..) |tag, i| {
+            if (tag.focused) {
+                active_tag = @intCast(i);
+                break;
+            }
+        }
+
+        clay.UI()(.{
+            .id = clay.ElementId.ID("minimap"),
+            .layout = .{
+                .sizing = .{ .w = .fixed(minimap_w + 4), .h = .fixed(minimap_h + 4) },
+                .padding = .{ .left = 2, .right = 2, .top = 2, .bottom = 2 },
+                .child_alignment = .{ .y = .center },
+            },
+            .background_color = theme_mod.toClay(theme.surface()),
+            .corner_radius = .all(4),
+        })({
+            clay.UI()(.{
+                .id = clay.ElementId.ID("minimap_cols"),
+                .layout = .{
+                    .sizing = .{ .w = .fixed(minimap_w), .h = .fixed(minimap_h) },
+                    .child_gap = 1,
+                    .direction = .left_to_right,
+                },
+            })({
+                var col_x: f32 = 0;
+                for (0..output.column_count) |ci| {
+                    const col_w_px = output.column_widths[ci];
+                    const strip_w = @max(2, col_w_px * scale_x);
+
+                    const col_right = col_x + col_w_px;
+                    const vp_left = output.scroll_offset;
+                    const vp_right = output.scroll_offset + usable_w;
+                    const visible = col_right > vp_left and col_x < vp_right;
+
+                    var win_count: u8 = 0;
+                    var has_focused = false;
+                    for (s.windows[0..s.window_count]) |*w| {
+                        if (w.tag != active_tag or w.float or !w.visible) continue;
+                        if (w.column_total > 0 and w.column == @as(u8, @intCast(ci))) {
+                            win_count += 1;
+                            if (w.focused) has_focused = true;
+                        }
+                    }
+
+                    const strip_bg = if (has_focused)
+                        theme_mod.toClay(theme.accent())
+                    else if (visible)
+                        theme_mod.toClay(theme.overlay())
+                    else
+                        theme_mod.toClay(theme.muted());
+
+                    var bg = strip_bg;
+                    if (!visible) bg[3] = bg[3] * 0.4;
+
+                    clay.UI()(.{
+                        .id = clay.ElementId.IDI("mm_col", @intCast(ci)),
+                        .layout = .{
+                            .sizing = .{ .w = .fixed(strip_w), .h = .grow },
+                            .direction = .top_to_bottom,
+                            .child_gap = 1,
+                            .padding = .{ .top = 1, .bottom = 1, .left = 1, .right = 1 },
+                        },
+                        .background_color = bg,
+                        .corner_radius = .all(2),
+                    })({
+                        if (win_count > 0) {
+                            for (s.windows[0..s.window_count]) |*w| {
+                                if (w.tag != active_tag or w.float or !w.visible) continue;
+                                if (w.column_total == 0 or w.column != @as(u8, @intCast(ci))) continue;
+
+                                const win_h: f32 = if (w.h > 0)
+                                    @max(2, @as(f32, @floatFromInt(w.h)) * scale_y)
+                                else
+                                    @max(2, (minimap_h - 2) / @as(f32, @floatFromInt(win_count)));
+
+                                const win_bg = if (w.focused)
+                                    theme_mod.toClay(theme.base07)
+                                else
+                                    theme_mod.toClay(theme.base03);
+
+                                clay.UI()(.{
+                                    .id = clay.ElementId.IDI("mm_win", @intCast(w.wid % 256)),
+                                    .layout = .{
+                                        .sizing = .{ .w = .grow, .h = .fixed(win_h) },
+                                    },
+                                    .background_color = win_bg,
+                                    .corner_radius = .all(1),
+                                })({});
+                            }
+                        }
+                    });
+
+                    col_x += col_w_px;
+                }
+            });
+        });
+    }
+};
+
+// ---------------------------------------------------------------------------
+// Signal (transient feedback from compositor signals)
+// ---------------------------------------------------------------------------
+
+pub const Signal = struct {
+    text: [64]u8 = undefined,
+    text_len: usize = 0,
+    last_update_ms: i64 = 0,
+    interval_ms: i64 = 0,
+    show_until_ms: i64 = 0,
+    display_ms: i64 = 1500,
+
+    const signal_labels = [_]struct { name: []const u8, label: []const u8 }{
+        .{ .name = "nav-back", .label = "\xE2\x86\x90 back" }, // ← back
+        .{ .name = "nav-forward", .label = "forward \xE2\x86\x92" }, // forward →
+    };
+
+    pub fn init() Signal {
+        return .{};
+    }
+
+    pub fn update(_: *Signal) void {}
+
+    pub fn getText(self: *Signal, state: ?*const cs.CompositorState) ?[]const u8 {
+        const now = std.time.milliTimestamp();
+
+        if (state) |s| {
+            if (s.signal.pending) {
+                const sig_name = s.signal.getName();
+                for (signal_labels) |entry| {
+                    if (std.mem.eql(u8, sig_name, entry.name)) {
+                        const len = @min(entry.label.len, self.text.len);
+                        @memcpy(self.text[0..len], entry.label[0..len]);
+                        self.text_len = len;
+                        self.show_until_ms = now + self.display_ms;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (now < self.show_until_ms and self.text_len > 0) {
+            return self.text[0..self.text_len];
+        }
+        return null;
+    }
+
+    pub fn render(_: *const Signal, _: ?*const cs.CompositorState, _: *const Theme, _: u16, _: u16) void {}
 };
 
 // ---------------------------------------------------------------------------
@@ -546,10 +805,11 @@ pub const Custom = struct {
         self.text_len = len;
     }
 
-    pub fn render(self: *const Custom, theme: *const Theme, font_id: u16, font_size: u16) void {
-        if (self.text_len == 0) return;
-        renderPill(self.text[0..self.text_len], theme, font_id, font_size);
+    pub fn getText(self: *const Custom, _: ?*const cs.CompositorState) ?[]const u8 {
+        return if (self.text_len > 0) self.text[0..self.text_len] else null;
     }
+
+    pub fn render(_: *const Custom, _: ?*const cs.CompositorState, _: *const Theme, _: u16, _: u16) void {}
 };
 
 // ---------------------------------------------------------------------------
@@ -560,10 +820,11 @@ pub const ModuleManager = struct {
     modules_left: []Module,
     modules_center: []Module,
     modules_right: []Module,
-    tidepool_client: ?*tidepool.TidepoolClient,
+    provider: DataProvider,
+    compositor_state: ?cs.CompositorState,
     allocator: std.mem.Allocator,
 
-    pub fn init(allocator: std.mem.Allocator, bar_config: BarConfig) !ModuleManager {
+    pub fn init(allocator: std.mem.Allocator, bar_config: ModuleLayout) !ModuleManager {
         const left = try allocateModules(allocator, bar_config.modules_left, bar_config);
         errdefer allocator.free(left);
         const center = try allocateModules(allocator, bar_config.modules_center, bar_config);
@@ -571,54 +832,49 @@ pub const ModuleManager = struct {
         const right = try allocateModules(allocator, bar_config.modules_right, bar_config);
         errdefer allocator.free(right);
 
-        // Check if tidepool is needed
-        var needs_tp = false;
-        for (bar_config.modules_left) |t| if (t == .workspaces or t == .title) {
-            needs_tp = true;
+        var needs_compositor = false;
+        for (bar_config.modules_left) |t| if (t == .workspaces or t == .title or t == .minimap or t == .signal) {
+            needs_compositor = true;
         };
-        if (!needs_tp) for (bar_config.modules_center) |t| if (t == .workspaces or t == .title) {
-            needs_tp = true;
+        if (!needs_compositor) for (bar_config.modules_center) |t| if (t == .workspaces or t == .title or t == .minimap or t == .signal) {
+            needs_compositor = true;
         };
-        if (!needs_tp) for (bar_config.modules_right) |t| if (t == .workspaces or t == .title) {
-            needs_tp = true;
+        if (!needs_compositor) for (bar_config.modules_right) |t| if (t == .workspaces or t == .title or t == .minimap or t == .signal) {
+            needs_compositor = true;
         };
 
-        var tp_client: ?*tidepool.TidepoolClient = null;
-        if (needs_tp) {
-            const c = try allocator.create(tidepool.TidepoolClient);
-            c.* = tidepool.TidepoolClient.init(allocator);
-            c.start() catch |err| {
-                log.warn("tidepool start failed: {}, will retry", .{err});
-            };
-            tp_client = c;
-        }
+        const provider = if (needs_compositor)
+            provider_mod.createTidepoolProvider(allocator) catch .none
+        else
+            DataProvider.none;
 
         return .{
             .modules_left = left,
             .modules_center = center,
             .modules_right = right,
-            .tidepool_client = tp_client,
+            .provider = provider,
+            .compositor_state = null,
             .allocator = allocator,
         };
     }
 
     pub fn deinit(self: *ModuleManager) void {
-        if (self.tidepool_client) |c| {
-            c.deinit();
-            self.allocator.destroy(c);
-        }
+        self.provider.deinit(self.allocator);
         self.allocator.free(self.modules_left);
         self.allocator.free(self.modules_center);
         self.allocator.free(self.modules_right);
     }
 
-    /// Returns true if any state changed (needs re-render).
     pub fn updateAll(self: *ModuleManager) bool {
         var changed = false;
         const now_ms = std.time.milliTimestamp();
 
-        if (self.tidepool_client) |c| {
-            if (c.tryRead()) changed = true;
+        if (self.provider.update()) {
+            self.compositor_state = self.provider.getState();
+            if (self.compositor_state) |s| {
+                if (s.signal.pending) self.provider.consumeSignal();
+            }
+            changed = true;
         }
 
         if (updateSlice(self.modules_left, now_ms)) changed = true;
@@ -629,83 +885,34 @@ pub const ModuleManager = struct {
     }
 
     pub fn renderSection(
-        self: *const ModuleManager,
-        modules: []const Module,
+        self: *ModuleManager,
+        modules: []Module,
         theme: *const Theme,
         font_id: u16,
         font_size: u16,
     ) void {
+        const state_ptr: ?*const cs.CompositorState = if (self.compositor_state != null) &self.compositor_state.? else null;
         for (modules) |*m| {
-            switch (m.*) {
-                .workspaces => self.renderWorkspaces(theme, font_id, font_size),
-                .title => self.renderTitle(theme, font_id, font_size),
-                else => m.render(theme, font_id, font_size),
+            if (m.getText(state_ptr)) |text| {
+                // Text module — wrap in section styling
+                clay.UI()(.{
+                    .layout = .{
+                        .padding = .{ .left = 8, .right = 8, .top = 4, .bottom = 4 },
+                    },
+                    .background_color = theme_mod.toClay(theme.surface()),
+                    .corner_radius = .all(6),
+                })({
+                    clay.text(text, .{
+                        .color = theme_mod.toClay(theme.text()),
+                        .font_id = font_id,
+                        .font_size = font_size,
+                    });
+                });
+            } else {
+                // Widget module — renders its own UI
+                m.render(state_ptr, theme, font_id, font_size);
             }
         }
-    }
-
-    fn renderWorkspaces(self: *const ModuleManager, theme: *const Theme, font_id: u16, font_size: u16) void {
-        const state = if (self.tidepool_client) |c| &c.state else return;
-
-        clay.UI()(.{
-            .id = clay.ElementId.ID("ws_group"),
-            .layout = .{
-                .child_gap = 3,
-                .child_alignment = .{ .y = .center },
-            },
-        })({
-            for (state.tags[1..10], 0..) |tag, i| {
-                if (!tag.focused and !tag.occupied) continue;
-
-                var num_buf: [2]u8 = undefined;
-                const num_str = std.fmt.bufPrint(&num_buf, "{d}", .{i + 1}) catch continue;
-
-                if (tag.focused) {
-                    clay.UI()(.{
-                        .id = clay.ElementId.IDI("tag", @intCast(i)),
-                        .layout = .{
-                            .sizing = .{ .w = .fixed(24), .h = .fixed(24) },
-                            .child_alignment = .{ .x = .center, .y = .center },
-                        },
-                        .background_color = theme_mod.toClay(theme.accent()),
-                        .corner_radius = .all(6),
-                    })({
-                        clay.text(num_str, .{
-                            .color = theme_mod.toClay(theme.background()),
-                            .font_id = font_id,
-                            .font_size = font_size,
-                        });
-                    });
-                } else {
-                    // Occupied but not focused — visible but secondary
-                    clay.UI()(.{
-                        .id = clay.ElementId.IDI("tag", @intCast(i)),
-                        .layout = .{
-                            .sizing = .{ .w = .fixed(24), .h = .fixed(24) },
-                            .child_alignment = .{ .x = .center, .y = .center },
-                        },
-                    })({
-                        clay.text(num_str, .{
-                            .color = theme_mod.toClay(theme.subtle()),
-                            .font_id = font_id,
-                            .font_size = font_size,
-                        });
-                    });
-                }
-            }
-        });
-    }
-
-    fn renderTitle(self: *const ModuleManager, theme: *const Theme, font_id: u16, font_size: u16) void {
-        const state = if (self.tidepool_client) |c| &c.state else return;
-        const title_text = state.getTitle();
-        if (title_text.len == 0) return;
-
-        clay.text(title_text, .{
-            .color = theme_mod.toClay(theme.text()),
-            .font_id = font_id,
-            .font_size = font_size,
-        });
     }
 
     fn updateSlice(modules: []Module, now_ms: i64) bool {
@@ -720,7 +927,7 @@ pub const ModuleManager = struct {
         return changed;
     }
 
-    fn allocateModules(allocator: std.mem.Allocator, types: []const ModuleType, bar_config: BarConfig) ![]Module {
+    fn allocateModules(allocator: std.mem.Allocator, types: []const ModuleType, bar_config: ModuleLayout) ![]Module {
         const modules = try allocator.alloc(Module, types.len);
         for (types, 0..) |t, i| {
             modules[i] = switch (t) {
@@ -732,42 +939,14 @@ pub const ModuleManager = struct {
                 .pulseaudio => .{ .pulseaudio = PulseAudio.init() },
                 .workspaces => .{ .workspaces = Workspaces.init() },
                 .title => .{ .title = Title.init() },
+                .minimap => .{ .minimap = Minimap.init() },
+                .signal => .{ .signal = Signal.init() },
                 .custom => .{ .custom = Custom.init("", 5000) },
             };
         }
         return modules;
     }
 };
-
-// ---------------------------------------------------------------------------
-// Shared rendering
-// ---------------------------------------------------------------------------
-
-/// Standard module text — default foreground for readability
-fn renderPill(text: []const u8, theme: *const Theme, font_id: u16, font_size: u16) void {
-    clay.text(text, .{
-        .color = theme_mod.toClay(theme.text()),
-        .font_id = font_id,
-        .font_size = font_size,
-    });
-}
-
-/// Accent pill — for prominent modules like clock
-fn renderAccentPill(text: []const u8, theme: *const Theme, font_id: u16, font_size: u16) void {
-    clay.UI()(.{
-        .layout = .{
-            .padding = .{ .left = 10, .right = 10, .top = 5, .bottom = 5 },
-        },
-        .background_color = theme_mod.toClay(theme.overlay()),
-        .corner_radius = .all(6),
-    })({
-        clay.text(text, .{
-            .color = theme_mod.toClay(theme.text()),
-            .font_id = font_id,
-            .font_size = font_size,
-        });
-    });
-}
 
 // ---------------------------------------------------------------------------
 // Helpers

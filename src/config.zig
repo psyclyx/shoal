@@ -3,10 +3,14 @@ const log = std.log.scoped(.config);
 const theme_mod = @import("theme.zig");
 const modules_mod = @import("modules.zig");
 pub const Theme = theme_mod.Theme;
-pub const BarConfig = modules_mod.BarConfig;
 pub const ModuleType = modules_mod.ModuleType;
+pub const ModuleLayout = modules_mod.ModuleLayout;
 
 pub const Config = struct {
+    // Theme (global)
+    theme: Theme = theme_mod.default(),
+
+    // Surface properties
     layer: Layer = .top,
     anchor: Anchor = .{ .top = true, .left = true, .right = true },
     width: u32 = 0,
@@ -15,8 +19,21 @@ pub const Config = struct {
     margin: Margin = .{ .top = 4, .left = 6, .right = 6 },
     namespace: [:0]const u8 = "shoal",
     keyboard_interactivity: KeyboardInteractivity = .none,
-    theme: Theme = theme_mod.default(),
-    bar: BarConfig = .{},
+
+    // Module layout
+    modules_left: []const ModuleType = &.{.workspaces},
+    modules_center: []const ModuleType = &.{.title},
+    modules_right: []const ModuleType = &.{ .pulseaudio, .cpu, .memory, .network, .clock },
+    clock_format: []const u8 = "%H:%M",
+
+    pub fn moduleLayout(self: Config) ModuleLayout {
+        return .{
+            .modules_left = self.modules_left,
+            .modules_center = self.modules_center,
+            .modules_right = self.modules_right,
+            .clock_format = self.clock_format,
+        };
+    }
 
     pub const Layer = enum {
         background,
@@ -92,7 +109,6 @@ fn loadFile(allocator: std.mem.Allocator, explicit_path: ?[:0]const u8) !Config 
 
     const contents = try file.readToEndAlloc(allocator, 1 << 20);
 
-    // Parse as generic JSON value for flexible extraction
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, contents, .{});
     const root = parsed.value;
     if (root != .object) return error.InvalidConfig;
@@ -100,7 +116,28 @@ fn loadFile(allocator: std.mem.Allocator, explicit_path: ?[:0]const u8) !Config 
 
     var config = Config{};
 
-    // Surface properties
+    // Theme (global)
+    if (map.get("theme")) |theme_val| {
+        config.theme = theme_mod.fromJson(allocator, theme_val) catch config.theme;
+    }
+
+    // Parse surface properties from surfaces[0] if present, otherwise from root
+    const surface_map = blk: {
+        if (map.get("surfaces")) |surfaces_val| {
+            if (surfaces_val == .array and surfaces_val.array.items.len > 0) {
+                const first = surfaces_val.array.items[0];
+                if (first == .object) break :blk first.object;
+            }
+        }
+        break :blk map;
+    };
+
+    parseSurfaceFields(allocator, &config, surface_map) catch {};
+
+    return config;
+}
+
+fn parseSurfaceFields(allocator: std.mem.Allocator, config: *Config, map: std.json.ObjectMap) !void {
     if (map.get("layer")) |v| {
         if (v == .string) config.layer = std.meta.stringToEnum(Config.Layer, v.string) orelse config.layer;
     }
@@ -142,26 +179,19 @@ fn loadFile(allocator: std.mem.Allocator, explicit_path: ?[:0]const u8) !Config 
         }
     }
 
-    // Theme (base16 colors + font config)
-    if (map.get("theme")) |theme_val| {
-        config.theme = theme_mod.fromJson(allocator, theme_val) catch config.theme;
-    }
-
-    // Bar module layout
+    // Module layout
     if (map.get("modules_left")) |v| {
-        if (parseModuleList(allocator, v)) |list| config.bar.modules_left = list;
+        if (parseModuleList(allocator, v)) |list| config.modules_left = list;
     }
     if (map.get("modules_center")) |v| {
-        if (parseModuleList(allocator, v)) |list| config.bar.modules_center = list;
+        if (parseModuleList(allocator, v)) |list| config.modules_center = list;
     }
     if (map.get("modules_right")) |v| {
-        if (parseModuleList(allocator, v)) |list| config.bar.modules_right = list;
+        if (parseModuleList(allocator, v)) |list| config.modules_right = list;
     }
     if (map.get("clock_format")) |v| {
-        if (v == .string) config.bar.clock_format = try allocator.dupe(u8, v.string);
+        if (v == .string) config.clock_format = try allocator.dupe(u8, v.string);
     }
-
-    return config;
 }
 
 fn parseModuleList(allocator: std.mem.Allocator, val: std.json.Value) ?[]const ModuleType {

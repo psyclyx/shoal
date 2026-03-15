@@ -1,7 +1,3 @@
-// TODO: Extract Surface struct to support multiple wl_surfaces (bar + overlays).
-// The tidepool client now streams window topology and signal events that
-// overlay modules will consume. See surface.zig (planned).
-
 const std = @import("std");
 const wl = @import("wayland").client.wl;
 const zwlr = @import("wayland").client.zwlr;
@@ -25,25 +21,87 @@ const c = @cImport({
 
 const log = std.log.scoped(.shoal);
 
-// --- Global state ---
+const MAX_OUTPUTS = 8;
+
+// ---------------------------------------------------------------------------
+// Surface — per-output layer shell surface with its own EGL window
+// ---------------------------------------------------------------------------
+
+const Surface = struct {
+    output: ?*wl.Output = null,
+    wl_surface: ?*wl.Surface = null,
+    layer_surface: ?*zwlr.LayerSurfaceV1 = null,
+    egl_window: ?*c.struct_wl_egl_window = null,
+    egl_surface: c.EGLSurface = c.EGL_NO_SURFACE,
+    width: u32 = 0,
+    height: u32 = 0,
+    needs_render: bool = true,
+    configured: bool = false,
+    frame_pending: bool = false,
+    frame_requested_ms: i64 = 0,
+
+    const frame_watchdog_ms: i64 = 500;
+
+    fn initEgl(self: *Surface) !void {
+        if (!self.configured or self.width == 0 or self.height == 0) return error.NotConfigured;
+        if (self.egl_window != null) return;
+
+        self.egl_window = c.wl_egl_window_create(
+            @ptrCast(self.wl_surface.?),
+            @intCast(self.width),
+            @intCast(self.height),
+        );
+        if (self.egl_window == null) return error.EGLWindowFailed;
+
+        self.egl_surface = c.eglCreateWindowSurface(
+            egl_display,
+            egl_config,
+            @ptrCast(self.egl_window),
+            null,
+        );
+        if (self.egl_surface == c.EGL_NO_SURFACE) {
+            c.wl_egl_window_destroy(self.egl_window);
+            self.egl_window = null;
+            return error.EGLSurfaceFailed;
+        }
+    }
+
+    fn deinitEgl(self: *Surface) void {
+        if (self.egl_surface != c.EGL_NO_SURFACE) {
+            _ = c.eglDestroySurface(egl_display, self.egl_surface);
+            self.egl_surface = c.EGL_NO_SURFACE;
+        }
+        if (self.egl_window) |win| {
+            c.wl_egl_window_destroy(win);
+            self.egl_window = null;
+        }
+    }
+
+    fn makeCurrent(self: *Surface) bool {
+        return c.eglMakeCurrent(egl_display, self.egl_surface, self.egl_surface, egl_context) == c.EGL_TRUE;
+    }
+};
+
+// ---------------------------------------------------------------------------
+// Global state
+// ---------------------------------------------------------------------------
+
+// Wayland globals
 var compositor: ?*wl.Compositor = null;
 var layer_shell: ?*zwlr.LayerShellV1 = null;
 var seat: ?*wl.Seat = null;
 var shm: ?*wl.Shm = null;
-var wl_output: ?*wl.Output = null;
 
-var wl_surface: ?*wl.Surface = null;
-var layer_surface: ?*zwlr.LayerSurfaceV1 = null;
-var egl_window: ?*c.struct_wl_egl_window = null;
+// Per-output surfaces
+var surfaces: [MAX_OUTPUTS]Surface = [_]Surface{.{}} ** MAX_OUTPUTS;
+var surface_count: usize = 0;
+
+// Shared EGL
 var egl_display: c.EGLDisplay = c.EGL_NO_DISPLAY;
 var egl_context: c.EGLContext = c.EGL_NO_CONTEXT;
-var egl_surface: c.EGLSurface = c.EGL_NO_SURFACE;
+var egl_config: c.EGLConfig = null;
 
-var configured_width: u32 = 0;
-var configured_height: u32 = 0;
 var running = true;
-var needs_render = true;
-
 var cfg: Config = .{};
 
 // Subsystems
@@ -77,18 +135,28 @@ pub fn main() !void {
     const comp = compositor orelse return error.NoCompositor;
     const ls = layer_shell orelse return error.NoLayerShell;
 
-    wl_surface = try comp.createSurface();
-    layer_surface = try ls.getLayerSurface(wl_surface.?, wl_output, wlLayer(cfg.layer), cfg.namespace);
+    if (surface_count == 0) return error.NoOutputs;
 
-    const ls_surf = layer_surface.?;
-    ls_surf.setSize(cfg.width, cfg.height);
-    ls_surf.setAnchor(wlAnchor(cfg.anchor));
-    ls_surf.setExclusiveZone(cfg.exclusive_zone);
-    ls_surf.setMargin(cfg.margin.top, cfg.margin.right, cfg.margin.bottom, cfg.margin.left);
-    ls_surf.setKeyboardInteractivity(wlKeyboardInteractivity(cfg.keyboard_interactivity));
-    ls_surf.setListener(*const void, layerSurfaceListener, &{});
+    // Create layer surfaces for each output
+    for (surfaces[0..surface_count]) |*surf| {
+        surf.wl_surface = try comp.createSurface();
+        surf.layer_surface = try ls.getLayerSurface(
+            surf.wl_surface.?,
+            surf.output,
+            wlLayer(cfg.layer),
+            cfg.namespace,
+        );
 
-    wl_surface.?.commit();
+        const ls_surf = surf.layer_surface.?;
+        ls_surf.setSize(cfg.width, cfg.height);
+        ls_surf.setAnchor(wlAnchor(cfg.anchor));
+        ls_surf.setExclusiveZone(cfg.exclusive_zone);
+        ls_surf.setMargin(cfg.margin.top, cfg.margin.right, cfg.margin.bottom, cfg.margin.left);
+        ls_surf.setKeyboardInteractivity(wlKeyboardInteractivity(cfg.keyboard_interactivity));
+        ls_surf.setListener(*Surface, layerSurfaceListener, surf);
+
+        surf.wl_surface.?.commit();
+    }
 
     // Initialize EGL
     egl_display = c.eglGetDisplay(@ptrCast(display));
@@ -115,7 +183,6 @@ pub fn main() !void {
         c.EGL_NONE,
     };
 
-    var egl_config: c.EGLConfig = null;
     var num_configs: c.EGLint = 0;
     if (c.eglChooseConfig(egl_display, &config_attribs, &egl_config, 1, &num_configs) != c.EGL_TRUE or num_configs == 0)
         return error.EGLConfigFailed;
@@ -129,21 +196,23 @@ pub fn main() !void {
     if (egl_context == c.EGL_NO_CONTEXT) return error.EGLContextFailed;
     defer _ = c.eglDestroyContext(egl_display, egl_context);
 
-    // Wait for configure
+    // Wait for configure events
     if (display.roundtrip() != .SUCCESS) return error.RoundtripFailed;
-    if (configured_width == 0 or configured_height == 0) return error.NoConfigure;
 
-    // Create EGL window surface
-    egl_window = c.wl_egl_window_create(@ptrCast(wl_surface.?), @intCast(configured_width), @intCast(configured_height));
-    if (egl_window == null) return error.EGLWindowFailed;
-    defer c.wl_egl_window_destroy(egl_window);
+    // Create EGL windows for configured surfaces
+    var any_configured = false;
+    for (surfaces[0..surface_count]) |*surf| {
+        surf.initEgl() catch |err| {
+            log.warn("EGL init failed for surface: {}", .{err});
+            continue;
+        };
+        any_configured = true;
+    }
+    if (!any_configured) return error.NoConfigure;
+    defer for (surfaces[0..surface_count]) |*surf| surf.deinitEgl();
 
-    egl_surface = c.eglCreateWindowSurface(egl_display, egl_config, @ptrCast(egl_window), null);
-    if (egl_surface == c.EGL_NO_SURFACE) return error.EGLSurfaceFailed;
-    defer _ = c.eglDestroySurface(egl_display, egl_surface);
-
-    if (c.eglMakeCurrent(egl_display, egl_surface, egl_surface, egl_context) != c.EGL_TRUE)
-        return error.EGLMakeCurrentFailed;
+    // Make first surface current for subsystem init
+    if (!surfaces[0].makeCurrent()) return error.EGLMakeCurrentFailed;
 
     // Initialize subsystems
     renderer = try Renderer.init(allocator);
@@ -160,60 +229,121 @@ pub fn main() !void {
     layout = try Layout.init(allocator, &text_renderer, &renderer);
     defer layout.deinit(allocator);
 
-    module_manager = try ModuleManager.init(allocator, cfg.bar);
+    module_manager = try ModuleManager.init(allocator, cfg.moduleLayout());
     defer module_manager.deinit();
 
     // Initialize animated background from theme
     bg_color.set(cfg.theme.background());
 
-    log.info("shoal running: {}x{}", .{ configured_width, configured_height });
+    log.info("shoal running on {d} output(s)", .{surface_count});
 
-    // Force initial module update
+    // Force initial module update + render
     _ = module_manager.updateAll();
+    for (surfaces[0..surface_count]) |*surf| {
+        if (surf.egl_surface != c.EGL_NO_SURFACE) {
+            _ = renderSurface(surf);
+            requestFrame(surf);
+        }
+    }
 
-    // Do initial render — compositor won't send frame callbacks until we
-    // have committed at least one buffer.
-    render();
-
-    // Request next frame
-    requestFrame();
+    const wl_fd = display.getFd();
 
     while (running) {
-        if (display.dispatch() != .SUCCESS) break;
+        // Dispatch any already-queued Wayland events before polling
+        while (!display.prepareRead()) {
+            if (display.dispatchPending() != .SUCCESS) {
+                running = false;
+                break;
+            }
+        }
+        if (!running) break;
+
+        _ = display.flush();
+
+        // Poll Wayland fd + tidepool fd with timeout for module updates
+        const tp_fd = module_manager.provider.getFd();
+        var poll_fds = [2]std.posix.pollfd{
+            .{ .fd = wl_fd, .events = std.posix.POLL.IN, .revents = 0 },
+            .{ .fd = tp_fd orelse -1, .events = std.posix.POLL.IN, .revents = 0 },
+        };
+        const nfds: std.posix.nfds_t = if (tp_fd != null) 2 else 1;
+        _ = std.posix.poll(poll_fds[0..nfds], 100) catch 0;
+
+        if (poll_fds[0].revents & std.posix.POLL.IN != 0) {
+            if (display.readEvents() != .SUCCESS) break;
+        } else {
+            display.cancelRead();
+        }
+        if (display.dispatchPending() != .SUCCESS) break;
+
+        // Watchdog: reset stalled frame callbacks
+        const now_ms = std.time.milliTimestamp();
+        for (surfaces[0..surface_count]) |*surf| {
+            if (surf.frame_pending and surf.needs_render and
+                (now_ms - surf.frame_requested_ms) > Surface.frame_watchdog_ms)
+            {
+                log.warn("frame callback watchdog triggered, resetting", .{});
+                surf.frame_pending = false;
+            }
+        }
+
+        // Check for data updates (tidepool, module timers, animations)
+        const dt = frame_clock.tick();
+        var changed = false;
+        if (bg_color.update(dt)) changed = true;
+        if (module_manager.updateAll()) changed = true;
+
+        if (changed) {
+            markAllDirty();
+        }
     }
 }
 
-fn requestFrame() void {
-    const cb = wl_surface.?.frame() catch return;
-    cb.setListener(*const void, frameListener, &{});
+fn requestFrame(surf: *Surface) void {
+    if (surf.frame_pending) return;
+    const cb = surf.wl_surface.?.frame() catch return;
+    cb.setListener(*Surface, frameListener, surf);
+    surf.frame_pending = true;
+    surf.frame_requested_ms = std.time.milliTimestamp();
 }
 
-fn frameListener(_: *wl.Callback, event: wl.Callback.Event, _: *const void) void {
+fn frameListener(_: *wl.Callback, event: wl.Callback.Event, surf: *Surface) void {
     switch (event) {
         .done => {
-            const dt = frame_clock.tick();
-
-            // Update animations
-            var any_animating = false;
-            if (bg_color.update(dt)) any_animating = true;
-
-            // Update modules (non-blocking)
-            const modules_changed = module_manager.updateAll();
-
-            if (needs_render or any_animating or modules_changed) {
-                render();
-                needs_render = false;
+            surf.frame_pending = false;
+            if (surf.needs_render) {
+                if (renderSurface(surf)) {
+                    surf.needs_render = false;
+                }
+                requestFrame(surf);
             }
-
-            // Always request next frame (modules need periodic polling)
-            requestFrame();
         },
     }
 }
 
-fn render() void {
-    const w: f32 = @floatFromInt(configured_width);
-    const h: f32 = @floatFromInt(configured_height);
+/// Mark all surfaces dirty and kick off a render via frame callbacks.
+fn markAllDirty() void {
+    for (surfaces[0..surface_count]) |*surf| {
+        if (!surf.configured or surf.egl_surface == c.EGL_NO_SURFACE) continue;
+        surf.needs_render = true;
+        if (!surf.frame_pending) {
+            // First change after idle — render immediately for responsiveness,
+            // then request a frame callback to throttle subsequent updates.
+            if (renderSurface(surf)) {
+                surf.needs_render = false;
+            }
+            requestFrame(surf);
+        }
+    }
+}
+
+/// Render a frame for a surface. Returns true on success, false on failure.
+fn renderSurface(surf: *Surface) bool {
+    if (!surf.configured or surf.egl_surface == c.EGL_NO_SURFACE) return false;
+    if (!surf.makeCurrent()) return false;
+
+    const w: f32 = @floatFromInt(surf.width);
+    const h: f32 = @floatFromInt(surf.height);
 
     c.glActiveTexture(c.GL_TEXTURE0);
     c.glBindTexture(c.GL_TEXTURE_2D, text_renderer.getAtlasTexture());
@@ -226,14 +356,14 @@ fn render() void {
     layout.endLayout();
 
     renderer.end();
-    _ = c.eglSwapBuffers(egl_display, egl_surface);
+    _ = c.eglSwapBuffers(egl_display, surf.egl_surface);
+    return true;
 }
 
 fn declareUI() void {
     const bg = bg_color.get();
     const theme = &cfg.theme;
 
-    // Root: full bar background
     clay.UI()(.{
         .id = clay.ElementId.ID("root"),
         .layout = .{
@@ -245,12 +375,11 @@ fn declareUI() void {
         .background_color = theme_mod.toClay(bg),
         .corner_radius = .all(8),
     })({
-        // Left: workspaces and primary info — flush left
         clay.UI()(.{
             .id = clay.ElementId.ID("left"),
             .layout = .{
                 .sizing = .{ .w = .grow },
-                .child_gap = 12,
+                .child_gap = 6,
                 .child_alignment = .{ .y = .center },
             },
         })({
@@ -262,7 +391,6 @@ fn declareUI() void {
             );
         });
 
-        // Center: window title — centered, understated
         clay.UI()(.{
             .id = clay.ElementId.ID("center"),
             .layout = .{
@@ -278,12 +406,11 @@ fn declareUI() void {
             );
         });
 
-        // Right: system status — flush right, spaced with separators
         clay.UI()(.{
             .id = clay.ElementId.ID("right"),
             .layout = .{
                 .sizing = .{ .w = .grow },
-                .child_gap = 16,
+                .child_gap = 6,
                 .child_alignment = .{ .x = .right, .y = .center },
             },
         })({
@@ -340,8 +467,10 @@ fn registryListener(registry_: *wl.Registry, event: wl.Registry.Event, _: *const
             } else if (std.mem.eql(u8, iface, std.mem.span(wl.Shm.interface.name))) {
                 shm = registry_.bind(global.name, wl.Shm, @min(global.version, 2)) catch return;
             } else if (std.mem.eql(u8, iface, std.mem.span(wl.Output.interface.name))) {
-                if (wl_output == null) {
-                    wl_output = registry_.bind(global.name, wl.Output, @min(global.version, 4)) catch return;
+                if (surface_count < MAX_OUTPUTS) {
+                    const output = registry_.bind(global.name, wl.Output, @min(global.version, 4)) catch return;
+                    surfaces[surface_count] = .{ .output = output };
+                    surface_count += 1;
                 }
             }
         },
@@ -349,19 +478,20 @@ fn registryListener(registry_: *wl.Registry, event: wl.Registry.Event, _: *const
     }
 }
 
-fn layerSurfaceListener(_: *zwlr.LayerSurfaceV1, event: zwlr.LayerSurfaceV1.Event, _: *const void) void {
+fn layerSurfaceListener(_: *zwlr.LayerSurfaceV1, event: zwlr.LayerSurfaceV1.Event, surf: *Surface) void {
     switch (event) {
         .configure => |lscfg| {
-            layer_surface.?.ackConfigure(lscfg.serial);
-            configured_width = lscfg.width;
-            configured_height = lscfg.height;
+            surf.layer_surface.?.ackConfigure(lscfg.serial);
+            surf.width = lscfg.width;
+            surf.height = lscfg.height;
+            surf.configured = true;
 
-            if (egl_window) |win| {
+            if (surf.egl_window) |win| {
                 c.wl_egl_window_resize(win, @intCast(lscfg.width), @intCast(lscfg.height), 0, 0);
             }
 
-            needs_render = true;
-            requestFrame();
+            surf.needs_render = true;
+            requestFrame(surf);
         },
         .closed => {
             running = false;
