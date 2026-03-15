@@ -266,6 +266,11 @@ pub const Dispatch = struct {
             log.debug("dispatch: no handler for event", .{});
             return;
         }
+        // Root handler_entry — for composed multi-handlers, get-handler returns
+        // a freshly allocated struct not stored in any registry. Without rooting,
+        // buildCofx's janet_table(4) can trigger GC and collect it.
+        c.janet_gcroot(handler_entry);
+        defer _ = c.janet_gcunroot(handler_entry);
 
         // handler_entry is {:fn handler-fn :cofx [...]}
         const handler_fn = tableGet(handler_entry, "fn") orelse {
