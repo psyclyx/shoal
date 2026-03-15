@@ -5,14 +5,14 @@
 
 (reg-event-handler :clock/tick
   (fn [cofx event]
-    (def d (os/date (os/time) true))
+    (def d (os/date))
     {:db (put (cofx :db) :clock
               {:hours (d :hours)
                :minutes (d :minutes)
                :seconds (d :seconds)
                :month (+ 1 (d :month))
                :month-day (d :month-day)
-               :year (+ 1900 (d :year))
+               :year (d :year)
                :week-day (d :week-day)})}))
 
 # Start the clock on init — piggyback on existing :init via :dispatch
