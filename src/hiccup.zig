@@ -204,7 +204,7 @@ fn applyContainerAttrs(config: *clay.ElementDeclaration, attrs: jc.Janet) void {
     const gap_val = janet.janetGet(attrs, kw_gap);
     if (jc.janet_checktype(gap_val, jc.JANET_NIL) == 0) {
         if (jc.janet_checktype(gap_val, jc.JANET_NUMBER) != 0) {
-            config.layout.child_gap = @intFromFloat(jc.janet_unwrap_number(gap_val));
+            config.layout.child_gap = floatToU16(jc.janet_unwrap_number(gap_val));
         }
     }
 
@@ -266,7 +266,7 @@ fn applyTextAttrs(config: *clay.TextElementConfig, attrs: jc.Janet) void {
     const font_val = janet.janetGet(attrs, kw_font);
     if (jc.janet_checktype(font_val, jc.JANET_NIL) == 0) {
         if (jc.janet_checktype(font_val, jc.JANET_NUMBER) != 0) {
-            config.font_id = @intFromFloat(jc.janet_unwrap_number(font_val));
+            config.font_id = floatToU16(jc.janet_unwrap_number(font_val));
         }
     }
 
@@ -274,7 +274,7 @@ fn applyTextAttrs(config: *clay.TextElementConfig, attrs: jc.Janet) void {
     const size_val = janet.janetGet(attrs, kw_size);
     if (jc.janet_checktype(size_val, jc.JANET_NIL) == 0) {
         if (jc.janet_checktype(size_val, jc.JANET_NUMBER) != 0) {
-            config.font_size = @intFromFloat(jc.janet_unwrap_number(size_val));
+            config.font_size = floatToU16(jc.janet_unwrap_number(size_val));
         }
     }
 
@@ -347,21 +347,21 @@ fn parseSizing(val: jc.Janet) clay.SizingAxis {
 fn parsePadding(val: jc.Janet) clay.Padding {
     // Number: all sides
     if (jc.janet_checktype(val, jc.JANET_NUMBER) != 0) {
-        return clay.Padding.all(@intFromFloat(jc.janet_unwrap_number(val)));
+        return clay.Padding.all(floatToU16(jc.janet_unwrap_number(val)));
     }
 
     // Tuple: [top/bottom left/right] or [top right bottom left]
     const items = janetIndexedSlice(val) orelse return .{};
     if (items.len == 2) {
-        const tb: u16 = @intFromFloat(janetToF64(items[0]) orelse 0);
-        const lr: u16 = @intFromFloat(janetToF64(items[1]) orelse 0);
+        const tb = floatToU16(janetToF64(items[0]) orelse 0);
+        const lr = floatToU16(janetToF64(items[1]) orelse 0);
         return clay.Padding.axes(tb, lr);
     } else if (items.len >= 4) {
         return .{
-            .top = @intFromFloat(janetToF64(items[0]) orelse 0),
-            .right = @intFromFloat(janetToF64(items[1]) orelse 0),
-            .bottom = @intFromFloat(janetToF64(items[2]) orelse 0),
-            .left = @intFromFloat(janetToF64(items[3]) orelse 0),
+            .top = floatToU16(janetToF64(items[0]) orelse 0),
+            .right = floatToU16(janetToF64(items[1]) orelse 0),
+            .bottom = floatToU16(janetToF64(items[2]) orelse 0),
+            .left = floatToU16(janetToF64(items[3]) orelse 0),
         };
     }
 
@@ -402,17 +402,17 @@ fn parseRadius(val: jc.Janet) clay.CornerRadius {
 fn parseBorderWidth(val: jc.Janet) clay.BorderWidth {
     // Number: all sides
     if (jc.janet_checktype(val, jc.JANET_NUMBER) != 0) {
-        return clay.BorderWidth.outside(@intFromFloat(jc.janet_unwrap_number(val)));
+        return clay.BorderWidth.outside(floatToU16(jc.janet_unwrap_number(val)));
     }
 
     // Tuple: [left right top bottom]
     const items = janetIndexedSlice(val) orelse return .{};
     if (items.len >= 4) {
         return .{
-            .left = @intFromFloat(janetToF64(items[0]) orelse 0),
-            .right = @intFromFloat(janetToF64(items[1]) orelse 0),
-            .top = @intFromFloat(janetToF64(items[2]) orelse 0),
-            .bottom = @intFromFloat(janetToF64(items[3]) orelse 0),
+            .left = floatToU16(janetToF64(items[0]) orelse 0),
+            .right = floatToU16(janetToF64(items[1]) orelse 0),
+            .top = floatToU16(janetToF64(items[2]) orelse 0),
+            .bottom = floatToU16(janetToF64(items[3]) orelse 0),
         };
     }
 
@@ -465,6 +465,22 @@ fn janetToF64(val: jc.Janet) ?f64 {
 fn janetToF32(val: jc.Janet) ?f32 {
     if (janetToF64(val)) |d| return @floatCast(d);
     return null;
+}
+
+/// Safe float-to-u16 conversion for user-controlled Janet numbers.
+/// Clamps to [0, maxInt], rounds, handles NaN/Inf.
+fn floatToU16(val: f64) u16 {
+    if (std.math.isNan(val) or val <= 0) return 0;
+    if (val >= @as(f64, std.math.maxInt(u16))) return std.math.maxInt(u16);
+    return @intFromFloat(@round(val));
+}
+
+/// Safe float-to-i16 conversion for user-controlled Janet numbers.
+fn floatToI16(val: f64) i16 {
+    if (std.math.isNan(val)) return 0;
+    if (val <= @as(f64, std.math.minInt(i16))) return std.math.minInt(i16);
+    if (val >= @as(f64, std.math.maxInt(i16))) return std.math.maxInt(i16);
+    return @intFromFloat(@round(val));
 }
 
 fn janetToString(val: jc.Janet) []const u8 {

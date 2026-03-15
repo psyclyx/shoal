@@ -195,7 +195,7 @@ pub const IpcPool = struct {
 
     /// Create a Unix socket and connect to the given path. Returns fd or null.
     fn socketConnect(path: []const u8) ?std.posix.fd_t {
-        const fd = std.posix.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0) catch {
+        const fd = std.posix.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC, 0) catch {
             return null;
         };
 
