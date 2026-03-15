@@ -392,7 +392,16 @@ pub fn main() !void {
         const dt = frame_clock.tick();
         var changed = false;
         if (bg_color.update(dt)) changed = true;
+        if (dispatch.tickAnimations(dt)) changed = true;
         if (module_manager.updateAll()) changed = true;
+
+        // Process any completion events from finished animations
+        if (dispatch.processQueue()) {
+            if (dispatch.render_dirty) {
+                dispatch.render_dirty = false;
+                changed = true;
+            }
+        }
 
         if (changed) {
             markAllDirty();

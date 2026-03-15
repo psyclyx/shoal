@@ -1,5 +1,6 @@
 const std = @import("std");
 const hiccup = @import("hiccup.zig");
+const animation = @import("animation.zig");
 const log = std.log.scoped(.janet);
 
 pub const c = @cImport({
@@ -70,6 +71,19 @@ const fx_order = [_][:0]const u8{
 
 const MAX_QUEUED_EVENTS = 256;
 const MAX_TIMERS = 64;
+const MAX_ANIMS = 64;
+
+const AnimSlot = struct {
+    active: bool = false,
+    id: Janet = undefined, // keyword, GC-rooted when active
+    current: f64 = 0,
+    target: f64 = 0,
+    start: f64 = 0,
+    progress: f32 = 0,
+    duration: f32 = 0,
+    easing: animation.Easing = .linear,
+    on_complete: Janet = undefined, // event tuple or nil, GC-rooted when active
+};
 
 const Timer = struct {
     active: bool = false,
@@ -94,6 +108,9 @@ pub const Dispatch = struct {
     // Timers
     timers: [MAX_TIMERS]Timer = [_]Timer{.{}} ** MAX_TIMERS,
 
+    // Animation pool
+    anims: [MAX_ANIMS]AnimSlot = [_]AnimSlot{.{}} ** MAX_ANIMS,
+
     // Cached function references (set by initBoot)
     fn_get_handler: Janet = undefined,
     fn_get_cofx_injector: Janet = undefined,
@@ -104,6 +121,12 @@ pub const Dispatch = struct {
 
     /// Load the shoal boot file into a fresh environment. Sets up registries.
     pub fn initBoot(self: *Dispatch) !void {
+        // Set global dispatch pointer for Janet C functions
+        global_dispatch = self;
+
+        // Register C functions before evaluating boot source
+        c.janet_cfuns(self.env, null, &anim_cfun);
+
         // Evaluate boot source
         var out: Janet = undefined;
         const status = c.janet_dostring(
@@ -244,6 +267,8 @@ pub const Dispatch = struct {
             if (std.mem.eql(u8, fx_name, "db")) {
                 self.setDb(fx_val);
                 _ = self.pcall0(self.fn_bump_generation);
+            } else if (std.mem.eql(u8, fx_name, "anim")) {
+                self.handleAnimFx(fx_val);
             } else if (std.mem.eql(u8, fx_name, "render")) {
                 self.render_dirty = true;
             } else if (std.mem.eql(u8, fx_name, "dispatch")) {
@@ -396,6 +421,252 @@ pub const Dispatch = struct {
         return null;
     }
 
+    // -------------------------------------------------------------------
+    // Animation pool
+    // -------------------------------------------------------------------
+
+    /// Tick all active animations by dt seconds. Returns true if any are active
+    /// (caller should keep rendering). Enqueues on-complete events for finished
+    /// animations.
+    pub fn tickAnimations(self: *Dispatch, dt: f32) bool {
+        var any_active = false;
+        for (&self.anims) |*slot| {
+            if (!slot.active) continue;
+
+            if (slot.duration <= 0) {
+                // Immediate set (duration 0 or omitted)
+                slot.current = slot.target;
+                slot.progress = 1.0;
+                self.finishAnim(slot);
+                continue;
+            }
+
+            slot.progress += dt / slot.duration;
+            if (slot.progress >= 1.0) {
+                slot.progress = 1.0;
+                slot.current = slot.target;
+                self.finishAnim(slot);
+            } else {
+                const eased = slot.easing.apply(slot.progress);
+                const t: f64 = @floatCast(eased);
+                slot.current = slot.start + (slot.target - slot.start) * t;
+                any_active = true;
+            }
+        }
+        return any_active;
+    }
+
+    fn finishAnim(self: *Dispatch, slot: *AnimSlot) void {
+        slot.active = false;
+        // Enqueue on-complete event if present
+        if (c.janet_checktype(slot.on_complete, c.JANET_TUPLE) != 0) {
+            self.enqueue(slot.on_complete);
+            _ = c.janet_gcunroot(slot.on_complete);
+            slot.on_complete = c.janet_wrap_nil();
+        }
+        // Keep id and current value alive — (anim :id) can still read the
+        // resting value. The GC root on id remains until the slot is reused.
+    }
+
+    /// Get the current value of a named animation by keyword. Returns 0 if not found.
+    pub fn getAnimValue(self: *Dispatch, id: Janet) f64 {
+        for (self.anims) |slot| {
+            if (c.janet_checktype(slot.id, c.JANET_KEYWORD) != 0 and
+                c.janet_equals(slot.id, id) != 0)
+            {
+                return slot.current;
+            }
+        }
+        return 0.0;
+    }
+
+    /// Handle the :anim fx value. Accepts a single spec table or an array of specs.
+    pub fn handleAnimFx(self: *Dispatch, val: Janet) void {
+        // Array of specs
+        if (c.janet_checktype(val, c.JANET_TUPLE) != 0 or
+            c.janet_checktype(val, c.JANET_ARRAY) != 0)
+        {
+            // Check if it looks like an array of specs (first element is a table)
+            // vs a single tuple value. Specs are tables/structs, not tuples.
+            const view = janetIndexedView(val);
+            if (view.items) |items| {
+                if (view.len > 0) {
+                    const first = items[0];
+                    if (c.janet_checktype(first, c.JANET_TABLE) != 0 or
+                        c.janet_checktype(first, c.JANET_STRUCT) != 0)
+                    {
+                        // Array of specs
+                        for (0..@intCast(view.len)) |i| {
+                            self.handleAnimSpec(items[i]);
+                        }
+                        return;
+                    }
+                }
+            }
+        }
+
+        // Single spec (table or struct)
+        self.handleAnimSpec(val);
+    }
+
+    fn handleAnimSpec(self: *Dispatch, spec: Janet) void {
+        if (c.janet_checktype(spec, c.JANET_TABLE) == 0 and
+            c.janet_checktype(spec, c.JANET_STRUCT) == 0)
+        {
+            log.warn("anim fx: spec is not a table", .{});
+            return;
+        }
+
+        const id = janetGet(spec, kw("id"));
+        if (c.janet_checktype(id, c.JANET_KEYWORD) == 0) {
+            log.warn("anim fx: spec missing :id keyword", .{});
+            return;
+        }
+
+        // Cancel?
+        const cancel_val = janetGet(spec, kw("cancel"));
+        if (c.janet_checktype(cancel_val, c.JANET_NIL) == 0) {
+            self.cancelAnim(id);
+            return;
+        }
+
+        // Must have :to
+        const to_val = janetGet(spec, kw("to"));
+        if (c.janet_checktype(to_val, c.JANET_NUMBER) == 0) {
+            log.warn("anim fx: spec missing :to number", .{});
+            return;
+        }
+        const target = c.janet_unwrap_number(to_val);
+
+        // Duration (default 0 = immediate)
+        const dur_val = janetGet(spec, kw("duration"));
+        const duration: f32 = if (c.janet_checktype(dur_val, c.JANET_NUMBER) != 0)
+            @floatCast(c.janet_unwrap_number(dur_val))
+        else
+            0;
+
+        // Easing (default linear)
+        const ease_val = janetGet(spec, kw("easing"));
+        const easing = if (c.janet_checktype(ease_val, c.JANET_KEYWORD) != 0)
+            parseEasing(ease_val)
+        else
+            .linear;
+
+        // Explicit :from
+        const from_val = janetGet(spec, kw("from"));
+        const has_explicit_from = c.janet_checktype(from_val, c.JANET_NUMBER) != 0;
+
+        // On-complete event
+        const on_complete = janetGet(spec, kw("on-complete"));
+
+        // Find existing slot with this id (retarget)
+        for (&self.anims) |*slot| {
+            if (c.janet_checktype(slot.id, c.JANET_KEYWORD) != 0 and
+                c.janet_equals(slot.id, id) != 0)
+            {
+                // Retarget: start from current value (or explicit :from)
+                slot.start = if (has_explicit_from) c.janet_unwrap_number(from_val) else slot.current;
+                slot.target = target;
+                slot.progress = 0;
+                slot.duration = duration;
+                slot.easing = easing;
+                slot.active = duration > 0;
+                if (!slot.active) {
+                    slot.current = target;
+                    slot.progress = 1.0;
+                }
+                // Replace on-complete
+                if (c.janet_checktype(slot.on_complete, c.JANET_TUPLE) != 0) {
+                    _ = c.janet_gcunroot(slot.on_complete);
+                }
+                if (c.janet_checktype(on_complete, c.JANET_TUPLE) != 0) {
+                    c.janet_gcroot(on_complete);
+                    slot.on_complete = on_complete;
+                } else {
+                    slot.on_complete = c.janet_wrap_nil();
+                }
+                return;
+            }
+        }
+
+        // Find a free slot (inactive and no resting value, or first inactive)
+        for (&self.anims) |*slot| {
+            if (!slot.active and c.janet_checktype(slot.id, c.JANET_NIL) != 0) {
+                self.initAnimSlot(slot, id, target, duration, easing, has_explicit_from, from_val, on_complete);
+                return;
+            }
+        }
+        // Fall back: reuse any inactive slot
+        for (&self.anims) |*slot| {
+            if (!slot.active) {
+                // Free the old id's GC root
+                if (c.janet_checktype(slot.id, c.JANET_KEYWORD) != 0) {
+                    _ = c.janet_gcunroot(slot.id);
+                }
+                self.initAnimSlot(slot, id, target, duration, easing, has_explicit_from, from_val, on_complete);
+                return;
+            }
+        }
+
+        log.warn("anim fx: no free animation slots", .{});
+    }
+
+    fn initAnimSlot(
+        _: *Dispatch,
+        slot: *AnimSlot,
+        id: Janet,
+        target: f64,
+        duration: f32,
+        easing: animation.Easing,
+        has_explicit_from: bool,
+        from_val: Janet,
+        on_complete: Janet,
+    ) void {
+        const start_val: f64 = if (has_explicit_from) c.janet_unwrap_number(from_val) else target;
+        c.janet_gcroot(id);
+        slot.* = .{
+            .active = duration > 0,
+            .id = id,
+            .current = if (duration > 0) start_val else target,
+            .target = target,
+            .start = start_val,
+            .progress = if (duration > 0) 0 else 1.0,
+            .duration = duration,
+            .easing = easing,
+            .on_complete = c.janet_wrap_nil(),
+        };
+        if (c.janet_checktype(on_complete, c.JANET_TUPLE) != 0) {
+            c.janet_gcroot(on_complete);
+            slot.on_complete = on_complete;
+        }
+    }
+
+    fn cancelAnim(self: *Dispatch, id: Janet) void {
+        for (&self.anims) |*slot| {
+            if (c.janet_checktype(slot.id, c.JANET_KEYWORD) != 0 and
+                c.janet_equals(slot.id, id) != 0)
+            {
+                slot.active = false;
+                // Discard on-complete
+                if (c.janet_checktype(slot.on_complete, c.JANET_TUPLE) != 0) {
+                    _ = c.janet_gcunroot(slot.on_complete);
+                    slot.on_complete = c.janet_wrap_nil();
+                }
+                return;
+            }
+        }
+    }
+
+    fn freeAnimSlot(_: *Dispatch, slot: *AnimSlot) void {
+        if (c.janet_checktype(slot.id, c.JANET_KEYWORD) != 0) {
+            _ = c.janet_gcunroot(slot.id);
+        }
+        if (c.janet_checktype(slot.on_complete, c.JANET_TUPLE) != 0) {
+            _ = c.janet_gcunroot(slot.on_complete);
+        }
+        slot.* = .{};
+    }
+
     /// Update the db, managing GC roots.
     fn setDb(self: *Dispatch, new_db: Janet) void {
         _ = c.janet_gcunroot(self.db);
@@ -504,9 +775,49 @@ pub const Dispatch = struct {
         for (&self.timers) |*timer| {
             if (timer.active) self.freeTimer(timer);
         }
+        // Free animation slots
+        for (&self.anims) |*slot| {
+            if (c.janet_checktype(slot.id, c.JANET_KEYWORD) != 0) {
+                self.freeAnimSlot(slot);
+            }
+        }
         _ = c.janet_gcunroot(self.db);
     }
 };
+
+/// Global dispatch pointer for Janet C functions (which have no userdata).
+var global_dispatch: ?*Dispatch = null;
+
+/// Janet C function: (anim :id) → number
+fn janetAnimFn(argc: i32, argv: [*c]Janet) callconv(.c) Janet {
+    if (argc != 1) return c.janet_wrap_number(0);
+    const id = argv[0];
+    if (c.janet_checktype(id, c.JANET_KEYWORD) == 0) {
+        log.warn("(anim): expected keyword argument", .{});
+        return c.janet_wrap_number(0);
+    }
+    const d = global_dispatch orelse return c.janet_wrap_number(0);
+    return c.janet_wrap_number(d.getAnimValue(id));
+}
+
+const anim_cfun = [_]c.JanetReg{
+    .{ .name = "anim", .cfun = janetAnimFn, .documentation = "(anim :id) — get current animated value" },
+    .{ .name = null, .cfun = null, .documentation = null },
+};
+
+/// Parse an easing keyword to an Easing enum value.
+fn parseEasing(val: Janet) animation.Easing {
+    const s = c.janet_unwrap_keyword(val);
+    const name = std.mem.span(s);
+    if (std.mem.eql(u8, name, "linear")) return .linear;
+    if (std.mem.eql(u8, name, "ease-in-quad")) return .ease_in_quad;
+    if (std.mem.eql(u8, name, "ease-out-quad")) return .ease_out_quad;
+    if (std.mem.eql(u8, name, "ease-in-out-quad")) return .ease_in_out_quad;
+    if (std.mem.eql(u8, name, "ease-out-cubic")) return .ease_out_cubic;
+    if (std.mem.eql(u8, name, "ease-in-out-cubic")) return .ease_in_out_cubic;
+    log.warn("anim: unknown easing '{s}', defaulting to linear", .{name});
+    return .linear;
+}
 
 /// Create a new Dispatch with an empty db.
 pub fn createDispatch() Dispatch {
