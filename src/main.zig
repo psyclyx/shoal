@@ -39,6 +39,9 @@ const Surface = struct {
     configured: bool = false,
     frame_pending: bool = false,
     frame_requested_ms: i64 = 0,
+    // Output geometry from wl_output events (for matching tidepool outputs)
+    output_x: i32 = 0,
+    output_y: i32 = 0,
 
     const frame_watchdog_ms: i64 = 500;
 
@@ -352,7 +355,7 @@ fn renderSurface(surf: *Surface) bool {
     layout.setDimensions(w, h);
 
     layout.beginLayout();
-    declareUI();
+    declareUI(surf.output_x, surf.output_y);
     layout.endLayout();
 
     renderer.end();
@@ -360,7 +363,7 @@ fn renderSurface(surf: *Surface) bool {
     return true;
 }
 
-fn declareUI() void {
+fn declareUI(output_x: i32, output_y: i32) void {
     const bg = bg_color.get();
     const theme = &cfg.theme;
 
@@ -388,6 +391,8 @@ fn declareUI() void {
                 theme,
                 primary_font_id,
                 cfg.theme.font_size,
+                output_x,
+                output_y,
             );
         });
 
@@ -403,6 +408,8 @@ fn declareUI() void {
                 theme,
                 primary_font_id,
                 cfg.theme.font_size,
+                output_x,
+                output_y,
             );
         });
 
@@ -419,6 +426,8 @@ fn declareUI() void {
                 theme,
                 primary_font_id,
                 cfg.theme.font_size,
+                output_x,
+                output_y,
             );
         });
     });
@@ -470,11 +479,22 @@ fn registryListener(registry_: *wl.Registry, event: wl.Registry.Event, _: *const
                 if (surface_count < MAX_OUTPUTS) {
                     const output = registry_.bind(global.name, wl.Output, @min(global.version, 4)) catch return;
                     surfaces[surface_count] = .{ .output = output };
+                    output.setListener(*Surface, outputListener, &surfaces[surface_count]);
                     surface_count += 1;
                 }
             }
         },
         .global_remove => {},
+    }
+}
+
+fn outputListener(_: *wl.Output, event: wl.Output.Event, surf: *Surface) void {
+    switch (event) {
+        .geometry => |geo| {
+            surf.output_x = geo.x;
+            surf.output_y = geo.y;
+        },
+        else => {},
     }
 }
 

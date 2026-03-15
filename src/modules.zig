@@ -61,9 +61,9 @@ pub const Module = union(ModuleType) {
     }
 
     /// Widget render — only called for modules where getText returns null.
-    pub fn render(self: *const Module, state: ?*const cs.CompositorState, theme: *const Theme, font_id: u16, font_size: u16) void {
+    pub fn render(self: *const Module, state: ?*const cs.CompositorState, output: ?*const cs.OutputInfo, theme: *const Theme, font_id: u16, font_size: u16) void {
         switch (self.*) {
-            inline else => |*v| v.render(state, theme, font_id, font_size),
+            inline else => |*v| v.render(state, output, theme, font_id, font_size),
         }
     }
 
@@ -182,7 +182,7 @@ pub const Clock = struct {
         return if (self.text_len > 0) self.text[0..self.text_len] else null;
     }
 
-    pub fn render(_: *const Clock, _: ?*const cs.CompositorState, _: *const Theme, _: u16, _: u16) void {}
+    pub fn render(_: *const Clock, _: ?*const cs.CompositorState, _: ?*const cs.OutputInfo, _: *const Theme, _: u16, _: u16) void {}
 };
 
 // ---------------------------------------------------------------------------
@@ -234,7 +234,7 @@ pub const Cpu = struct {
         return if (self.text_len > 0) self.text[0..self.text_len] else null;
     }
 
-    pub fn render(_: *const Cpu, _: ?*const cs.CompositorState, _: *const Theme, _: u16, _: u16) void {}
+    pub fn render(_: *const Cpu, _: ?*const cs.CompositorState, _: ?*const cs.OutputInfo, _: *const Theme, _: u16, _: u16) void {}
 };
 
 // ---------------------------------------------------------------------------
@@ -282,7 +282,7 @@ pub const Memory = struct {
         return if (self.text_len > 0) self.text[0..self.text_len] else null;
     }
 
-    pub fn render(_: *const Memory, _: ?*const cs.CompositorState, _: *const Theme, _: u16, _: u16) void {}
+    pub fn render(_: *const Memory, _: ?*const cs.CompositorState, _: ?*const cs.OutputInfo, _: *const Theme, _: u16, _: u16) void {}
 };
 
 // ---------------------------------------------------------------------------
@@ -329,7 +329,7 @@ pub const Battery = struct {
         return if (self.present and self.text_len > 0) self.text[0..self.text_len] else null;
     }
 
-    pub fn render(_: *const Battery, _: ?*const cs.CompositorState, _: *const Theme, _: u16, _: u16) void {}
+    pub fn render(_: *const Battery, _: ?*const cs.CompositorState, _: ?*const cs.OutputInfo, _: *const Theme, _: u16, _: u16) void {}
 };
 
 // ---------------------------------------------------------------------------
@@ -402,7 +402,7 @@ pub const PulseAudio = struct {
         return if (self.text_len > 0) self.text[0..self.text_len] else null;
     }
 
-    pub fn render(_: *const PulseAudio, _: ?*const cs.CompositorState, _: *const Theme, _: u16, _: u16) void {}
+    pub fn render(_: *const PulseAudio, _: ?*const cs.CompositorState, _: ?*const cs.OutputInfo, _: *const Theme, _: u16, _: u16) void {}
 };
 
 // ---------------------------------------------------------------------------
@@ -481,7 +481,7 @@ pub const Network = struct {
         return if (self.text_len > 0) self.text[0..self.text_len] else null;
     }
 
-    pub fn render(_: *const Network, _: ?*const cs.CompositorState, _: *const Theme, _: u16, _: u16) void {}
+    pub fn render(_: *const Network, _: ?*const cs.CompositorState, _: ?*const cs.OutputInfo, _: *const Theme, _: u16, _: u16) void {}
 };
 
 // ---------------------------------------------------------------------------
@@ -502,8 +502,9 @@ pub const Workspaces = struct {
         return null;
     }
 
-    pub fn render(_: *const Workspaces, state: ?*const cs.CompositorState, theme: *const Theme, font_id: u16, font_size: u16) void {
-        const s = state orelse return;
+    pub fn render(_: *const Workspaces, state: ?*const cs.CompositorState, output: ?*const cs.OutputInfo, theme: *const Theme, font_id: u16, font_size: u16) void {
+        _ = state;
+        const o = output orelse return;
 
         clay.UI()(.{
             .id = clay.ElementId.ID("ws_group"),
@@ -512,7 +513,7 @@ pub const Workspaces = struct {
                 .child_alignment = .{ .y = .center },
             },
         })({
-            for (s.tags[1..10], 0..) |tag, i| {
+            for (o.tags[1..10], 0..) |tag, i| {
                 if (!tag.focused and !tag.occupied) continue;
 
                 var num_buf: [2]u8 = undefined;
@@ -576,7 +577,7 @@ pub const Title = struct {
         return if (t.len > 0) t else null;
     }
 
-    pub fn render(_: *const Title, _: ?*const cs.CompositorState, _: *const Theme, _: u16, _: u16) void {}
+    pub fn render(_: *const Title, _: ?*const cs.CompositorState, _: ?*const cs.OutputInfo, _: *const Theme, _: u16, _: u16) void {}
 };
 
 // ---------------------------------------------------------------------------
@@ -597,9 +598,9 @@ pub const Minimap = struct {
         return null;
     }
 
-    pub fn render(_: *const Minimap, state: ?*const cs.CompositorState, theme: *const Theme, _: u16, _: u16) void {
+    pub fn render(_: *const Minimap, state: ?*const cs.CompositorState, output_info: ?*const cs.OutputInfo, theme: *const Theme, _: u16, _: u16) void {
         const s = state orelse return;
-        const output = s.getFocusedOutput() orelse return;
+        const output = output_info orelse return;
         if (output.column_count == 0) return;
 
         const usable_w: f32 = @floatFromInt(output.usable_w);
@@ -763,7 +764,7 @@ pub const Signal = struct {
         return null;
     }
 
-    pub fn render(_: *const Signal, _: ?*const cs.CompositorState, _: *const Theme, _: u16, _: u16) void {}
+    pub fn render(_: *const Signal, _: ?*const cs.CompositorState, _: ?*const cs.OutputInfo, _: *const Theme, _: u16, _: u16) void {}
 };
 
 // ---------------------------------------------------------------------------
@@ -809,7 +810,7 @@ pub const Custom = struct {
         return if (self.text_len > 0) self.text[0..self.text_len] else null;
     }
 
-    pub fn render(_: *const Custom, _: ?*const cs.CompositorState, _: *const Theme, _: u16, _: u16) void {}
+    pub fn render(_: *const Custom, _: ?*const cs.CompositorState, _: ?*const cs.OutputInfo, _: *const Theme, _: u16, _: u16) void {}
 };
 
 // ---------------------------------------------------------------------------
@@ -890,8 +891,11 @@ pub const ModuleManager = struct {
         theme: *const Theme,
         font_id: u16,
         font_size: u16,
+        output_x: i32,
+        output_y: i32,
     ) void {
         const state_ptr: ?*const cs.CompositorState = if (self.compositor_state != null) &self.compositor_state.? else null;
+        const output_ptr: ?*const cs.OutputInfo = if (state_ptr) |s| s.getOutput(output_x, output_y) orelse s.getFocusedOutput() else null;
         for (modules) |*m| {
             if (m.getText(state_ptr)) |text| {
                 // Text module — wrap in section styling
@@ -910,7 +914,7 @@ pub const ModuleManager = struct {
                 });
             } else {
                 // Widget module — renders its own UI
-                m.render(state_ptr, theme, font_id, font_size);
+                m.render(state_ptr, output_ptr, theme, font_id, font_size);
             }
         }
     }
