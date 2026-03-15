@@ -91,9 +91,6 @@ const Surface = struct {
 // Wayland globals
 var compositor: ?*wl.Compositor = null;
 var layer_shell: ?*zwlr.LayerShellV1 = null;
-var seat: ?*wl.Seat = null;
-var shm: ?*wl.Shm = null;
-
 // Per-output surfaces
 var surfaces: [MAX_OUTPUTS]Surface = [_]Surface{.{}} ** MAX_OUTPUTS;
 var surface_count: usize = 0;
@@ -112,9 +109,6 @@ var text_renderer: TextRenderer = undefined;
 var layout: Layout = undefined;
 var frame_clock: animation.FrameClock = animation.FrameClock.init();
 var dispatch: janet.Dispatch = undefined;
-
-// Font ID for the primary font
-
 
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
@@ -437,10 +431,6 @@ fn registryListener(registry_: *wl.Registry, event: wl.Registry.Event, _: *const
                 compositor = registry_.bind(global.name, wl.Compositor, @min(global.version, 6)) catch return;
             } else if (std.mem.eql(u8, iface, std.mem.span(zwlr.LayerShellV1.interface.name))) {
                 layer_shell = registry_.bind(global.name, zwlr.LayerShellV1, @min(global.version, 5)) catch return;
-            } else if (std.mem.eql(u8, iface, std.mem.span(wl.Seat.interface.name))) {
-                seat = registry_.bind(global.name, wl.Seat, @min(global.version, 9)) catch return;
-            } else if (std.mem.eql(u8, iface, std.mem.span(wl.Shm.interface.name))) {
-                shm = registry_.bind(global.name, wl.Shm, @min(global.version, 2)) catch return;
             } else if (std.mem.eql(u8, iface, std.mem.span(wl.Output.interface.name))) {
                 if (surface_count < MAX_OUTPUTS) {
                     const output = registry_.bind(global.name, wl.Output, @min(global.version, 4)) catch return;

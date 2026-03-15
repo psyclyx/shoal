@@ -108,9 +108,9 @@
     (= ch (chr "\""))  (parse-string s pos)
     (= ch (chr "{"))   (parse-object s pos *keywordize*)
     (= ch (chr "["))   (parse-array s pos)
-    (= ch (chr "t"))   [true (+ pos 4)]   # true
-    (= ch (chr "f"))   [false (+ pos 5)]  # false
-    (= ch (chr "n"))   [nil (+ pos 4)]    # null
+    (= ch (chr "t"))   [true (min (+ pos 4) (length s))]   # true
+    (= ch (chr "f"))   [false (min (+ pos 5) (length s))]  # false
+    (= ch (chr "n"))   [nil (min (+ pos 4) (length s))]    # null
     (or (= ch (chr "-")) (<= (chr "0") ch (chr "9")))
     (parse-number s pos)
     [nil (+ pos 1)]))
