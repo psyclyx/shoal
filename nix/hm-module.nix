@@ -60,30 +60,6 @@ let
         type = lib.types.enum [ "none" "exclusive" "on_demand" ];
         default = "none";
       };
-
-      modules_left = lib.mkOption {
-        type = lib.types.listOf lib.types.str;
-        default = [ "workspaces" ];
-        description = "Modules for the left section";
-      };
-
-      modules_center = lib.mkOption {
-        type = lib.types.listOf lib.types.str;
-        default = [ "title" ];
-        description = "Modules for the center section";
-      };
-
-      modules_right = lib.mkOption {
-        type = lib.types.listOf lib.types.str;
-        default = [ "pulseaudio" "cpu" "memory" "network" "clock" ];
-        description = "Modules for the right section";
-      };
-
-      clock_format = lib.mkOption {
-        type = lib.types.str;
-        default = "%H:%M";
-        description = "Clock format string";
-      };
     };
   };
 
@@ -91,8 +67,7 @@ let
   surfaceList = lib.mapAttrsToList (_: surf: {
     inherit (surf)
       layer width height exclusive_zone margin namespace
-      keyboard_interactivity modules_left modules_center
-      modules_right clock_format;
+      keyboard_interactivity;
     anchor = lib.filterAttrs (_: v: v) surf.anchor;
   }) cfg.surfaces;
 
