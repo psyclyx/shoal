@@ -137,19 +137,9 @@ pub fn walkHiccup(node: jc.Janet) void {
 
 fn walkContainer(direction: clay.LayoutDirection, attrs: jc.Janet, children: []const jc.Janet) void {
     var config = clay.ElementDeclaration{
-        .id = .{},
         .layout = .{
             .direction = direction,
         },
-        .background_color = .{ 0, 0, 0, 0 },
-        .corner_radius = .{},
-        .image = .{},
-        .floating = .{},
-        .custom = .{},
-        .clip = .{},
-        .border = .{},
-        .aspect_ratio = .{},
-        .user_data = null,
     };
 
     applyContainerAttrs(&config, attrs);

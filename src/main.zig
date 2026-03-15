@@ -116,6 +116,7 @@ var text_renderer: TextRenderer = undefined;
 var layout: Layout = undefined;
 var frame_clock: animation.FrameClock = animation.FrameClock.init();
 var module_manager: ModuleManager = undefined;
+var dispatch: janet.Dispatch = undefined;
 
 // Font ID for the primary font
 var primary_font_id: u16 = 0;
@@ -134,7 +135,7 @@ pub fn main() !void {
     try janet.init();
     defer janet.deinit();
 
-    var dispatch = janet.createDispatch();
+    dispatch = janet.createDispatch();
     try dispatch.initBoot();
     defer dispatch.deinitDispatch();
 
@@ -201,6 +202,18 @@ pub fn main() !void {
         log.err("subscription test FAILED: expected :ready", .{});
         return error.SubTestFailed;
     }
+
+    // -- Register a test view function --
+    // A simple hiccup view: a row with a text child, using subscription data.
+    _ = try dispatch.eval(
+        \\(reg-view
+        \\  (fn []
+        \\    [:row {:w :grow :h :grow :pad 8 :bg [30 30 46 255] :radius 8}
+        \\      [:col {:w :grow :gap 4 :align-y :center}
+        \\        [:text {:color [205 214 244 255] :size 14}
+        \\          (string "shoal " (sub :status))]]]))
+    , "test-view");
+    log.info("test view registered (hiccup pipeline active)", .{});
 
     const display = try wl.Display.connect(null);
     defer display.disconnect();
@@ -440,7 +453,11 @@ fn renderSurface(surf: *Surface) bool {
     layout.setDimensions(w, h);
 
     layout.beginLayout();
-    declareUI(surf.output_name[0..surf.output_name_len]);
+    // Try Janet view fn first; fall back to legacy declareUI
+    dispatch.prepareRender();
+    if (!dispatch.renderView()) {
+        declareUI(surf.output_name[0..surf.output_name_len]);
+    }
     layout.endLayout();
 
     renderer.end();
