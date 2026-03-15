@@ -487,7 +487,9 @@ pub const Dispatch = struct {
             if (now >= timer.fire_time) {
                 self.enqueue(timer.event);
                 if (timer.repeat) {
-                    timer.fire_time = now + timer.interval;
+                    timer.fire_time += timer.interval;
+                    // If fallen far behind (e.g. system suspend), reset to avoid burst
+                    if (timer.fire_time < now) timer.fire_time = now + timer.interval;
                 } else {
                     self.freeTimer(timer);
                 }
@@ -549,6 +551,7 @@ pub const Dispatch = struct {
                 slot.progress = 1.0;
                 slot.current = slot.target;
                 self.finishAnim(slot);
+                any_active = true; // need one more render for the final value
             } else {
                 const eased = slot.easing.apply(slot.progress);
                 const t: f64 = @floatCast(eased);

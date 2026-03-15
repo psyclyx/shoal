@@ -41,9 +41,12 @@ pub fn makeEvent(name: [:0]const u8) Janet {
 
 /// Construct an event tuple with arguments like [:event-id arg1 arg2 ...]
 pub fn makeEventArgs(name: [:0]const u8, args: []const Janet) Janet {
+    // Compute keyword before janet_tuple_begin — kw() can allocate and trigger
+    // GC, which would collect the unrooted tuple buffer.
+    const name_kw = kw(name);
     const n = args.len + 1;
     const buf = c.janet_tuple_begin(@intCast(n));
-    buf[0] = kw(name);
+    buf[0] = name_kw;
     for (args, 0..) |arg, i| {
         buf[@intCast(i + 1)] = arg;
     }
