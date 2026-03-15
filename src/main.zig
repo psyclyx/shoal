@@ -306,16 +306,17 @@ pub fn main() !void {
 
         // Check timers, process event queue
         dispatch.checkTimers();
+        var changed = false;
         if (dispatch.processQueue()) {
             if (dispatch.render_dirty) {
                 dispatch.render_dirty = false;
-                markAllDirty();
+                changed = true;
             }
         }
 
         // Tick animations
         const dt = frame_clock.tick();
-        var changed = dispatch.tickAnimations(dt);
+        changed = changed or dispatch.tickAnimations(dt);
 
         // Process any completion events from finished animations
         if (dispatch.processQueue()) {

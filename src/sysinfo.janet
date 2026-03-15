@@ -17,8 +17,10 @@
       # /proc/stat "cpu" line: user nice system idle iowait irq softirq steal
       # Filter empty strings from double-space after "cpu"
       (def vals (seq [p :in (slice parts 1)
-                      :when (> (length p) 0)]
-                  (scan-number p)))
+                      :when (> (length p) 0)
+                      :let [n (scan-number p)]
+                      :when n]
+                  n))
       (when (>= (length vals) 5)
         (var total 0)
         (each v vals (set total (+ total v)))

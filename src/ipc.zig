@@ -339,6 +339,11 @@ pub const IpcPool = struct {
         const reconnect_event_items = [2]Janet{ jt.kw("_ipc-reconnect"), spec };
         const reconnect_event = jt.makeTuple(&reconnect_event_items);
 
+        // Root the event tuple before further allocations — janet_table below
+        // can trigger GC, and reconnect_event/spec are only on the C stack.
+        c.janet_gcroot(reconnect_event);
+        defer _ = c.janet_gcunroot(reconnect_event);
+
         // Use the connection name as timer id so repeated failures replace
         // rather than stack timers
         const name_val = jt.janetGet(spec, jt.kw("name"));
