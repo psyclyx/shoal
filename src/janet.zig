@@ -297,7 +297,7 @@ pub const Dispatch = struct {
         };
 
         // Look up handler
-        const handler_entry = self.pcall1(self.fn_get_handler, event_id) orelse return;
+        const handler_entry = self.pcall(self.fn_get_handler, &.{event_id}) orelse return;
         if (c.janet_checktype(handler_entry, c.JANET_NIL) != 0) {
             log.debug("dispatch: no handler for event", .{});
             return;
@@ -314,7 +314,7 @@ pub const Dispatch = struct {
         const cofx = self.buildCofx(event, cofx_keys);
 
         // Call handler: (handler-fn cofx event) → fx-map
-        const fx_map = self.pcall2(handler_fn, cofx, event) orelse return;
+        const fx_map = self.pcall(handler_fn, &.{ cofx, event }) orelse return;
 
         // Execute effects
         self.executeFx(fx_map);
@@ -339,13 +339,13 @@ pub const Dispatch = struct {
             if (view.items) |items| {
                 for (0..@intCast(view.len)) |i| {
                     const cofx_id = items[i];
-                    const injector = self.pcall1(self.fn_get_cofx_injector, cofx_id) orelse continue;
+                    const injector = self.pcall(self.fn_get_cofx_injector, &.{cofx_id}) orelse continue;
                     if (c.janet_checktype(injector, c.JANET_NIL) != 0) {
                         log.warn("dispatch: unknown cofx injector requested", .{});
                         continue;
                     }
                     // Call injector: (injector cofx-table) → updated cofx-table
-                    _ = self.pcall1(injector, cofx_val) orelse continue;
+                    _ = self.pcall(injector, &.{cofx_val}) orelse continue;
                 }
             }
         }
@@ -373,7 +373,7 @@ pub const Dispatch = struct {
 
             if (std.mem.eql(u8, fx_name, "db")) {
                 self.setDb(fx_val);
-                _ = self.pcall0(self.fn_bump_generation);
+                _ = self.pcall(self.fn_bump_generation, &.{});
             } else if (std.mem.eql(u8, fx_name, "anim")) {
                 self.handleAnimFx(fx_val);
             } else if (std.mem.eql(u8, fx_name, "render")) {
@@ -390,12 +390,12 @@ pub const Dispatch = struct {
                 self.handleIpcFx(fx_val);
             } else {
                 // Look up registered fx executor
-                const executor = self.pcall1(self.fn_get_fx_executor, fx_key) orelse continue;
+                const executor = self.pcall(self.fn_get_fx_executor, &.{fx_key}) orelse continue;
                 if (c.janet_checktype(executor, c.JANET_NIL) != 0) {
                     log.warn("dispatch: unknown fx", .{});
                     continue;
                 }
-                _ = self.pcall1(executor, fx_val) orelse continue;
+                _ = self.pcall(executor, &.{fx_val}) orelse continue;
             }
         }
     }
@@ -1537,7 +1537,7 @@ pub const Dispatch = struct {
 
     /// Set the current db for subscription evaluation. Call before view fn.
     pub fn prepareRender(self: *Dispatch) void {
-        _ = self.pcall1(self.fn_set_current_db, self.db);
+        _ = self.pcall(self.fn_set_current_db, &.{self.db});
     }
 
     /// Call the registered view function and walk the resulting hiccup tree.
@@ -1545,11 +1545,11 @@ pub const Dispatch = struct {
     /// Returns true if a view was rendered, false if no view fn registered.
     pub fn renderView(self: *Dispatch) bool {
         // Get the view function
-        const view_fn_val = self.pcall0(self.fn_get_view_fn) orelse return false;
+        const view_fn_val = self.pcall(self.fn_get_view_fn, &.{}) orelse return false;
         if (c.janet_checktype(view_fn_val, c.JANET_NIL) != 0) return false;
 
         // Call the view function (no args) → hiccup tree
-        const hiccup_tree = self.pcall0(view_fn_val) orelse return false;
+        const hiccup_tree = self.pcall(view_fn_val, &.{}) orelse return false;
 
         // Walk the hiccup tree, emitting Clay calls
         hiccup.walkHiccup(hiccup_tree);
@@ -1557,64 +1557,27 @@ pub const Dispatch = struct {
     }
 
     /// Protected call with 0 arguments. Returns result or null on error.
-    fn pcall0(self: *Dispatch, func: Janet) ?Janet {
+    fn pcall(self: *Dispatch, func: Janet, args: []const Janet) ?Janet {
         _ = self;
         if (c.janet_checktype(func, c.JANET_FUNCTION) == 0) {
-            log.warn("pcall0: not a function", .{});
+            log.warn("pcall: not a function", .{});
             return null;
         }
         var out: Janet = undefined;
-        const fiber = c.janet_fiber(c.janet_unwrap_function(func), 64, 0, null);
+        const argv: [*c]const Janet = if (args.len > 0) args.ptr else null;
+        const fiber = c.janet_fiber(
+            c.janet_unwrap_function(func),
+            64,
+            @intCast(args.len),
+            argv,
+        );
         if (fiber == null) {
-            log.warn("pcall0: could not create fiber", .{});
+            log.warn("pcall: could not create fiber", .{});
             return null;
         }
         const signal = c.janet_continue(fiber, c.janet_wrap_nil(), &out);
         if (signal != c.JANET_SIGNAL_OK) {
-            log.warn("pcall0: Janet error: {s}", .{janetToStr(out)});
-            return null;
-        }
-        return out;
-    }
-
-    /// Protected call with 1 argument. Returns result or null on error.
-    fn pcall1(self: *Dispatch, func: Janet, arg: Janet) ?Janet {
-        _ = self;
-        if (c.janet_checktype(func, c.JANET_FUNCTION) == 0) {
-            log.warn("pcall1: not a function", .{});
-            return null;
-        }
-        var out: Janet = undefined;
-        const fiber = c.janet_fiber(c.janet_unwrap_function(func), 64, 1, &arg);
-        if (fiber == null) {
-            log.warn("pcall1: could not create fiber", .{});
-            return null;
-        }
-        const signal = c.janet_continue(fiber, c.janet_wrap_nil(), &out);
-        if (signal != c.JANET_SIGNAL_OK) {
-            log.warn("pcall1: Janet error: {s}", .{janetToStr(out)});
-            return null;
-        }
-        return out;
-    }
-
-    /// Protected call with 2 arguments. Returns result or null on error.
-    fn pcall2(self: *Dispatch, func: Janet, arg1: Janet, arg2: Janet) ?Janet {
-        _ = self;
-        if (c.janet_checktype(func, c.JANET_FUNCTION) == 0) {
-            log.warn("pcall2: not a function", .{});
-            return null;
-        }
-        var args = [2]Janet{ arg1, arg2 };
-        var out: Janet = undefined;
-        const fiber = c.janet_fiber(c.janet_unwrap_function(func), 64, 2, &args);
-        if (fiber == null) {
-            log.warn("pcall2: could not create fiber", .{});
-            return null;
-        }
-        const signal = c.janet_continue(fiber, c.janet_wrap_nil(), &out);
-        if (signal != c.JANET_SIGNAL_OK) {
-            log.warn("pcall2: Janet error: {s}", .{janetToStr(out)});
+            log.warn("pcall: Janet error: {s}", .{janetToStr(out)});
             return null;
         }
         return out;
