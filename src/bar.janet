@@ -27,10 +27,12 @@
 
 (defn- tag-view [idx tag]
   (def id (string "tag-" idx))
+  (def hover (anim (keyword id "-hover")))
   (if (tag :focused)
     [:row {:id id :w 22 :h 22 :bg accent :radius 5 :align-x :center :align-y :center}
       [:text {:color bg :size 13} (string idx)]]
-    [:row {:id id :w 22 :h 22 :radius 5 :align-x :center :align-y :center}
+    [:row {:id id :w 22 :h 22 :bg [69 71 90 (math/floor (* hover 255))]
+           :radius 5 :align-x :center :align-y :center}
       [:text {:color text-color :size 13} (string idx)]]))
 
 (defn- workspaces-view []
@@ -87,7 +89,19 @@
       (bat-view)
       (clock-view)]])
 
-# -- Click handler --
+# -- Pointer handlers --
+
+(reg-event-handler :pointer-enter
+  (fn [cofx event]
+    (def id (get event 1 ""))
+    (when (string/has-prefix? "tag-" id)
+      {:anim {:id (keyword id "-hover") :to 1 :duration 0.15 :easing :ease-out-cubic}})))
+
+(reg-event-handler :pointer-leave
+  (fn [cofx event]
+    (def id (get event 1 ""))
+    (when (string/has-prefix? "tag-" id)
+      {:anim {:id (keyword id "-hover") :to 0 :duration 0.2 :easing :ease-out-cubic}})))
 
 (reg-event-handler :click
   (fn [cofx event]

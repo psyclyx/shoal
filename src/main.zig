@@ -105,6 +105,13 @@ var pointer_button_pressed: bool = false;
 var pointer_button_just_released: bool = false;
 var pointer_surface_changed: bool = false;
 
+// Hover tracking — stores element IDs hovered in the previous frame
+const MAX_HOVER_IDS = 8;
+const MAX_HOVER_ID_LEN = 64;
+var prev_hover_strs: [MAX_HOVER_IDS][MAX_HOVER_ID_LEN]u8 = [_][MAX_HOVER_ID_LEN]u8{[_]u8{0} ** MAX_HOVER_ID_LEN} ** MAX_HOVER_IDS;
+var prev_hover_lens: [MAX_HOVER_IDS]usize = [_]usize{0} ** MAX_HOVER_IDS;
+var prev_hover_count: usize = 0;
+
 // Per-output surfaces
 var surfaces: [MAX_OUTPUTS]Surface = [_]Surface{.{}} ** MAX_OUTPUTS;
 var surface_count: usize = 0;
@@ -420,20 +427,78 @@ fn renderSurface(surf: *Surface) bool {
     layout.endLayout();
     hiccup_mod.endPass();
 
-    // After layout: check for click events on this surface
-    if (is_pointer_surface and pointer_button_just_released) {
-        pointer_button_just_released = false;
-        for (clay.getPointerOverIds()) |eid| {
-            const str_len: usize = @intCast(@max(0, eid.string_id.length));
-            if (str_len > 0) {
-                // GC safety: root the string before makeEventArgs, which
-                // allocates a keyword and tuple buffer (either can trigger GC).
-                const str_val = janet.c.janet_stringv(eid.string_id.chars, @as(i32, @intCast(str_len)));
-                janet.c.janet_gcroot(str_val);
-                defer _ = janet.c.janet_gcunroot(str_val);
-                dispatch.enqueue(janet.makeEventArgs("click", &.{str_val}));
+    // After layout: track hover changes and check for clicks on pointer surface
+    if (is_pointer_surface) {
+        const over_ids = clay.getPointerOverIds();
+
+        // Build current hover set from Clay's pointer-over elements
+        var curr_strs: [MAX_HOVER_IDS][MAX_HOVER_ID_LEN]u8 = undefined;
+        var curr_lens: [MAX_HOVER_IDS]usize = undefined;
+        var curr_count: usize = 0;
+        for (over_ids) |eid| {
+            const len: usize = @intCast(@max(0, eid.string_id.length));
+            if (len > 0 and len <= MAX_HOVER_ID_LEN and curr_count < MAX_HOVER_IDS) {
+                @memcpy(curr_strs[curr_count][0..len], eid.string_id.chars[0..len]);
+                curr_lens[curr_count] = len;
+                curr_count += 1;
             }
         }
+
+        // Dispatch :pointer-leave for elements no longer hovered
+        for (prev_hover_strs[0..prev_hover_count], prev_hover_lens[0..prev_hover_count]) |prev_str, prev_len| {
+            var found = false;
+            for (curr_strs[0..curr_count], curr_lens[0..curr_count]) |curr_str, curr_len| {
+                if (prev_len == curr_len and std.mem.eql(u8, prev_str[0..prev_len], curr_str[0..curr_len])) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                const str_val = janet.c.janet_stringv(&prev_str, @as(i32, @intCast(prev_len)));
+                janet.c.janet_gcroot(str_val);
+                defer _ = janet.c.janet_gcunroot(str_val);
+                dispatch.enqueue(janet.makeEventArgs("pointer-leave", &.{str_val}));
+            }
+        }
+
+        // Dispatch :pointer-enter for newly hovered elements
+        for (curr_strs[0..curr_count], curr_lens[0..curr_count]) |curr_str, curr_len| {
+            var found = false;
+            for (prev_hover_strs[0..prev_hover_count], prev_hover_lens[0..prev_hover_count]) |prev_str, prev_len| {
+                if (curr_len == prev_len and std.mem.eql(u8, curr_str[0..curr_len], prev_str[0..prev_len])) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                const str_val = janet.c.janet_stringv(&curr_str, @as(i32, @intCast(curr_len)));
+                janet.c.janet_gcroot(str_val);
+                defer _ = janet.c.janet_gcunroot(str_val);
+                dispatch.enqueue(janet.makeEventArgs("pointer-enter", &.{str_val}));
+            }
+        }
+
+        // Update previous hover state
+        for (0..curr_count) |i| {
+            @memcpy(prev_hover_strs[i][0..curr_lens[i]], curr_strs[i][0..curr_lens[i]]);
+            prev_hover_lens[i] = curr_lens[i];
+        }
+        prev_hover_count = curr_count;
+
+        // Click handling: dispatch :click on button release
+        if (pointer_button_just_released) {
+            pointer_button_just_released = false;
+            for (over_ids) |eid| {
+                const str_len: usize = @intCast(@max(0, eid.string_id.length));
+                if (str_len > 0) {
+                    const str_val = janet.c.janet_stringv(eid.string_id.chars, @as(i32, @intCast(str_len)));
+                    janet.c.janet_gcroot(str_val);
+                    defer _ = janet.c.janet_gcunroot(str_val);
+                    dispatch.enqueue(janet.makeEventArgs("click", &.{str_val}));
+                }
+            }
+        }
+
         _ = dispatch.processQueue();
     }
 
@@ -567,6 +632,15 @@ fn pointerListener(_: *wl.Pointer, event: wl.Pointer.Event, _: *const void) void
             pointer_surface_changed = true;
         },
         .leave => |_| {
+            // Dispatch :pointer-leave for all previously hovered elements
+            for (prev_hover_strs[0..prev_hover_count], prev_hover_lens[0..prev_hover_count]) |prev_str, prev_len| {
+                const str_val = janet.c.janet_stringv(&prev_str, @as(i32, @intCast(prev_len)));
+                janet.c.janet_gcroot(str_val);
+                defer _ = janet.c.janet_gcunroot(str_val);
+                dispatch.enqueue(janet.makeEventArgs("pointer-leave", &.{str_val}));
+            }
+            prev_hover_count = 0;
+
             pointer_surface = null;
             pointer_x = -1;
             pointer_y = -1;
