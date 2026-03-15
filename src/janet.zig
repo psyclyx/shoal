@@ -21,6 +21,7 @@ const json_source = @embedFile("json.janet");
 const tidepool_source = @embedFile("tidepool.janet");
 const clock_source = @embedFile("clock.janet");
 const sysinfo_source = @embedFile("sysinfo.janet");
+const bar_source = @embedFile("bar.janet");
 
 /// Initialize the Janet VM. Must be called before any other Janet operations.
 pub fn init() !void {
@@ -232,6 +233,16 @@ pub const Dispatch = struct {
             &sysinfo_out,
         );
         if (sysinfo_status != 0) return error.SysinfoBootFailed;
+
+        // Load bar view (registers the root view function)
+        var bar_out: Janet = undefined;
+        const bar_status = c.janet_dostring(
+            self.env,
+            bar_source.ptr,
+            "bar.janet",
+            &bar_out,
+        );
+        if (bar_status != 0) return error.BarBootFailed;
 
         // Cache lookup functions from the environment
         self.fn_get_handler = envLookup(self.env, "get-handler") orelse return error.BootMissingGetHandler;

@@ -139,83 +139,8 @@ pub fn main() !void {
     try dispatch.initBoot();
     defer dispatch.deinitDispatch();
 
-    // -- End-to-end dispatch test --
-    // Register handlers: :init sets db, :init also schedules a timer via fx
-    _ = try dispatch.eval(
-        \\(reg-event-handler :init
-        \\  (fn [cofx event]
-        \\    {:db (merge (cofx :db) {:initialized true})
-        \\     :timer {:delay 0.001 :event [:timer-test] :id :test-timer}}))
-    , "init-handler");
-
-    _ = try dispatch.eval(
-        \\(reg-event-handler :timer-test
-        \\  (fn [cofx event]
-        \\    {:db (merge (cofx :db) {:timer-fired true})}))
-    , "timer-test-handler");
-
-    // Dispatch :init via the queue and verify
+    // Dispatch :init event — tidepool connects, data sources are started below
     dispatch.enqueue(janet.makeEvent("init"));
-    _ = dispatch.processQueue();
-    const init_val = janet.janetGet(dispatch.db, janet.kw("initialized"));
-    if (janet.c.janet_checktype(init_val, janet.c.JANET_BOOLEAN) != 0 and
-        janet.c.janet_unwrap_boolean(init_val) != 0)
-    {
-        log.info("dispatch test PASSED: db updated with :initialized true", .{});
-    } else {
-        log.err("dispatch test FAILED: db not updated after :init dispatch", .{});
-        return error.DispatchTestFailed;
-    }
-
-    // Wait for timer to fire (1ms delay) and verify
-    std.Thread.sleep(5 * std.time.ns_per_ms);
-    dispatch.checkTimers();
-    _ = dispatch.processQueue();
-    const timer_val = janet.janetGet(dispatch.db, janet.kw("timer-fired"));
-    if (janet.c.janet_checktype(timer_val, janet.c.JANET_BOOLEAN) != 0 and
-        janet.c.janet_unwrap_boolean(timer_val) != 0)
-    {
-        log.info("timer test PASSED: timer fired and updated db", .{});
-    } else {
-        log.err("timer test FAILED: timer did not fire", .{});
-        return error.TimerTestFailed;
-    }
-
-    // -- Subscription test --
-    // Register subs: layer 2 extracts from db, layer 3 derives from layer 2
-    _ = try dispatch.eval(
-        \\(reg-sub :initialized (fn [db] (db :initialized)))
-        \\(reg-sub :timer-fired (fn [db] (db :timer-fired)))
-        \\(reg-sub :status [:initialized :timer-fired]
-        \\  (fn [init? fired?] (if (and init? fired?) :ready :pending)))
-    , "sub-registration");
-
-    // Prepare render context and evaluate subs
-    dispatch.prepareRender();
-    const sub_result = try dispatch.eval(
-        \\(sub :status)
-    , "sub-test");
-    const sub_str = janet.c.janet_unwrap_keyword(sub_result);
-    if (std.mem.eql(u8, std.mem.span(sub_str), "ready")) {
-        log.info("subscription test PASSED: layer 3 sub derived :ready", .{});
-    } else {
-        log.err("subscription test FAILED: expected :ready", .{});
-        return error.SubTestFailed;
-    }
-
-    // -- Register a test view function --
-    // A simple hiccup view: a row with a text child, using subscription data.
-    _ = try dispatch.eval(
-        \\(reg-view
-        \\  (fn []
-        \\    [:row {:w :grow :h :grow :pad 8 :bg [30 30 46 255] :radius 8}
-        \\      [:col {:w :grow :gap 4 :align-y :center}
-        \\        [:text {:color [205 214 244 255] :size 14}
-        \\          (string "shoal " (sub :status))]]]))
-    , "test-view");
-    log.info("test view registered (hiccup pipeline active)", .{});
-
-    // Start data source modules (clock, cpu, memory, battery)
     dispatch.enqueue(janet.makeEvent("clock/start"));
     dispatch.enqueue(janet.makeEvent("cpu/start"));
     dispatch.enqueue(janet.makeEvent("mem/start"));
