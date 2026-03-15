@@ -48,6 +48,7 @@ pub const GlyphAtlas = struct {
     cursor_x: u32,
     cursor_y: u32,
     row_height: u32,
+    generation: u32 = 0,
 
     pub fn init() GlyphAtlas {
         var tex: c.GLuint = 0;
@@ -153,29 +154,9 @@ pub const GlyphAtlas = struct {
         };
     }
 
-    /// Double the atlas size (up to the cap). Creates a new texture and copies
-    /// the old content via framebuffer blit, since we cannot easily
-    /// re-rasterize all cached glyphs here. The caller should invalidate
-    /// glyph caches when this returns true if UV coordinates have shifted;
-    /// however because we only grow (never reorganise), existing UVs remain
-    /// valid after rescaling — we just need to adjust them. For simplicity
-    /// we grow height only, so U coords stay the same and V coords scale by
-    /// old_height/new_height. Rather than patching every cached GlyphInfo we
-    /// re-allocate a larger texture and blit the old content into the top-left
-    /// corner, keeping pixel positions identical. Because the texture is
-    /// larger the UV denominators change, but we record UVs at upload time
-    /// against the then-current size, so only *future* uploads use the new
-    /// size. Existing UVs are therefore *wrong* after a resize.
-    ///
-    /// To keep things simple we instead double *both* dimensions and
-    /// re-create the texture. Any previously cached GlyphInfo entries that
-    /// reference the old UVs will need to be re-rasterized. The FontFace
-    /// cache is invalidated by the caller when `upload` triggers a resize
-    /// (indicated by returning null and the caller retrying).
-    ///
-    /// Actually, let's take the simplest correct approach: grow the texture
-    /// and fix up nothing. We mark a flag and let FontFace know it must
-    /// re-populate.
+    /// Double the atlas size (up to the cap). Creates a new texture, copies
+    /// old pixel data into the top-left corner via FBO readback + subimage
+    /// upload. Bumps `generation` so FontFace caches know to invalidate.
     fn grow(self: *GlyphAtlas) bool {
         const new_width = self.width * 2;
         const new_height = self.height * 2;
@@ -265,13 +246,12 @@ pub const GlyphAtlas = struct {
             old_pixels.ptr,
         );
 
-        // UV coordinates for previously uploaded glyphs were computed against
-        // the old dimensions. We need to scale them. Since we doubled both
-        // axes: new_u = old_u * (old_width / new_width). The caller (FontFace)
-        // will handle this via `rescaleUVs`.
+        // Bumped generation — FontFace.getGlyph will clear its cache on next
+        // access and re-rasterize glyphs with correct UVs.
         self.texture = new_tex;
         self.width = new_width;
         self.height = new_height;
+        self.generation += 1;
 
         return true;
     }
@@ -287,6 +267,7 @@ pub const FontFace = struct {
     size: u16,
     glyph_cache: std.AutoHashMap(u32, GlyphInfo),
     atlas: *GlyphAtlas,
+    atlas_generation: u32 = 0,
 
     ascender: f32,
     descender: f32,
@@ -343,6 +324,11 @@ pub const FontFace = struct {
     /// Get glyph info for a given glyph index, rasterizing and uploading
     /// to the atlas if not already cached.
     pub fn getGlyph(self: *FontFace, glyph_index: u32) !GlyphInfo {
+        if (self.atlas.generation != self.atlas_generation) {
+            self.glyph_cache.clearRetainingCapacity();
+            self.atlas_generation = self.atlas.generation;
+        }
+
         if (self.glyph_cache.get(glyph_index)) |info| {
             return info;
         }
