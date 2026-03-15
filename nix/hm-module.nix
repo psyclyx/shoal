@@ -151,8 +151,13 @@ in {
       programs.shoal.theme = let
         colors = config.lib.stylix.colors;
         fonts = config.stylix.fonts;
+        opacity = config.stylix.opacity.desktop;
+        alphaHex = let
+          a = builtins.floor (opacity * 255);
+          hex = lib.toHexString a;
+        in if builtins.stringLength hex == 1 then "0${hex}" else hex;
       in lib.mkDefault ({
-        base00 = "#${colors.base00}";
+        base00 = "#${colors.base00}${alphaHex}";
         base01 = "#${colors.base01}";
         base02 = "#${colors.base02}";
         base03 = "#${colors.base03}";
@@ -168,7 +173,7 @@ in {
         base0D = "#${colors.base0D}";
         base0E = "#${colors.base0E}";
         base0F = "#${colors.base0F}";
-        font_family = fonts.monospace.name;
+        font_family = fonts.sansSerif.name;
         font_size = fonts.sizes.desktop;
       });
     })
