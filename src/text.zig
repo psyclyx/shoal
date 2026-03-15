@@ -316,6 +316,8 @@ pub const FontFace = struct {
 
 pub const ShapedGlyph = struct {
     glyph_index: u32,
+    cluster: u32, // byte offset into source UTF-8 text
+    font_id: u16,
     x_offset: f32,
     y_offset: f32,
     x_advance: f32,
@@ -334,12 +336,21 @@ pub const ShapedText = struct {
 // TextRenderer — top-level API
 // ---------------------------------------------------------------------------
 
+const FallbackEntry = struct {
+    font_id: u16,
+    found: bool,
+};
+
 pub const TextRenderer = struct {
     ft_lib: c.FT_Library,
     atlas: GlyphAtlas,
     fonts: std.AutoHashMap(u16, FontFace),
     allocator: std.mem.Allocator,
     next_font_id: u16,
+    // Fallback caches: codepoint → fallback font_id (or null = no font found)
+    fallback_cache: std.AutoHashMap(u32, FallbackEntry),
+    // Font path → font_id (avoid loading same fallback font twice)
+    path_cache: std.StringHashMap(u16),
 
     pub fn init(allocator: std.mem.Allocator) !TextRenderer {
         var ft_lib: c.FT_Library = null;
@@ -353,6 +364,8 @@ pub const TextRenderer = struct {
             .fonts = std.AutoHashMap(u16, FontFace).init(allocator),
             .allocator = allocator,
             .next_font_id = 0,
+            .fallback_cache = std.AutoHashMap(u32, FallbackEntry).init(allocator),
+            .path_cache = std.StringHashMap(u16).init(allocator),
         };
     }
 
@@ -362,6 +375,13 @@ pub const TextRenderer = struct {
             face.deinit();
         }
         self.fonts.deinit();
+        // Free owned path keys
+        var pit = self.path_cache.keyIterator();
+        while (pit.next()) |key| {
+            self.allocator.free(key.*);
+        }
+        self.path_cache.deinit();
+        self.fallback_cache.deinit();
         self.atlas.deinit();
         _ = c.FT_Done_FreeType(self.ft_lib);
     }
@@ -445,7 +465,9 @@ pub const TextRenderer = struct {
     /// Shape a UTF-8 text string using harfbuzz, returning positioned glyphs.
     pub fn shapeText(self: *TextRenderer, font_id: u16, text: []const u8) !ShapedText {
         const face_ptr = self.fonts.getPtr(font_id) orelse return error.InvalidFontId;
-        return shapeTextInternal(self.allocator, face_ptr.hb_font, text);
+        var shaped = try shapeTextInternal(self.allocator, face_ptr.hb_font, font_id, text);
+        self.substituteFallbackGlyphs(&shaped, font_id, text);
+        return shaped;
     }
 
     /// Measure text dimensions. Returns .{ width, height }.
@@ -454,7 +476,8 @@ pub const TextRenderer = struct {
         _ = font_size; // size is baked into the FontFace
         const face_ptr = self.fonts.getPtr(font_id) orelse return .{ 0, 0 };
 
-        const shaped = shapeTextInternal(self.allocator, face_ptr.hb_font, text) catch return .{ 0, 0 };
+        var shaped = shapeTextInternal(self.allocator, face_ptr.hb_font, font_id, text) catch return .{ 0, 0 };
+        self.substituteFallbackGlyphs(&shaped, font_id, text);
         defer shaped.deinit(self.allocator);
 
         return .{ shaped.total_width, face_ptr.line_height };
@@ -484,6 +507,106 @@ pub const TextRenderer = struct {
             .line_height = face_ptr.line_height,
         };
     }
+
+    /// Load a font by file path (for fallback fonts). Returns a font_id.
+    fn loadFontFromPath(self: *TextRenderer, path: []const u8, size: u16) !u16 {
+        // Check if already loaded
+        if (self.path_cache.get(path)) |fid| return fid;
+
+        const font_id = self.next_font_id;
+        self.next_font_id += 1;
+
+        const face = try FontFace.init(self.allocator, self.ft_lib, &self.atlas, path, size);
+        try self.fonts.put(font_id, face);
+
+        // Store owned copy of path as cache key
+        const path_owned = try self.allocator.dupe(u8, path);
+        try self.path_cache.put(path_owned, font_id);
+
+        log.info("loaded fallback font id={} size={} path=\"{s}\"", .{ font_id, size, path });
+
+        return font_id;
+    }
+
+    /// Find a fallback font for a codepoint via fontconfig. Returns font_id or null.
+    fn findFallbackFont(self: *TextRenderer, codepoint: u32, size: u16) ?u16 {
+        // Check codepoint cache
+        if (self.fallback_cache.get(codepoint)) |entry| {
+            return if (entry.found) entry.font_id else null;
+        }
+
+        // Query fontconfig for a font covering this codepoint
+        const font_id = self.queryFontconfig(codepoint, size);
+
+        // Cache the result (including negative)
+        self.fallback_cache.put(codepoint, .{
+            .font_id = font_id orelse 0,
+            .found = font_id != null,
+        }) catch {};
+
+        return font_id;
+    }
+
+    fn queryFontconfig(self: *TextRenderer, codepoint: u32, size: u16) ?u16 {
+        const charset = c.FcCharSetCreate() orelse return null;
+        defer c.FcCharSetDestroy(charset);
+        _ = c.FcCharSetAddChar(charset, codepoint);
+
+        const pattern = c.FcPatternCreate() orelse return null;
+        defer c.FcPatternDestroy(pattern);
+        _ = c.FcPatternAddCharSet(pattern, c.FC_CHARSET, charset);
+        _ = c.FcConfigSubstitute(null, pattern, c.FcMatchPattern);
+        c.FcDefaultSubstitute(pattern);
+
+        var result: c.FcResult = c.FcResultNoMatch;
+        const matched = c.FcFontMatch(null, pattern, &result);
+        if (matched == null or result != c.FcResultMatch) return null;
+        defer c.FcPatternDestroy(matched);
+
+        var file_path: [*c]c.FcChar8 = null;
+        if (c.FcPatternGetString(matched, c.FC_FILE, 0, &file_path) != c.FcResultMatch) {
+            return null;
+        }
+
+        const path_slice = std.mem.span(@as([*:0]const u8, @ptrCast(file_path)));
+        return self.loadFontFromPath(path_slice, size) catch null;
+    }
+
+    /// Scan shaped glyphs for .notdef (index 0) and substitute with fallback fonts.
+    fn substituteFallbackGlyphs(self: *TextRenderer, shaped: *ShapedText, primary_font_id: u16, text: []const u8) void {
+        const primary_face = self.fonts.getPtr(primary_font_id) orelse return;
+        const primary_size = primary_face.size;
+
+        for (shaped.glyphs) |*glyph| {
+            if (glyph.glyph_index != 0) continue;
+
+            // Decode the codepoint from the source text at the cluster byte offset
+            const cluster = glyph.cluster;
+            if (cluster >= text.len) continue;
+            const seq_len = std.unicode.utf8ByteSequenceLength(text[cluster]) catch continue;
+            if (cluster + seq_len > text.len) continue;
+            const codepoint: u32 = @intCast(std.unicode.utf8Decode(text[cluster..][0..seq_len]) catch continue);
+
+            const fb_font_id = self.findFallbackFont(codepoint, primary_size) orelse continue;
+            const fb_face = self.fonts.getPtr(fb_font_id) orelse continue;
+
+            // Re-shape just this codepoint with the fallback font to get correct metrics
+            const cp21: u21 = std.math.cast(u21, codepoint) orelse continue;
+            var cp_buf: [4]u8 = undefined;
+            const cp_len = std.unicode.utf8Encode(cp21, &cp_buf) catch continue;
+
+            const fb_shaped = shapeTextInternal(self.allocator, fb_face.hb_font, fb_font_id, cp_buf[0..cp_len]) catch continue;
+            defer fb_shaped.deinit(self.allocator);
+
+            if (fb_shaped.glyphs.len > 0 and fb_shaped.glyphs[0].glyph_index != 0) {
+                const old_advance = glyph.x_advance;
+                glyph.* = fb_shaped.glyphs[0];
+                glyph.cluster = cluster; // preserve original cluster
+                // Update total width with the advance difference
+                shaped.total_width += glyph.x_advance - old_advance;
+            }
+        }
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -493,6 +616,7 @@ pub const TextRenderer = struct {
 fn shapeTextInternal(
     allocator: std.mem.Allocator,
     hb_font: *c.hb_font_t,
+    font_id: u16,
     text: []const u8,
 ) !ShapedText {
     const buf = c.hb_buffer_create() orelse return error.HarfbuzzBufferCreateFailed;
@@ -528,6 +652,8 @@ fn shapeTextInternal(
 
         glyphs[i] = ShapedGlyph{
             .glyph_index = hb_infos[i].codepoint,
+            .cluster = hb_infos[i].cluster,
+            .font_id = font_id,
             .x_offset = x_offset,
             .y_offset = y_offset,
             .x_advance = x_advance,

@@ -148,7 +148,7 @@ pub const Layout = struct {
 
         var cursor_x = x;
         for (shaped.glyphs) |glyph| {
-            const info = self.text_renderer.getGlyphInfo(font_id, glyph.glyph_index) catch continue;
+            const info = self.text_renderer.getGlyphInfo(glyph.font_id, glyph.glyph_index) catch continue;
 
             const gx = @round(cursor_x + glyph.x_offset + info.bearing_x);
             const gy = @round(baseline_y - glyph.y_offset - info.bearing_y);
