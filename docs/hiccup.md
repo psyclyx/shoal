@@ -120,7 +120,7 @@ Default: `:fit` (Clay's default).
 | Janet value | Clay BorderWidth |
 |-------------|-----------------|
 | `2` (number) | `.outside(2)` |
-| `[2 2 0 0]` (tuple) | `.{.left=2, .right=2, .top=0, .bottom=0}` |
+| `[2 2 0 0]` (tuple) | `.{.top=2, .right=2, .bottom=0, .left=0}` |
 
 ### Text attributes
 

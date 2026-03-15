@@ -405,14 +405,14 @@ fn parseBorderWidth(val: jc.Janet) clay.BorderWidth {
         return clay.BorderWidth.outside(floatToU16(jc.janet_unwrap_number(val)));
     }
 
-    // Tuple: [left right top bottom]
+    // Tuple: [top right bottom left] (CSS order, same as padding)
     const items = janetIndexedSlice(val) orelse return .{};
     if (items.len >= 4) {
         return .{
-            .left = floatToU16(janetToF64(items[0]) orelse 0),
+            .top = floatToU16(janetToF64(items[0]) orelse 0),
             .right = floatToU16(janetToF64(items[1]) orelse 0),
-            .top = floatToU16(janetToF64(items[2]) orelse 0),
-            .bottom = floatToU16(janetToF64(items[3]) orelse 0),
+            .bottom = floatToU16(janetToF64(items[2]) orelse 0),
+            .left = floatToU16(janetToF64(items[3]) orelse 0),
         };
     }
 
