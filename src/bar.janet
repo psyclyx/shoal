@@ -28,9 +28,9 @@
 (defn- tag-view [idx tag]
   (if (tag :focused)
     [:row {:w 22 :h 22 :bg accent :radius 5 :align-x :center :align-y :center}
-      [:text {:color bg :size 13} (string (+ idx 1))]]
+      [:text {:color bg :size 13} (string idx)]]
     [:row {:w 22 :h 22 :radius 5 :align-x :center :align-y :center}
-      [:text {:color text-color :size 13} (string (+ idx 1))]]))
+      [:text {:color text-color :size 13} (string idx)]]))
 
 (defn- workspaces-view []
   (def tags (sub :tp/tags))
