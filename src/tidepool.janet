@@ -164,6 +164,57 @@
             (set db (tp/apply-event db data)))))
       {:db db})))
 
+# -- Action helpers: send commands to tidepool --
+
+(defn- tp/dispatch-cmd [& args]
+  "Build an :ipc send fx that dispatches an action to tidepool.
+  Args are stringified and passed to (ipc/dispatch ...)."
+  {:ipc {:send {:name :tidepool
+                :data (string "(ipc/dispatch "
+                              (string/join (map |(string/format "%q" $) args) " ")
+                              ")\n")}}})
+
+# Common action event handlers
+(reg-event-handler :tp/focus-tag
+  (fn [cofx event]
+    (tp/dispatch-cmd "focus-tag" (string (get event 1 1)))))
+
+(reg-event-handler :tp/toggle-tag
+  (fn [cofx event]
+    (tp/dispatch-cmd "toggle-tag" (string (get event 1 1)))))
+
+(reg-event-handler :tp/set-tag
+  (fn [cofx event]
+    (tp/dispatch-cmd "set-tag" (string (get event 1 1)))))
+
+(reg-event-handler :tp/set-layout
+  (fn [cofx event]
+    (tp/dispatch-cmd "set-layout" (string (get event 1 "master-stack")))))
+
+(reg-event-handler :tp/cycle-layout
+  (fn [cofx event]
+    (tp/dispatch-cmd "cycle-layout" (string (get event 1 "next")))))
+
+(reg-event-handler :tp/focus
+  (fn [cofx event]
+    (tp/dispatch-cmd "focus" (string (get event 1 "next")))))
+
+(reg-event-handler :tp/close
+  (fn [cofx event]
+    (tp/dispatch-cmd "close")))
+
+(reg-event-handler :tp/zoom
+  (fn [cofx event]
+    (tp/dispatch-cmd "zoom")))
+
+(reg-event-handler :tp/fullscreen
+  (fn [cofx event]
+    (tp/dispatch-cmd "fullscreen")))
+
+(reg-event-handler :tp/float
+  (fn [cofx event]
+    (tp/dispatch-cmd "float")))
+
 # -- Subscriptions --
 
 (reg-sub :tp (fn [db] (get db :tp {})))
