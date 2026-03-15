@@ -438,18 +438,20 @@ pub const IpcPool = struct {
     }
 
     /// Netrepl framing: 4-byte LE length prefix + message body.
+    /// Uses a read cursor to avoid shifting the buffer per-byte/per-message.
     fn drainNetrepl(self: *IpcPool, slot: *IpcSlot, sink: jt.EventSink) void {
-        while (slot.recv_len > 0) {
+        var cursor: usize = 0;
+
+        while (cursor < slot.recv_len) {
             if (slot.netrepl_msg_len == null) {
-                // Reading header — need 4 bytes
-                while (slot.netrepl_hdr_len < 4 and slot.recv_len > 0) {
-                    slot.netrepl_hdr_buf[slot.netrepl_hdr_len] = slot.recv_buf[0];
-                    slot.netrepl_hdr_len += 1;
-                    slot.recv_len -= 1;
-                    if (slot.recv_len > 0) {
-                        std.mem.copyForwards(u8, slot.recv_buf[0..slot.recv_len], slot.recv_buf[1 .. slot.recv_len + 1]);
-                    }
-                }
+                // Reading header — need 4 bytes total (some may already be in hdr_buf)
+                const need = 4 - slot.netrepl_hdr_len;
+                const avail = slot.recv_len - cursor;
+                const take = @min(need, avail);
+                @memcpy(slot.netrepl_hdr_buf[slot.netrepl_hdr_len..][0..take], slot.recv_buf[cursor..][0..take]);
+                slot.netrepl_hdr_len += take;
+                cursor += take;
+
                 if (slot.netrepl_hdr_len < 4) break; // need more data
 
                 slot.netrepl_msg_len = std.mem.readInt(u32, &slot.netrepl_hdr_buf, .little);
@@ -463,19 +465,22 @@ pub const IpcPool = struct {
             }
 
             const msg_len = slot.netrepl_msg_len.?;
-            if (slot.recv_len < msg_len) break; // need more data
+            const avail = slot.recv_len - cursor;
+            if (avail < msg_len) break; // need more data
 
             // Have complete message
-            const payload = slot.recv_buf[0..msg_len];
-            enqueueMessage(slot, payload, .netrepl, sink);
+            enqueueMessage(slot, slot.recv_buf[cursor..][0..msg_len], .netrepl, sink);
+            cursor += msg_len;
+            slot.netrepl_msg_len = null;
+        }
 
-            // Consume message from buffer
-            const remaining = slot.recv_len - msg_len;
+        // Compact: shift unconsumed data to start of buffer
+        if (cursor > 0) {
+            const remaining = slot.recv_len - cursor;
             if (remaining > 0) {
-                std.mem.copyForwards(u8, slot.recv_buf[0..remaining], slot.recv_buf[msg_len..slot.recv_len]);
+                std.mem.copyForwards(u8, slot.recv_buf[0..remaining], slot.recv_buf[cursor..slot.recv_len]);
             }
             slot.recv_len = remaining;
-            slot.netrepl_msg_len = null;
         }
     }
 
