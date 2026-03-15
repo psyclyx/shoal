@@ -1,6 +1,6 @@
 # shoal — reactive event loop registration API
 #
-# Three registries: event handlers, cofx injectors, fx executors.
+# Registries: event handlers, cofx injectors, fx executors, subscriptions.
 # All tables are module-level. Zig reads these directly to dispatch events.
 
 (def- handlers
@@ -68,3 +68,74 @@
   "Look up an fx executor by fx-id. Returns fn or nil."
   [fx-id]
   (get fx-registry fx-id))
+
+# --- Subscriptions ---
+
+(def- sub-registry
+  "Registry: sub-id keyword → {:fn sub-fn :deps [...] or nil}"
+  @{})
+
+(def- sub-cache
+  "Cache: sub-id keyword → {:gen N :value V :inputs [...] or nil}"
+  @{})
+
+(var- db-generation 0)
+(var- *current-db* nil)
+
+(defn reg-sub
+  "Register a subscription.
+
+  Layer 2 (db extractor):
+    (reg-sub :id (fn [db] ...))
+
+  Layer 3 (sub-to-sub):
+    (reg-sub :id [:dep1 :dep2] (fn [v1 v2] ...))"
+  [sub-id & args]
+  (match args
+    [deps-vec sub-fn]
+    (put sub-registry sub-id {:fn sub-fn :deps deps-vec})
+
+    [sub-fn]
+    (put sub-registry sub-id {:fn sub-fn :deps nil})
+
+    _ (error "reg-sub: expected (id fn) or (id deps fn)")))
+
+(defn sub
+  "Query a subscription value. Evaluates lazily with memoization."
+  [sub-id]
+  (def entry (get sub-registry sub-id))
+  (unless entry (error (string "sub: unknown subscription " sub-id)))
+
+  (def cached (get sub-cache sub-id))
+
+  (if (entry :deps)
+    # Layer 3: depends on other subs
+    (let [input-vals (map sub (entry :deps))]
+      (if (and cached (deep= input-vals (cached :inputs)))
+        (cached :value)
+        (let [val (apply (entry :fn) input-vals)]
+          (put sub-cache sub-id {:gen db-generation
+                                  :value val
+                                  :inputs input-vals})
+          val)))
+    # Layer 2: depends on db
+    (if (and cached (= (cached :gen) db-generation))
+      (cached :value)
+      (let [val ((entry :fn) *current-db*)]
+        (put sub-cache sub-id {:gen db-generation :value val})
+        val))))
+
+(defn bump-generation
+  "Called by Zig after :db fx executes."
+  []
+  (++ db-generation))
+
+(defn set-current-db
+  "Called by Zig before view evaluation to make db visible to subs."
+  [db]
+  (set *current-db* db))
+
+(defn clear-sub-cache
+  "Clear all cached subscription values."
+  []
+  (eachk k sub-cache (put sub-cache k nil)))

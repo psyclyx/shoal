@@ -180,6 +180,28 @@ pub fn main() !void {
         return error.TimerTestFailed;
     }
 
+    // -- Subscription test --
+    // Register subs: layer 2 extracts from db, layer 3 derives from layer 2
+    _ = try dispatch.eval(
+        \\(reg-sub :initialized (fn [db] (db :initialized)))
+        \\(reg-sub :timer-fired (fn [db] (db :timer-fired)))
+        \\(reg-sub :status [:initialized :timer-fired]
+        \\  (fn [init? fired?] (if (and init? fired?) :ready :pending)))
+    , "sub-registration");
+
+    // Prepare render context and evaluate subs
+    dispatch.prepareRender();
+    const sub_result = try dispatch.eval(
+        \\(sub :status)
+    , "sub-test");
+    const sub_str = janet.c.janet_unwrap_keyword(sub_result);
+    if (std.mem.eql(u8, std.mem.span(sub_str), "ready")) {
+        log.info("subscription test PASSED: layer 3 sub derived :ready", .{});
+    } else {
+        log.err("subscription test FAILED: expected :ready", .{});
+        return error.SubTestFailed;
+    }
+
     const display = try wl.Display.connect(null);
     defer display.disconnect();
 

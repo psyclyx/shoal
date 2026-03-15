@@ -97,6 +97,8 @@ pub const Dispatch = struct {
     fn_get_handler: Janet = undefined,
     fn_get_cofx_injector: Janet = undefined,
     fn_get_fx_executor: Janet = undefined,
+    fn_bump_generation: Janet = undefined,
+    fn_set_current_db: Janet = undefined,
 
     /// Load the shoal boot file into a fresh environment. Sets up registries.
     pub fn initBoot(self: *Dispatch) !void {
@@ -114,6 +116,8 @@ pub const Dispatch = struct {
         self.fn_get_handler = envLookup(self.env, "get-handler") orelse return error.BootMissingGetHandler;
         self.fn_get_cofx_injector = envLookup(self.env, "get-cofx-injector") orelse return error.BootMissingGetCofxInjector;
         self.fn_get_fx_executor = envLookup(self.env, "get-fx-executor") orelse return error.BootMissingGetFxExecutor;
+        self.fn_bump_generation = envLookup(self.env, "bump-generation") orelse return error.BootMissingBumpGeneration;
+        self.fn_set_current_db = envLookup(self.env, "set-current-db") orelse return error.BootMissingSetCurrentDb;
 
         // GC root the db so it survives between event cycles
         c.janet_gcroot(self.db);
@@ -233,6 +237,7 @@ pub const Dispatch = struct {
 
             if (std.mem.eql(u8, fx_name, "db")) {
                 self.setDb(fx_val);
+                _ = self.pcall0(self.fn_bump_generation);
             } else if (std.mem.eql(u8, fx_name, "render")) {
                 self.render_dirty = true;
             } else if (std.mem.eql(u8, fx_name, "dispatch")) {
@@ -390,6 +395,32 @@ pub const Dispatch = struct {
         _ = c.janet_gcunroot(self.db);
         self.db = new_db;
         c.janet_gcroot(new_db);
+    }
+
+    /// Set the current db for subscription evaluation. Call before view fn.
+    pub fn prepareRender(self: *Dispatch) void {
+        _ = self.pcall1(self.fn_set_current_db, self.db);
+    }
+
+    /// Protected call with 0 arguments. Returns result or null on error.
+    fn pcall0(self: *Dispatch, func: Janet) ?Janet {
+        _ = self;
+        if (c.janet_checktype(func, c.JANET_FUNCTION) == 0) {
+            log.warn("pcall0: not a function", .{});
+            return null;
+        }
+        var out: Janet = undefined;
+        const fiber = c.janet_fiber(c.janet_unwrap_function(func), 64, 0, null);
+        if (fiber == null) {
+            log.warn("pcall0: could not create fiber", .{});
+            return null;
+        }
+        const signal = c.janet_continue(fiber, c.janet_wrap_nil(), &out);
+        if (signal != c.JANET_SIGNAL_OK) {
+            log.warn("pcall0: Janet error: {s}", .{janetToStr(out)});
+            return null;
+        }
+        return out;
     }
 
     /// Protected call with 1 argument. Returns result or null on error.
