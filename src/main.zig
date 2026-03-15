@@ -215,6 +215,13 @@ pub fn main() !void {
     , "test-view");
     log.info("test view registered (hiccup pipeline active)", .{});
 
+    // Start data source modules (clock, cpu, memory, battery)
+    dispatch.enqueue(janet.makeEvent("clock/start"));
+    dispatch.enqueue(janet.makeEvent("cpu/start"));
+    dispatch.enqueue(janet.makeEvent("mem/start"));
+    dispatch.enqueue(janet.makeEvent("bat/start"));
+    _ = dispatch.processQueue();
+
     const display = try wl.Display.connect(null);
     defer display.disconnect();
 

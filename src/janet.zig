@@ -19,6 +19,8 @@ pub const JanetTable = c.JanetTable;
 const boot_source = @embedFile("shoal.janet");
 const json_source = @embedFile("json.janet");
 const tidepool_source = @embedFile("tidepool.janet");
+const clock_source = @embedFile("clock.janet");
+const sysinfo_source = @embedFile("sysinfo.janet");
 
 /// Initialize the Janet VM. Must be called before any other Janet operations.
 pub fn init() !void {
@@ -210,6 +212,26 @@ pub const Dispatch = struct {
             &tp_out,
         );
         if (tp_status != 0) return error.TidepoolBootFailed;
+
+        // Load clock module (registers handlers + subs for time data)
+        var clock_out: Janet = undefined;
+        const clock_status = c.janet_dostring(
+            self.env,
+            clock_source.ptr,
+            "clock.janet",
+            &clock_out,
+        );
+        if (clock_status != 0) return error.ClockBootFailed;
+
+        // Load sysinfo module (registers handlers + subs for cpu/mem/battery)
+        var sysinfo_out: Janet = undefined;
+        const sysinfo_status = c.janet_dostring(
+            self.env,
+            sysinfo_source.ptr,
+            "sysinfo.janet",
+            &sysinfo_out,
+        );
+        if (sysinfo_status != 0) return error.SysinfoBootFailed;
 
         // Cache lookup functions from the environment
         self.fn_get_handler = envLookup(self.env, "get-handler") orelse return error.BootMissingGetHandler;
