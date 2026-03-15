@@ -1,0 +1,70 @@
+# shoal — reactive event loop registration API
+#
+# Three registries: event handlers, cofx injectors, fx executors.
+# All tables are module-level. Zig reads these directly to dispatch events.
+
+(def- handlers
+  "Registry: event-id keyword → handler-fn or {:fn handler-fn :cofx [...keys]}"
+  @{})
+
+(def- cofx-registry
+  "Registry: cofx-id keyword → injector-fn (fn [cofx] → cofx with key added)"
+  @{})
+
+(def- fx-registry
+  "Registry: fx-id keyword → executor-fn (fn [value] → side effect)"
+  @{})
+
+# --- Registration API ---
+
+(defn reg-event-handler
+  "Register a handler for an event-id.
+
+  Two arities:
+    (reg-event-handler :id handler-fn)
+    (reg-event-handler :id [:cofx :key1 :key2] handler-fn)
+
+  Handler fn signature: (fn [cofx event] → fx-map or nil)
+  When cofx keys are declared, those cofx injectors run before the handler."
+  [event-id & args]
+  (match args
+    [cofx-keys handler-fn]
+    (put handlers event-id {:fn handler-fn :cofx cofx-keys})
+
+    [handler-fn]
+    (put handlers event-id {:fn handler-fn :cofx []})
+
+    _ (error "reg-event-handler: expected (id fn) or (id cofx-keys fn)")))
+
+(defn reg-cofx
+  "Register a cofx injector. Called before handlers that declare this cofx key.
+
+  Injector signature: (fn [cofx] → cofx)
+  The injector receives the cofx table and should `put` its key into it."
+  [cofx-id injector-fn]
+  (put cofx-registry cofx-id injector-fn))
+
+(defn reg-fx
+  "Register an fx executor. Called after a handler returns an fx map with this key.
+
+  Executor signature: (fn [value] → nil)
+  The executor receives the value from the fx map and performs the side effect."
+  [fx-id executor-fn]
+  (put fx-registry fx-id executor-fn))
+
+# --- Query API (for Zig to call) ---
+
+(defn get-handler
+  "Look up a handler entry by event-id. Returns {:fn ... :cofx ...} or nil."
+  [event-id]
+  (get handlers event-id))
+
+(defn get-cofx-injector
+  "Look up a cofx injector by cofx-id. Returns fn or nil."
+  [cofx-id]
+  (get cofx-registry cofx-id))
+
+(defn get-fx-executor
+  "Look up an fx executor by fx-id. Returns fn or nil."
+  [fx-id]
+  (get fx-registry fx-id))

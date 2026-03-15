@@ -130,15 +130,13 @@ pub fn main() !void {
     defer config_result.deinit();
     cfg = config_result.config;
 
-    // Initialize the Janet VM
+    // Initialize the Janet VM and reactive dispatch
     try janet.init();
     defer janet.deinit();
 
-    // Smoke test: evaluate a Janet expression
-    const env = janet.coreEnv();
-    const result = try janet.doString(env, "(+ 1 2)", "smoke-test");
-    const val = try janet.unwrapNumber(result);
-    log.info("Janet smoke test: (+ 1 2) = {d}", .{val});
+    var dispatch = janet.createDispatch();
+    try dispatch.initBoot();
+    defer dispatch.deinitDispatch();
 
     const display = try wl.Display.connect(null);
     defer display.disconnect();
