@@ -156,16 +156,13 @@
     (def msg-type (get event 1))
     (def payload (get event 2))
     (when (= msg-type :output)
-      (def orig-db (cofx :db))
-      (var db orig-db)
+      (var db (cofx :db))
       (each line (string/split "\n" payload)
         (when (> (length line) 0)
           (def data (json/decode line true))
           (when data
             (set db (tp/apply-event db data)))))
-      # Only return :db if something actually changed
-      (when (not= db orig-db)
-        {:db db}))))
+      {:db db})))
 
 # -- Subscriptions --
 

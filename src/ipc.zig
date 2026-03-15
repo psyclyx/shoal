@@ -198,11 +198,13 @@ pub const IpcPool = struct {
         const fd = std.posix.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0) catch {
             return null;
         };
-        errdefer std.posix.close(fd);
 
         var addr: std.posix.sockaddr.un = .{ .path = undefined };
         @memset(&addr.path, 0);
-        if (path.len > addr.path.len) return null;
+        if (path.len > addr.path.len) {
+            std.posix.close(fd);
+            return null;
+        }
         @memcpy(addr.path[0..path.len], path);
 
         std.posix.connect(

@@ -337,6 +337,7 @@ pub const Dispatch = struct {
             if (std.mem.eql(u8, fx_name, "db")) {
                 self.setDb(fx_val);
                 _ = self.pcall(self.fn_bump_generation, &.{});
+                self.render_dirty = true;
             } else if (std.mem.eql(u8, fx_name, "anim")) {
                 self.handleAnimFx(fx_val);
             } else if (std.mem.eql(u8, fx_name, "render")) {
@@ -502,7 +503,9 @@ pub const Dispatch = struct {
             }
         }
         if (min_delay) |d| {
-            const ms = @as(i32, @intFromFloat(@ceil(d * 1000.0)));
+            const ms_f = @ceil(d * 1000.0);
+            const clamped = @min(ms_f, @as(f64, std.math.maxInt(i32)));
+            const ms = @as(i32, @intFromFloat(clamped));
             return @max(ms, 0);
         }
         return null;
@@ -674,8 +677,14 @@ pub const Dispatch = struct {
                     _ = c.janet_gcunroot(slot.on_complete);
                 }
                 if (c.janet_checktype(on_complete, c.JANET_TUPLE) != 0) {
-                    c.janet_gcroot(on_complete);
-                    slot.on_complete = on_complete;
+                    if (slot.active) {
+                        c.janet_gcroot(on_complete);
+                        slot.on_complete = on_complete;
+                    } else {
+                        // Immediate completion — enqueue directly
+                        slot.on_complete = c.janet_wrap_nil();
+                        self.enqueue(on_complete);
+                    }
                 } else {
                     slot.on_complete = c.janet_wrap_nil();
                 }
@@ -706,7 +715,7 @@ pub const Dispatch = struct {
     }
 
     fn initAnimSlot(
-        _: *Dispatch,
+        self: *Dispatch,
         slot: *AnimSlot,
         id: Janet,
         target: f64,
@@ -730,8 +739,13 @@ pub const Dispatch = struct {
             .on_complete = c.janet_wrap_nil(),
         };
         if (c.janet_checktype(on_complete, c.JANET_TUPLE) != 0) {
-            c.janet_gcroot(on_complete);
-            slot.on_complete = on_complete;
+            if (duration > 0) {
+                c.janet_gcroot(on_complete);
+                slot.on_complete = on_complete;
+            } else {
+                // Immediate completion — enqueue on_complete directly
+                self.enqueue(on_complete);
+            }
         }
     }
 

@@ -74,8 +74,8 @@ pub const SpawnPool = struct {
             }
         }
 
-        // Create pipe for child stdout
-        const pipe_fds = std.posix.pipe() catch {
+        // Create pipe for child stdout (CLOEXEC so children don't inherit read end)
+        const pipe_fds = std.posix.pipe2(.{ .CLOEXEC = true }) catch {
             log.warn("spawn fx: pipe() failed", .{});
             return;
         };
