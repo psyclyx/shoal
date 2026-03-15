@@ -103,6 +103,7 @@ var pointer_y: f32 = -1;
 var pointer_surface: ?*wl.Surface = null;
 var pointer_button_pressed: bool = false;
 var pointer_button_just_released: bool = false;
+var pointer_surface_changed: bool = false;
 
 // Per-output surfaces
 var surfaces: [MAX_OUTPUTS]Surface = [_]Surface{.{}} ** MAX_OUTPUTS;
@@ -369,20 +370,25 @@ fn frameListener(_: *wl.Callback, event: wl.Callback.Event, surf: *Surface) void
     }
 }
 
+/// Mark a single surface dirty and kick off a render via frame callback.
+fn markSurfaceDirty(surf: *Surface) void {
+    if (!surf.configured or surf.egl_surface == c.EGL_NO_SURFACE) return;
+    surf.needs_render = true;
+    if (!surf.frame_pending) {
+        // First change after idle — request frame callback BEFORE render
+        // so it's associated with this commit, then render immediately
+        // for responsiveness.
+        requestFrame(surf);
+        if (renderSurface(surf)) {
+            surf.needs_render = false;
+        }
+    }
+}
+
 /// Mark all surfaces dirty and kick off a render via frame callbacks.
 fn markAllDirty() void {
     for (surfaces[0..surface_count]) |*surf| {
-        if (!surf.configured or surf.egl_surface == c.EGL_NO_SURFACE) continue;
-        surf.needs_render = true;
-        if (!surf.frame_pending) {
-            // First change after idle — request frame callback BEFORE render
-            // so it's associated with this commit, then render immediately
-            // for responsiveness.
-            requestFrame(surf);
-            if (renderSurface(surf)) {
-                surf.needs_render = false;
-            }
-        }
+        markSurfaceDirty(surf);
     }
 }
 
@@ -560,12 +566,14 @@ fn pointerListener(_: *wl.Pointer, event: wl.Pointer.Event, _: *const void) void
             pointer_surface = ev.surface;
             pointer_x = @floatCast(ev.surface_x.toDouble());
             pointer_y = @floatCast(ev.surface_y.toDouble());
+            pointer_surface_changed = true;
         },
         .leave => |_| {
             pointer_surface = null;
             pointer_x = -1;
             pointer_y = -1;
             pointer_button_pressed = false;
+            pointer_surface_changed = true;
         },
         .motion => |ev| {
             pointer_x = @floatCast(ev.surface_x.toDouble());
@@ -586,8 +594,20 @@ fn pointerListener(_: *wl.Pointer, event: wl.Pointer.Event, _: *const void) void
             }
         },
         .frame => {
-            // Pointer state has been atomically updated — mark dirty for re-render
-            markAllDirty();
+            // Pointer state has been atomically updated — re-render affected surfaces.
+            // Surface transitions (enter/leave) mark all dirty to clear stale hover
+            // state on the old surface. Motion/button only dirties the pointer surface.
+            if (pointer_surface_changed) {
+                markAllDirty();
+                pointer_surface_changed = false;
+            } else if (pointer_surface) |ps| {
+                for (surfaces[0..surface_count]) |*surf| {
+                    if (surf.wl_surface == ps) {
+                        markSurfaceDirty(surf);
+                        break;
+                    }
+                }
+            }
         },
         else => {},
     }
