@@ -323,11 +323,10 @@ pub fn main() !void {
         // Check timers, process event queue
         dispatch.checkTimers();
         var changed = false;
-        if (dispatch.processQueue()) {
-            if (dispatch.render_dirty) {
-                dispatch.render_dirty = false;
-                changed = true;
-            }
+        _ = dispatch.processQueue();
+        if (dispatch.render_dirty) {
+            dispatch.render_dirty = false;
+            changed = true;
         }
 
         // Tick animations
@@ -335,11 +334,10 @@ pub fn main() !void {
         changed = changed or dispatch.tickAnimations(dt);
 
         // Process any completion events from finished animations
-        if (dispatch.processQueue()) {
-            if (dispatch.render_dirty) {
-                dispatch.render_dirty = false;
-                changed = true;
-            }
+        _ = dispatch.processQueue();
+        if (dispatch.render_dirty) {
+            dispatch.render_dirty = false;
+            changed = true;
         }
 
         if (changed) {
@@ -573,6 +571,7 @@ fn pointerListener(_: *wl.Pointer, event: wl.Pointer.Event, _: *const void) void
             pointer_x = -1;
             pointer_y = -1;
             pointer_button_pressed = false;
+            pointer_button_just_released = false;
             pointer_surface_changed = true;
         },
         .motion => |ev| {
