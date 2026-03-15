@@ -1,0 +1,177 @@
+# tidepool — compositor IPC module
+#
+# Connects to tidepool's netrepl socket, subscribes to state events,
+# parses JSON updates, and stores compositor state in the db under :tp.
+#
+# Event flow:
+#   :init → :ipc connect → handshake (automatic via :handshake key)
+#   :tp/connected → send subscription expression
+#   :tp/recv [:output payload] → split JSON lines → apply to db
+#   :tp/disconnected → mark disconnected in db
+
+# -- Helpers (defined first — Janet uses early binding) --
+
+(defn- tidepool-socket-path []
+  (let [runtime (os/getenv "XDG_RUNTIME_DIR")
+        display (os/getenv "WAYLAND_DISPLAY")]
+    (when (and runtime display)
+      (string runtime "/tidepool-" display))))
+
+(defn- tp/apply-tags [db data]
+  (def tp (get db :tp {}))
+  (def outputs (get data :outputs []))
+  (var occupied (get data :occupied []))
+
+  # Build output tag state
+  (def out-list
+    (seq [o :in outputs]
+      (def tags (get o :tags []))
+      (def focused (get o :focused false))
+      {:name (get o :name "")
+       :x (get o :x 0)
+       :y (get o :y 0)
+       :focused focused
+       :tags (seq [i :range [0 11]]
+               {:focused (truthy? (some |(= $ i) tags))
+                :occupied (or (truthy? (some |(= $ i) tags))
+                              (truthy? (some |(= $ i) occupied)))})}))
+
+  # Flat tags from focused output
+  (def focused-out (find |($ :focused) out-list))
+  (def flat-tags
+    (if focused-out
+      (focused-out :tags)
+      (seq [i :range [0 11]]
+        {:focused false
+         :occupied (truthy? (some |(= $ i) occupied))})))
+
+  (put db :tp (merge tp {:outputs out-list :tags flat-tags})))
+
+(defn- tp/apply-layout [db data]
+  (def tp (get db :tp {}))
+  (def outputs (get data :outputs []))
+
+  (def out-layouts
+    (seq [o :in outputs]
+      {:name (get o :name "")
+       :x (get o :x 0)
+       :y (get o :y 0)
+       :w (get o :w 0)
+       :h (get o :h 0)
+       :focused (get o :focused false)
+       :layout (get o :layout "")
+       :active-row (get o :active-row 0)
+       :viewport (get o :viewport {})}))
+
+  # Merge layout info into existing outputs or use as-is
+  (def existing (get tp :outputs []))
+  (def merged
+    (seq [ol :in out-layouts]
+      (def existing-out
+        (find |(and (= ($ :x) (ol :x)) (= ($ :y) (ol :y))) existing))
+      (if existing-out
+        (merge existing-out ol)
+        ol)))
+
+  # Flat layout from focused output
+  (def focused-out (find |($ :focused) out-layouts))
+
+  (put db :tp (merge tp {:outputs merged
+                         :layout (if focused-out (focused-out :layout) (get tp :layout ""))})))
+
+(defn- tp/apply-title [db data]
+  (def tp (get db :tp {}))
+  (put db :tp (merge tp {:title (get data :title "")
+                         :app-id (get data :app-id "")})))
+
+(defn- tp/apply-windows [db data]
+  (def tp (get db :tp {}))
+  (def windows
+    (seq [w :in (get data :windows [])]
+      {:wid (get w :wid 0)
+       :app-id (get w :app-id "")
+       :title (get w :title "")
+       :tag (get w :tag 0)
+       :x (get w :x 0)
+       :y (get w :y 0)
+       :w (get w :w 0)
+       :h (get w :h 0)
+       :focused (get w :focused false)
+       :float (get w :float false)
+       :fullscreen (get w :fullscreen false)
+       :visible (get w :visible false)
+       :row (get w :row 0)
+       :layout (get w :layout "")
+       :column (get-in w [:meta :column] 0)
+       :column-total (get-in w [:meta :column-total] 0)
+       :row-in-col (get-in w [:meta :row] 0)
+       :row-in-col-total (get-in w [:meta :row-total] 0)}))
+  (put db :tp (merge tp {:windows windows})))
+
+(defn- tp/apply-signal [db data]
+  (def tp (get db :tp {}))
+  (put db :tp (merge tp {:signal {:name (get data :name "")
+                                  :pending true}})))
+
+(defn- tp/apply-event [db data]
+  (match (data :event)
+    "tags"    (tp/apply-tags db data)
+    "layout"  (tp/apply-layout db data)
+    "title"   (tp/apply-title db data)
+    "windows" (tp/apply-windows db data)
+    "signal"  (tp/apply-signal db data)
+    _ db))
+
+# -- Handler registrations --
+
+(reg-event-handler :init
+  (fn [cofx event]
+    (def path (tidepool-socket-path))
+    (if path
+      {:db (put (cofx :db) :tp {:connected false})
+       :ipc {:connect {:path path
+                       :name :tidepool
+                       :framing :netrepl
+                       :handshake "\xFF{:name \"shoal\" :auto-flush true}"
+                       :event :tp/recv
+                       :connected :tp/connected
+                       :disconnected :tp/disconnected
+                       :reconnect 1.0}}}
+      {:db (put (cofx :db) :tp {:connected false})})))
+
+(reg-event-handler :tp/connected
+  (fn [cofx event]
+    {:db (put (cofx :db) :tp
+              (merge (get (cofx :db) :tp {}) {:connected true}))
+     :ipc {:send {:name :tidepool
+                  :data "(ipc/watch-json [:tags :layout :title :windows :signal])\n"}}}))
+
+(reg-event-handler :tp/disconnected
+  (fn [cofx event]
+    {:db (put (cofx :db) :tp
+              (merge (get (cofx :db) :tp {}) {:connected false}))}))
+
+(reg-event-handler :tp/recv
+  (fn [cofx event]
+    (def msg-type (get event 1))
+    (def payload (get event 2))
+    (when (= msg-type :output)
+      (var db (cofx :db))
+      (each line (string/split "\n" payload)
+        (when (> (length line) 0)
+          (def data (json/decode line true))
+          (when data
+            (set db (tp/apply-event db data)))))
+      {:db db})))
+
+# -- Subscriptions --
+
+(reg-sub :tp (fn [db] (get db :tp {})))
+(reg-sub :tp/connected [:tp] (fn [tp] (get tp :connected false)))
+(reg-sub :tp/tags [:tp] (fn [tp] (get tp :tags [])))
+(reg-sub :tp/outputs [:tp] (fn [tp] (get tp :outputs [])))
+(reg-sub :tp/layout [:tp] (fn [tp] (get tp :layout "")))
+(reg-sub :tp/title [:tp] (fn [tp] (get tp :title "")))
+(reg-sub :tp/app-id [:tp] (fn [tp] (get tp :app-id "")))
+(reg-sub :tp/windows [:tp] (fn [tp] (get tp :windows [])))
+(reg-sub :tp/signal [:tp] (fn [tp] (get tp :signal nil)))

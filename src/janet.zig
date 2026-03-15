@@ -17,6 +17,8 @@ pub const Janet = c.Janet;
 pub const JanetTable = c.JanetTable;
 
 const boot_source = @embedFile("shoal.janet");
+const json_source = @embedFile("json.janet");
+const tidepool_source = @embedFile("tidepool.janet");
 
 /// Initialize the Janet VM. Must be called before any other Janet operations.
 pub fn init() !void {
@@ -188,6 +190,26 @@ pub const Dispatch = struct {
             &out,
         );
         if (status != 0) return error.BootFailed;
+
+        // Load JSON decoder (used by tidepool and other data sources)
+        var json_out: Janet = undefined;
+        const json_status = c.janet_dostring(
+            self.env,
+            json_source.ptr,
+            "json.janet",
+            &json_out,
+        );
+        if (json_status != 0) return error.JsonBootFailed;
+
+        // Load tidepool module (registers handlers + subs for compositor IPC)
+        var tp_out: Janet = undefined;
+        const tp_status = c.janet_dostring(
+            self.env,
+            tidepool_source.ptr,
+            "tidepool.janet",
+            &tp_out,
+        );
+        if (tp_status != 0) return error.TidepoolBootFailed;
 
         // Cache lookup functions from the environment
         self.fn_get_handler = envLookup(self.env, "get-handler") orelse return error.BootMissingGetHandler;
