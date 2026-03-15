@@ -509,9 +509,12 @@ pub const Workspaces = struct {
         clay.UI()(.{
             .id = clay.ElementId.ID("ws_group"),
             .layout = .{
-                .child_gap = 3,
+                .child_gap = 4,
                 .child_alignment = .{ .y = .center },
+                .padding = .{ .left = 4, .right = 4, .top = 2, .bottom = 2 },
             },
+            .background_color = theme_mod.toClay(theme.surface()),
+            .corner_radius = .all(6),
         })({
             for (o.tags[1..10], 0..) |tag, i| {
                 if (!tag.focused and !tag.occupied) continue;
@@ -520,38 +523,57 @@ pub const Workspaces = struct {
                 const num_str = std.fmt.bufPrint(&num_buf, "{d}", .{i + 1}) catch continue;
 
                 if (tag.focused) {
+                    // Active tag: accent background, high contrast text
                     clay.UI()(.{
                         .id = clay.ElementId.IDI("tag", @intCast(i)),
                         .layout = .{
-                            .sizing = .{ .w = .fixed(24), .h = .fixed(24) },
+                            .sizing = .{ .w = .fixed(22), .h = .fixed(22) },
                             .child_alignment = .{ .x = .center, .y = .center },
                         },
                         .background_color = theme_mod.toClay(theme.accent()),
-                        .corner_radius = .all(6),
+                        .corner_radius = .all(5),
                     })({
                         clay.text(num_str, .{
                             .color = theme_mod.toClay(theme.background()),
                             .font_id = font_id,
-                            .font_size = font_size,
+                            .font_size = font_size - 1,
                         });
                     });
                 } else {
+                    // Occupied tag: no background, muted text
                     clay.UI()(.{
                         .id = clay.ElementId.IDI("tag", @intCast(i)),
                         .layout = .{
-                            .sizing = .{ .w = .fixed(24), .h = .fixed(24) },
+                            .sizing = .{ .w = .fixed(22), .h = .fixed(22) },
                             .child_alignment = .{ .x = .center, .y = .center },
                         },
-                        .background_color = theme_mod.toClay(theme.surface()),
-                        .corner_radius = .all(6),
+                        .corner_radius = .all(5),
                     })({
                         clay.text(num_str, .{
-                            .color = theme_mod.toClay(theme.subtle()),
+                            .color = theme_mod.toClay(theme.text()),
                             .font_id = font_id,
-                            .font_size = font_size,
+                            .font_size = font_size - 1,
                         });
                     });
                 }
+            }
+
+            // Layout indicator
+            const layout_name = o.getLayout();
+            if (layout_name.len > 0) {
+                clay.UI()(.{
+                    .id = clay.ElementId.ID("ws_sep"),
+                    .layout = .{
+                        .sizing = .{ .w = .fixed(1), .h = .fixed(14) },
+                    },
+                    .background_color = theme_mod.toClay(theme.muted()),
+                })({});
+
+                clay.text(layout_name, .{
+                    .color = theme_mod.toClay(theme.subtle()),
+                    .font_id = font_id,
+                    .font_size = font_size - 2,
+                });
             }
         });
     }
