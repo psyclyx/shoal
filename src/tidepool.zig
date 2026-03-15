@@ -4,138 +4,6 @@ const log = std.log.scoped(.tidepool);
 const cs = @import("compositor_state.zig");
 
 // ---------------------------------------------------------------------------
-// Data types
-// ---------------------------------------------------------------------------
-
-pub const TagInfo = struct {
-    focused: bool = false,
-    occupied: bool = false,
-};
-
-pub const WindowInfo = struct {
-    wid: u32 = 0,
-    app_id: [128]u8 = undefined,
-    app_id_len: usize = 0,
-    title: [256]u8 = undefined,
-    title_len: usize = 0,
-    tag: u8 = 0,
-    x: i32 = 0,
-    y: i32 = 0,
-    w: i32 = 0,
-    h: i32 = 0,
-    focused: bool = false,
-    float: bool = false,
-    fullscreen: bool = false,
-    visible: bool = false,
-    row: u8 = 0,
-    layout: [32]u8 = undefined,
-    layout_len: usize = 0,
-    // Layout metadata (from scroll/grid layouts)
-    column: u8 = 0,
-    column_total: u8 = 0,
-    row_in_col: u8 = 0,
-    row_in_col_total: u8 = 0,
-
-    pub fn getAppId(self: *const WindowInfo) []const u8 {
-        return self.app_id[0..self.app_id_len];
-    }
-    pub fn getTitle(self: *const WindowInfo) []const u8 {
-        return self.title[0..self.title_len];
-    }
-    pub fn getLayout(self: *const WindowInfo) []const u8 {
-        return self.layout[0..self.layout_len];
-    }
-};
-
-pub const SignalEvent = struct {
-    name: [64]u8 = undefined,
-    name_len: usize = 0,
-    pending: bool = false,
-
-    pub fn getName(self: *const SignalEvent) []const u8 {
-        return self.name[0..self.name_len];
-    }
-
-    pub fn consume(self: *SignalEvent) ?[]const u8 {
-        if (!self.pending) return null;
-        self.pending = false;
-        return self.name[0..self.name_len];
-    }
-};
-
-pub const OutputInfo = struct {
-    x: i32 = 0,
-    y: i32 = 0,
-    w: i32 = 0,
-    h: i32 = 0,
-    tags: [11]TagInfo = [_]TagInfo{.{}} ** 11,
-    layout: [32]u8 = undefined,
-    layout_len: usize = 0,
-    active_row: u8 = 0,
-    focused: bool = false,
-    // Viewport context (from layout topic)
-    usable_x: i32 = 0,
-    usable_y: i32 = 0,
-    usable_w: i32 = 0,
-    usable_h: i32 = 0,
-    scroll_offset: f32 = 0,
-    total_content_w: f32 = 0,
-    column_widths: [32]f32 = [_]f32{0} ** 32,
-    column_count: usize = 0,
-
-    pub fn getLayout(self: *const OutputInfo) []const u8 {
-        return self.layout[0..self.layout_len];
-    }
-};
-
-pub const TidepoolState = struct {
-    // Per-output state (up to 8 outputs)
-    outputs: [8]OutputInfo = [_]OutputInfo{.{}} ** 8,
-    output_count: usize = 0,
-    // Legacy flat accessors (focused output's data)
-    tags: [11]TagInfo = [_]TagInfo{.{}} ** 11,
-    layout: [32]u8 = undefined,
-    layout_len: usize = 0,
-    title: [256]u8 = undefined,
-    title_len: usize = 0,
-    app_id: [128]u8 = undefined,
-    app_id_len: usize = 0,
-    // Windows
-    windows: [64]WindowInfo = [_]WindowInfo{.{}} ** 64,
-    window_count: usize = 0,
-    windows_changed: bool = false,
-    signal: SignalEvent = .{},
-    connected: bool = false,
-
-    pub fn getLayout(self: *const TidepoolState) []const u8 {
-        return self.layout[0..self.layout_len];
-    }
-
-    pub fn getTitle(self: *const TidepoolState) []const u8 {
-        return self.title[0..self.title_len];
-    }
-
-    pub fn getAppId(self: *const TidepoolState) []const u8 {
-        return self.app_id[0..self.app_id_len];
-    }
-
-    /// Find the output matching a given position, or the focused output.
-    pub fn getOutput(self: *const TidepoolState, x: i32, y: i32) ?*const OutputInfo {
-        for (self.outputs[0..self.output_count]) |*o| {
-            if (o.x == x and o.y == y) return o;
-        }
-        return null;
-    }
-
-    pub fn getFocusedOutput(self: *const TidepoolState) ?*const OutputInfo {
-        for (self.outputs[0..self.output_count]) |*o| {
-            if (o.focused) return o;
-        }
-        return null;
-    }
-};
-
-// ---------------------------------------------------------------------------
 // Netrepl framing protocol
 // ---------------------------------------------------------------------------
 
@@ -161,7 +29,7 @@ fn sendMsg(fd: posix.fd_t, payload: []const u8) !void {
 // ---------------------------------------------------------------------------
 
 pub const TidepoolClient = struct {
-    state: TidepoolState = .{},
+    state: cs.CompositorState = .{},
     socket_fd: ?posix.fd_t = null,
     recv_buf: [16384]u8 = undefined,
     recv_pos: usize = 0,
@@ -635,7 +503,7 @@ pub const TidepoolClient = struct {
             if (win_val != .object) continue;
             const wm = win_val.object;
 
-            var info = WindowInfo{};
+            var info = cs.WindowInfo{};
 
             if (wm.get("wid")) |v| {
                 if (v == .integer) info.wid = @intCast(@max(0, v.integer));
@@ -728,8 +596,8 @@ pub const TidepoolClient = struct {
     /// Sort outputs by position (left-to-right, then top-to-bottom).
     fn sortOutputs(self: *TidepoolClient) void {
         const outputs = self.state.outputs[0..self.state.output_count];
-        std.mem.sort(OutputInfo, outputs, {}, struct {
-            fn lessThan(_: void, a: OutputInfo, b: OutputInfo) bool {
+        std.mem.sort(cs.OutputInfo, outputs, {}, struct {
+            fn lessThan(_: void, a: cs.OutputInfo, b: cs.OutputInfo) bool {
                 if (a.x != b.x) return a.x < b.x;
                 return a.y < b.y;
             }
@@ -738,7 +606,7 @@ pub const TidepoolClient = struct {
 
     // --- Helpers ---
 
-    fn findOrCreateOutput(self: *TidepoolClient, x: i32, y: i32) *OutputInfo {
+    fn findOrCreateOutput(self: *TidepoolClient, x: i32, y: i32) *cs.OutputInfo {
         // Find existing
         for (self.state.outputs[0..self.state.output_count]) |*o| {
             if (o.x == x and o.y == y) return o;
@@ -771,73 +639,9 @@ pub const TidepoolClient = struct {
         };
     }
 
-    pub fn toCompositorState(self: *TidepoolClient) cs.CompositorState {
-        var result = cs.CompositorState{};
-
-        // Copy outputs
-        result.output_count = self.state.output_count;
-        for (self.state.outputs[0..self.state.output_count], 0..) |*src, i| {
-            var dst = &result.outputs[i];
-            dst.x = src.x;
-            dst.y = src.y;
-            dst.w = src.w;
-            dst.h = src.h;
-            dst.focused = src.focused;
-            dst.usable_w = src.usable_w;
-            dst.usable_h = src.usable_h;
-            dst.scroll_offset = src.scroll_offset;
-            dst.total_content_w = src.total_content_w;
-            dst.column_count = src.column_count;
-            dst.column_widths = src.column_widths;
-            dst.layout_len = src.layout_len;
-            @memcpy(dst.layout[0..src.layout_len], src.layout[0..src.layout_len]);
-            for (&src.tags, 0..) |*t, ti| {
-                dst.tags[ti] = .{ .focused = t.focused, .occupied = t.occupied };
-            }
-        }
-
-        // Copy flat tags
-        for (&self.state.tags, 0..) |*t, i| {
-            result.tags[i] = .{ .focused = t.focused, .occupied = t.occupied };
-        }
-
-        // Copy title
-        result.title_len = self.state.title_len;
-        @memcpy(result.title[0..self.state.title_len], self.state.title[0..self.state.title_len]);
-
-        // Copy windows
-        result.window_count = self.state.window_count;
-        for (self.state.windows[0..self.state.window_count], 0..) |*src, i| {
-            var dst = &result.windows[i];
-            dst.wid = src.wid;
-            dst.tag = src.tag;
-            dst.x = src.x;
-            dst.y = src.y;
-            dst.w = src.w;
-            dst.h = src.h;
-            dst.focused = src.focused;
-            dst.float = src.float;
-            dst.fullscreen = src.fullscreen;
-            dst.visible = src.visible;
-            dst.column = src.column;
-            dst.column_total = src.column_total;
-            dst.row_in_col = src.row_in_col;
-            dst.row_in_col_total = src.row_in_col_total;
-            dst.app_id_len = src.app_id_len;
-            @memcpy(dst.app_id[0..src.app_id_len], src.app_id[0..src.app_id_len]);
-            dst.title_len = src.title_len;
-            @memcpy(dst.title[0..src.title_len], src.title[0..src.title_len]);
-        }
-
-        // Copy signal (consumed via consumeSignal(), not here)
-        if (self.state.signal.pending) {
-            result.signal.pending = true;
-            result.signal.name_len = self.state.signal.name_len;
-            @memcpy(result.signal.name[0..self.state.signal.name_len], self.state.signal.name[0..self.state.signal.name_len]);
-        }
-
-        result.connected = self.state.connected;
-        return result;
+    /// Return a snapshot of the current compositor state.
+    pub fn getState(self: *TidepoolClient) cs.CompositorState {
+        return self.state;
     }
 
     /// Mark the current signal as consumed so it won't appear in future state copies.

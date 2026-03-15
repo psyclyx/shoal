@@ -24,7 +24,7 @@ pub const DataProvider = union(enum) {
 
     pub fn getState(self: DataProvider) ?cs.CompositorState {
         return switch (self) {
-            .tidepool => |c| if (c.state.connected) c.toCompositorState() else null,
+            .tidepool => |c| if (c.state.connected) c.getState() else null,
             .none => null,
         };
     }
