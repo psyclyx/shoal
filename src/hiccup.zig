@@ -40,6 +40,25 @@ var kw_words: jc.Janet = undefined;
 var kw_newlines: jc.Janet = undefined;
 var kw_none: jc.Janet = undefined;
 
+// GC roots for strings coerced via janet_to_string during a render pass.
+// These must survive until Clay's endLayout reads them.
+const MAX_COERCED_STRINGS = 32;
+var coerced_roots: [MAX_COERCED_STRINGS]jc.Janet = undefined;
+var coerced_count: usize = 0;
+
+/// Call before walkHiccup to begin tracking coerced string roots.
+pub fn beginPass() void {
+    coerced_count = 0;
+}
+
+/// Call after Clay endLayout to unroot coerced strings.
+pub fn endPass() void {
+    for (coerced_roots[0..coerced_count]) |val| {
+        _ = jc.janet_gcunroot(val);
+    }
+    coerced_count = 0;
+}
+
 var initialized = false;
 
 pub fn init() void {
@@ -482,8 +501,17 @@ fn janetToString(val: jc.Janet) []const u8 {
         const len: usize = @intCast(jc.janet_string_length(s));
         return s[0..len];
     }
-    // Otherwise coerce to string via janet_to_string
+    // Otherwise coerce to string via janet_to_string.
+    // Root it so it survives until Clay's endLayout reads it.
     const s = jc.janet_to_string(val);
     const len: usize = @intCast(jc.janet_string_length(s));
+    if (coerced_count < MAX_COERCED_STRINGS) {
+        const wrapped = jc.janet_wrap_string(s);
+        jc.janet_gcroot(wrapped);
+        coerced_roots[coerced_count] = wrapped;
+        coerced_count += 1;
+    } else {
+        log.warn("too many coerced :text strings ({d}), GC may collect", .{MAX_COERCED_STRINGS});
+    }
     return s[0..len];
 }

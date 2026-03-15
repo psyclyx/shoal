@@ -9,6 +9,7 @@ const TextRenderer = @import("text.zig").TextRenderer;
 const Layout = @import("layout.zig").Layout;
 const animation = @import("animation.zig");
 const janet = @import("janet.zig");
+const hiccup_mod = @import("hiccup.zig");
 
 const c = @cImport({
     @cInclude("wayland-egl.h");
@@ -389,8 +390,10 @@ fn renderSurface(surf: *Surface) bool {
 
     layout.beginLayout();
     dispatch.prepareRender();
+    hiccup_mod.beginPass();
     _ = dispatch.renderView();
     layout.endLayout();
+    hiccup_mod.endPass();
 
     renderer.end();
     _ = c.eglSwapBuffers(egl_display, surf.egl_surface);

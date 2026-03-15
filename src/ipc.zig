@@ -353,12 +353,15 @@ pub const IpcPool = struct {
         const name_val = jt.janetGet(spec, jt.kw("name"));
 
         const timer_spec = c.janet_table(4);
+        const timer_spec_val = c.janet_wrap_table(timer_spec);
+        c.janet_gcroot(timer_spec_val);
+        defer _ = c.janet_gcunroot(timer_spec_val);
         c.janet_table_put(timer_spec, jt.kw("delay"), c.janet_wrap_number(delay));
         c.janet_table_put(timer_spec, jt.kw("event"), reconnect_event);
         if (c.janet_checktype(name_val, c.JANET_NIL) == 0) {
             c.janet_table_put(timer_spec, jt.kw("id"), name_val);
         }
-        timer_fn(sink.ctx, c.janet_wrap_table(timer_spec));
+        timer_fn(sink.ctx, timer_spec_val);
     }
 
     /// Schedule reconnect from a slot that's about to be freed.
