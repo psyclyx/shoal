@@ -340,6 +340,7 @@ pub const Dispatch = struct {
                 self.render_dirty = true;
             } else if (std.mem.eql(u8, fx_name, "anim")) {
                 self.handleAnimFx(fx_val);
+                self.render_dirty = true;
             } else if (std.mem.eql(u8, fx_name, "render")) {
                 self.render_dirty = true;
             } else if (std.mem.eql(u8, fx_name, "dispatch")) {
@@ -557,7 +558,11 @@ pub const Dispatch = struct {
         slot.active = false;
         // Enqueue on-complete event if present
         if (c.janet_checktype(slot.on_complete, c.JANET_TUPLE) != 0) {
-            self.enqueue(slot.on_complete);
+            if (self.queue_count < MAX_QUEUED_EVENTS) {
+                self.enqueue(slot.on_complete);
+            } else {
+                log.warn("anim on_complete dropped: event queue full", .{});
+            }
             _ = c.janet_gcunroot(slot.on_complete);
             slot.on_complete = c.janet_wrap_nil();
         }

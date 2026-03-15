@@ -361,6 +361,11 @@ pub const IpcPool = struct {
     fn reconnectFromSlot(slot: *IpcSlot, sink: jt.EventSink) void {
         // Reconstruct the connect spec from the slot's stored values
         const spec = c.janet_table(8);
+        // Root spec immediately — subsequent janet_string/janet_table_put calls
+        // can trigger GC, and spec is only on the C stack (invisible to GC).
+        const spec_val = c.janet_wrap_table(spec);
+        c.janet_gcroot(spec_val);
+        defer _ = c.janet_gcunroot(spec_val);
         const path_str = c.janet_string(slot.path[0..slot.path_len].ptr, @intCast(slot.path_len));
         c.janet_table_put(spec, jt.kw("path"), c.janet_wrap_string(path_str));
         c.janet_table_put(spec, jt.kw("name"), slot.name);
