@@ -175,11 +175,6 @@
   [db]
   (set *current-db* db))
 
-(defn clear-sub-cache
-  "Clear all cached subscription values."
-  []
-  (eachk k sub-cache (put sub-cache k nil)))
-
 # --- View ---
 
 (var- *view-fn* nil)

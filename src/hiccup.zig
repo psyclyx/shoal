@@ -157,15 +157,12 @@ fn walkContainer(direction: clay.LayoutDirection, attrs: jc.Janet, children: []c
 fn walkText(attrs: jc.Janet, children: []const jc.Janet) void {
     if (children.len == 0) return;
 
-    // Get text content — first string child (most common: single pre-concatenated string)
-    var text_slice: []const u8 = "";
-    if (children.len == 1) {
-        text_slice = janetToString(children[0]);
-    } else {
-        // Multiple children: coerce each to string, but we can only pass one to Clay.
-        // Use the first one. Janet views should pre-concatenate.
-        text_slice = janetToString(children[0]);
+    // Get text content — single pre-concatenated string expected.
+    // Janet views should use (string ...) to build text before returning hiccup.
+    if (children.len > 1) {
+        log.warn(":text has {d} children, using first only — pre-concatenate with (string ...)", .{children.len});
     }
+    const text_slice = janetToString(children[0]);
 
     if (text_slice.len == 0) return;
 
