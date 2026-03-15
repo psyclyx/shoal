@@ -139,15 +139,23 @@ pub fn main() !void {
     defer dispatch.deinitDispatch();
 
     // -- End-to-end dispatch test --
-    // Register an :init handler that sets {:initialized true} in the db
+    // Register handlers: :init sets db, :init also schedules a timer via fx
     _ = try dispatch.eval(
         \\(reg-event-handler :init
         \\  (fn [cofx event]
-        \\    {:db (merge (cofx :db) {:initialized true})}))
+        \\    {:db (merge (cofx :db) {:initialized true})
+        \\     :timer {:delay 0.001 :event [:timer-test] :id :test-timer}}))
     , "init-handler");
 
-    // Dispatch :init and verify the db was updated
-    dispatch.dispatch(janet.makeEvent("init"));
+    _ = try dispatch.eval(
+        \\(reg-event-handler :timer-test
+        \\  (fn [cofx event]
+        \\    {:db (merge (cofx :db) {:timer-fired true})}))
+    , "timer-test-handler");
+
+    // Dispatch :init via the queue and verify
+    dispatch.enqueue(janet.makeEvent("init"));
+    _ = dispatch.processQueue();
     const init_val = janet.janetGet(dispatch.db, janet.kw("initialized"));
     if (janet.c.janet_checktype(init_val, janet.c.JANET_BOOLEAN) != 0 and
         janet.c.janet_unwrap_boolean(init_val) != 0)
@@ -156,6 +164,20 @@ pub fn main() !void {
     } else {
         log.err("dispatch test FAILED: db not updated after :init dispatch", .{});
         return error.DispatchTestFailed;
+    }
+
+    // Wait for timer to fire (1ms delay) and verify
+    std.Thread.sleep(5 * std.time.ns_per_ms);
+    dispatch.checkTimers();
+    _ = dispatch.processQueue();
+    const timer_val = janet.janetGet(dispatch.db, janet.kw("timer-fired"));
+    if (janet.c.janet_checktype(timer_val, janet.c.JANET_BOOLEAN) != 0 and
+        janet.c.janet_unwrap_boolean(timer_val) != 0)
+    {
+        log.info("timer test PASSED: timer fired and updated db", .{});
+    } else {
+        log.err("timer test FAILED: timer did not fire", .{});
+        return error.TimerTestFailed;
     }
 
     const display = try wl.Display.connect(null);
@@ -294,14 +316,15 @@ pub fn main() !void {
 
         _ = display.flush();
 
-        // Poll Wayland fd + tidepool fd with timeout for module updates
+        // Poll Wayland fd + tidepool fd with timeout based on timers
         const tp_fd = module_manager.provider.getFd();
         var poll_fds = [2]std.posix.pollfd{
             .{ .fd = wl_fd, .events = std.posix.POLL.IN, .revents = 0 },
             .{ .fd = tp_fd orelse -1, .events = std.posix.POLL.IN, .revents = 0 },
         };
         const nfds: std.posix.nfds_t = if (tp_fd != null) 2 else 1;
-        _ = std.posix.poll(poll_fds[0..nfds], 100) catch 0;
+        const poll_timeout: i32 = dispatch.nextTimerTimeoutMs() orelse 100;
+        _ = std.posix.poll(poll_fds[0..nfds], @min(poll_timeout, 100)) catch 0;
 
         if (poll_fds[0].revents & std.posix.POLL.IN != 0) {
             if (display.readEvents() != .SUCCESS) break;
@@ -318,6 +341,15 @@ pub fn main() !void {
             {
                 log.warn("frame callback watchdog triggered, resetting", .{});
                 surf.frame_pending = false;
+            }
+        }
+
+        // Check timers, process event queue
+        dispatch.checkTimers();
+        if (dispatch.processQueue()) {
+            if (dispatch.render_dirty) {
+                dispatch.render_dirty = false;
+                markAllDirty();
             }
         }
 

@@ -67,10 +67,31 @@ const fx_order = [_][:0]const u8{
     "render",
 };
 
+const MAX_QUEUED_EVENTS = 256;
+const MAX_TIMERS = 64;
+
+const Timer = struct {
+    active: bool = false,
+    fire_time: f64 = 0, // monotonic seconds
+    event: Janet = undefined, // GC-rooted when active
+    repeat: bool = false,
+    interval: f64 = 0, // seconds, for repeating timers
+    id: Janet = undefined, // keyword id for cancellation, or nil
+};
+
 pub const Dispatch = struct {
     env: *JanetTable,
     db: Janet,
     render_dirty: bool = false,
+
+    // Event queue (ring buffer)
+    event_queue: [MAX_QUEUED_EVENTS]Janet = undefined,
+    queue_head: usize = 0,
+    queue_tail: usize = 0,
+    queue_count: usize = 0,
+
+    // Timers
+    timers: [MAX_TIMERS]Timer = [_]Timer{.{}} ** MAX_TIMERS,
 
     // Cached function references (set by initBoot)
     fn_get_handler: Janet = undefined,
@@ -100,9 +121,35 @@ pub const Dispatch = struct {
         log.info("shoal boot loaded, dispatch ready", .{});
     }
 
-    /// Dispatch a single event. Looks up handler, builds cofx, calls handler,
-    /// executes returned fx. Sets render_dirty if :render fx is truthy.
-    pub fn dispatch(self: *Dispatch, event: Janet) void {
+    /// Enqueue an event for processing. The event is GC-rooted until dequeued.
+    pub fn enqueue(self: *Dispatch, event: Janet) void {
+        if (self.queue_count >= MAX_QUEUED_EVENTS) {
+            log.warn("event queue full, dropping event", .{});
+            return;
+        }
+        c.janet_gcroot(event);
+        self.event_queue[self.queue_tail] = event;
+        self.queue_tail = (self.queue_tail + 1) % MAX_QUEUED_EVENTS;
+        self.queue_count += 1;
+    }
+
+    /// Process all queued events. Events enqueued during processing (via :dispatch fx)
+    /// are processed in the same batch. Returns true if any events were processed.
+    pub fn processQueue(self: *Dispatch) bool {
+        if (self.queue_count == 0) return false;
+        // Drain until empty (handlers may enqueue more events)
+        while (self.queue_count > 0) {
+            const event = self.event_queue[self.queue_head];
+            self.queue_head = (self.queue_head + 1) % MAX_QUEUED_EVENTS;
+            self.queue_count -= 1;
+            self.dispatchImmediate(event);
+            _ = c.janet_gcunroot(event);
+        }
+        return true;
+    }
+
+    /// Dispatch a single event immediately (not queued). Used internally.
+    fn dispatchImmediate(self: *Dispatch, event: Janet) void {
         // Extract event-id (first element of tuple)
         const event_id = tupleFirst(event) orelse {
             log.warn("dispatch: event is not a tuple or is empty", .{});
@@ -189,10 +236,11 @@ pub const Dispatch = struct {
             } else if (std.mem.eql(u8, fx_name, "render")) {
                 self.render_dirty = true;
             } else if (std.mem.eql(u8, fx_name, "dispatch")) {
-                // Queue a follow-up event (recursive dispatch after current fx)
-                self.dispatch(fx_val);
+                self.enqueue(fx_val);
             } else if (std.mem.eql(u8, fx_name, "dispatch-n")) {
-                self.dispatchMultiple(fx_val);
+                self.enqueueMultiple(fx_val);
+            } else if (std.mem.eql(u8, fx_name, "timer")) {
+                self.handleTimerFx(fx_val);
             } else {
                 // Look up registered fx executor
                 const executor = self.pcall1(self.fn_get_fx_executor, fx_key) orelse continue;
@@ -205,13 +253,136 @@ pub const Dispatch = struct {
         }
     }
 
-    fn dispatchMultiple(self: *Dispatch, events: Janet) void {
+    fn enqueueMultiple(self: *Dispatch, events: Janet) void {
         const view = janetIndexedView(events);
         if (view.items) |items| {
             for (0..@intCast(view.len)) |i| {
-                self.dispatch(items[i]);
+                self.enqueue(items[i]);
             }
         }
+    }
+
+    /// Handle :timer fx. Value is a table with:
+    ///   {:delay N :event [...]}              — one-shot timer
+    ///   {:delay N :event [...] :repeat true} — repeating timer
+    ///   {:id :name :cancel true}             — cancel a timer by id
+    /// Optional :id key for named timers (enables cancellation/replacement).
+    fn handleTimerFx(self: *Dispatch, val: Janet) void {
+        if (c.janet_checktype(val, c.JANET_TABLE) == 0 and
+            c.janet_checktype(val, c.JANET_STRUCT) == 0)
+        {
+            log.warn("timer fx: expected table", .{});
+            return;
+        }
+
+        // Check for cancel
+        const cancel_val = janetGet(val, kw("cancel"));
+        if (c.janet_checktype(cancel_val, c.JANET_NIL) == 0) {
+            const timer_id = janetGet(val, kw("id"));
+            if (c.janet_checktype(timer_id, c.JANET_NIL) != 0) {
+                self.cancelTimer(timer_id);
+            }
+            return;
+        }
+
+        // Create timer
+        const delay_val = janetGet(val, kw("delay"));
+        if (c.janet_checktype(delay_val, c.JANET_NUMBER) == 0) {
+            log.warn("timer fx: missing :delay", .{});
+            return;
+        }
+        const delay = c.janet_unwrap_number(delay_val);
+
+        const event_val = janetGet(val, kw("event"));
+        if (c.janet_checktype(event_val, c.JANET_TUPLE) == 0) {
+            log.warn("timer fx: missing :event tuple", .{});
+            return;
+        }
+
+        const repeat_val = janetGet(val, kw("repeat"));
+        const repeat = c.janet_checktype(repeat_val, c.JANET_BOOLEAN) != 0 and
+            c.janet_unwrap_boolean(repeat_val) != 0;
+
+        const timer_id = janetGet(val, kw("id"));
+
+        // If this timer has an id, cancel any existing timer with the same id
+        if (c.janet_checktype(timer_id, c.JANET_NIL) == 0) {
+            self.cancelTimer(timer_id);
+        }
+
+        // Find a free slot
+        for (&self.timers) |*timer| {
+            if (!timer.active) {
+                timer.active = true;
+                timer.fire_time = monotonicNow() + delay;
+                timer.event = event_val;
+                timer.repeat = repeat;
+                timer.interval = delay;
+                timer.id = timer_id;
+                c.janet_gcroot(event_val);
+                if (c.janet_checktype(timer_id, c.JANET_NIL) == 0) {
+                    c.janet_gcroot(timer_id);
+                }
+                log.debug("timer created: delay={d:.2}s repeat={}", .{ delay, repeat });
+                return;
+            }
+        }
+        log.warn("timer fx: no free timer slots", .{});
+    }
+
+    /// Cancel all timers matching the given id.
+    fn cancelTimer(self: *Dispatch, timer_id: Janet) void {
+        for (&self.timers) |*timer| {
+            if (timer.active and c.janet_checktype(timer.id, c.JANET_NIL) == 0 and
+                c.janet_equals(timer.id, timer_id) != 0)
+            {
+                self.freeTimer(timer);
+            }
+        }
+    }
+
+    fn freeTimer(_: *Dispatch, timer: *Timer) void {
+        _ = c.janet_gcunroot(timer.event);
+        if (c.janet_checktype(timer.id, c.JANET_NIL) == 0) {
+            _ = c.janet_gcunroot(timer.id);
+        }
+        timer.active = false;
+    }
+
+    /// Check timers against current time, enqueue events for any that have fired.
+    pub fn checkTimers(self: *Dispatch) void {
+        const now = monotonicNow();
+        for (&self.timers) |*timer| {
+            if (!timer.active) continue;
+            if (now >= timer.fire_time) {
+                self.enqueue(timer.event);
+                if (timer.repeat) {
+                    timer.fire_time = now + timer.interval;
+                } else {
+                    self.freeTimer(timer);
+                }
+            }
+        }
+    }
+
+    /// Return milliseconds until the next timer fires, or null if no active timers.
+    /// Used to set the poll timeout in the main loop.
+    pub fn nextTimerTimeoutMs(self: *Dispatch) ?i32 {
+        const now = monotonicNow();
+        var min_delay: ?f64 = null;
+        for (self.timers) |timer| {
+            if (!timer.active) continue;
+            const remaining = timer.fire_time - now;
+            const clamped = if (remaining < 0) 0 else remaining;
+            if (min_delay == null or clamped < min_delay.?) {
+                min_delay = clamped;
+            }
+        }
+        if (min_delay) |d| {
+            const ms = @as(i32, @intFromFloat(@ceil(d * 1000.0)));
+            return @max(ms, 0);
+        }
+        return null;
     }
 
     /// Update the db, managing GC roots.
@@ -270,6 +441,16 @@ pub const Dispatch = struct {
     }
 
     pub fn deinitDispatch(self: *Dispatch) void {
+        // Free queued events
+        while (self.queue_count > 0) {
+            _ = c.janet_gcunroot(self.event_queue[self.queue_head]);
+            self.queue_head = (self.queue_head + 1) % MAX_QUEUED_EVENTS;
+            self.queue_count -= 1;
+        }
+        // Free active timers
+        for (&self.timers) |*timer| {
+            if (timer.active) self.freeTimer(timer);
+        }
         _ = c.janet_gcunroot(self.db);
     }
 };
