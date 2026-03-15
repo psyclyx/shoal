@@ -475,14 +475,6 @@ fn floatToU16(val: f64) u16 {
     return @intFromFloat(@round(val));
 }
 
-/// Safe float-to-i16 conversion for user-controlled Janet numbers.
-fn floatToI16(val: f64) i16 {
-    if (std.math.isNan(val)) return 0;
-    if (val <= @as(f64, std.math.minInt(i16))) return std.math.minInt(i16);
-    if (val >= @as(f64, std.math.maxInt(i16))) return std.math.maxInt(i16);
-    return @intFromFloat(@round(val));
-}
-
 fn janetToString(val: jc.Janet) []const u8 {
     // If it's already a string, use it directly
     if (jc.janet_checktype(val, jc.JANET_STRING) != 0) {
