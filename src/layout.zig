@@ -111,10 +111,10 @@ pub const Layout = struct {
                         bb.height,
                         color,
                         .{
-                            @floatFromInt(bd.width.left),
-                            @floatFromInt(bd.width.right),
                             @floatFromInt(bd.width.top),
+                            @floatFromInt(bd.width.right),
                             @floatFromInt(bd.width.bottom),
+                            @floatFromInt(bd.width.left),
                         },
                         radii,
                     );

@@ -505,11 +505,17 @@ pub const IpcPool = struct {
             };
             const payload = if (data[0] == 0xFF or data[0] == 0xFE) data[1..] else data;
             const payload_str = c.janet_string(payload.ptr, @intCast(payload.len));
-            const items = [3]Janet{ slot.event_id, type_kw, c.janet_wrap_string(payload_str) };
+            const str_val = c.janet_wrap_string(payload_str);
+            c.janet_gcroot(str_val);
+            defer _ = c.janet_gcunroot(str_val);
+            const items = [3]Janet{ slot.event_id, type_kw, str_val };
             sink.enqueue(sink.ctx, jt.makeTuple(&items));
         } else {
             const data_str = c.janet_string(data.ptr, @intCast(data.len));
-            const items = [2]Janet{ slot.event_id, c.janet_wrap_string(data_str) };
+            const str_val = c.janet_wrap_string(data_str);
+            c.janet_gcroot(str_val);
+            defer _ = c.janet_gcunroot(str_val);
+            const items = [2]Janet{ slot.event_id, str_val };
             sink.enqueue(sink.ctx, jt.makeTuple(&items));
         }
     }

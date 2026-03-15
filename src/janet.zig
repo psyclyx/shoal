@@ -273,8 +273,9 @@ pub const Dispatch = struct {
         };
         const cofx_keys = tableGet(handler_entry, "cofx") orelse c.janet_wrap_nil();
 
-        // Build cofx table
+        // Build cofx table (returned GC-rooted, must unroot)
         const cofx = self.buildCofx(event, cofx_keys);
+        defer _ = c.janet_gcunroot(cofx);
 
         // Call handler: (handler-fn cofx event) → fx-map
         const fx_map = self.pcall(handler_fn, &.{ cofx, event }) orelse return;
@@ -284,15 +285,16 @@ pub const Dispatch = struct {
     }
 
     /// Build the cofx table with built-in values, then inject declared cofx.
+    /// Caller must call janet_gcunroot on the returned value.
     fn buildCofx(self: *Dispatch, event: Janet, cofx_keys: Janet) Janet {
         const cofx_table = c.janet_table(4);
+        const cofx_val = c.janet_wrap_table(cofx_table);
+        c.janet_gcroot(cofx_val);
 
         // Built-in cofx: :db, :event, :now
         c.janet_table_put(cofx_table, kw("db"), self.db);
         c.janet_table_put(cofx_table, kw("event"), event);
         c.janet_table_put(cofx_table, kw("now"), c.janet_wrap_number(monotonicNow()));
-
-        const cofx_val = c.janet_wrap_table(cofx_table);
 
         // Inject declared cofx
         if (c.janet_checktype(cofx_keys, c.JANET_TUPLE) != 0 or

@@ -196,7 +196,10 @@ pub const SpawnPool = struct {
 
     fn enqueueLine(slot: *SpawnSlot, line: []const u8, sink: jt.EventSink) void {
         const line_str = c.janet_string(line.ptr, @intCast(line.len));
-        const items = [2]Janet{ slot.event_id, c.janet_wrap_string(line_str) };
+        const str_val = c.janet_wrap_string(line_str);
+        c.janet_gcroot(str_val);
+        defer _ = c.janet_gcunroot(str_val);
+        const items = [2]Janet{ slot.event_id, str_val };
         sink.enqueue(sink.ctx, jt.makeTuple(&items));
     }
 
