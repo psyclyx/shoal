@@ -1,20 +1,23 @@
 const std = @import("std");
 const hiccup = @import("hiccup.zig");
 const animation = @import("animation.zig");
+const jutil = @import("jutil.zig");
+const spawn_mod = @import("spawn.zig");
+const ipc_mod = @import("ipc.zig");
 const log = std.log.scoped(.janet);
 
-const posix_c = @cImport({
-    @cInclude("unistd.h");
-    @cInclude("signal.h");
-    @cInclude("sys/wait.h");
-});
+pub const c = jutil.c;
+pub const Janet = jutil.Janet;
+pub const JanetTable = jutil.JanetTable;
 
-pub const c = @cImport({
-    @cInclude("janet.h");
-});
-
-pub const Janet = c.Janet;
-pub const JanetTable = c.JanetTable;
+// Re-export helpers used by other modules (main.zig, hiccup.zig)
+pub const kw = jutil.kw;
+pub const janetGet = jutil.janetGet;
+pub const makeTuple = jutil.makeTuple;
+pub const makeEvent = jutil.makeEvent;
+pub const makeEventArgs = jutil.makeEventArgs;
+pub const janetIndexedView = jutil.janetIndexedView;
+pub const IndexedView = jutil.IndexedView;
 
 const boot_source = @embedFile("shoal.janet");
 const json_source = @embedFile("json.janet");
@@ -83,10 +86,6 @@ const fx_order = [_][:0]const u8{
 const MAX_QUEUED_EVENTS = 256;
 const MAX_TIMERS = 64;
 const MAX_ANIMS = 64;
-const MAX_SPAWNS = 16;
-const MAX_IPC_CONNS = 8;
-const SPAWN_BUF_SIZE = 4096;
-const IPC_BUF_SIZE = 8192;
 
 const AnimSlot = struct {
     active: bool = false,
@@ -109,42 +108,6 @@ const Timer = struct {
     id: Janet = undefined, // keyword id for cancellation, or nil
 };
 
-const SpawnSlot = struct {
-    active: bool = false,
-    pid: posix_c.pid_t = 0,
-    stdout_fd: std.posix.fd_t = -1,
-    event_id: Janet = undefined, // keyword, GC-rooted when active
-    done_id: Janet = undefined, // keyword or nil, GC-rooted if keyword
-    line_buf: [SPAWN_BUF_SIZE]u8 = undefined,
-    line_len: usize = 0,
-};
-
-const IpcFraming = enum { line, netrepl };
-
-const IpcSlot = struct {
-    active: bool = false,
-    fd: std.posix.fd_t = -1,
-    name: Janet = undefined, // keyword, GC-rooted when active
-    event_id: Janet = undefined, // keyword for recv events, GC-rooted
-    connected_id: Janet = undefined, // keyword or nil
-    disconnected_id: Janet = undefined, // keyword or nil
-    framing: IpcFraming = .line,
-    reconnect_delay: f64 = 0, // seconds, 0 = no reconnect
-    path: [256]u8 = undefined, // socket path (copied)
-    path_len: usize = 0,
-    handshake: ?[]const u8 = null, // netrepl handshake payload (GC-rooted string)
-    handshake_janet: Janet = undefined, // the Janet string value (for GC root)
-
-    // Recv buffer
-    recv_buf: [IPC_BUF_SIZE]u8 = undefined,
-    recv_len: usize = 0,
-
-    // Netrepl framing state
-    netrepl_msg_len: ?u32 = null, // expected message length (null = reading header)
-    netrepl_hdr_buf: [4]u8 = undefined, // partial header bytes
-    netrepl_hdr_len: usize = 0,
-};
-
 pub const Dispatch = struct {
     env: *JanetTable,
     db: Janet,
@@ -163,10 +126,10 @@ pub const Dispatch = struct {
     anims: [MAX_ANIMS]AnimSlot = [_]AnimSlot{.{}} ** MAX_ANIMS,
 
     // Spawn pool (child processes)
-    spawns: [MAX_SPAWNS]SpawnSlot = [_]SpawnSlot{.{}} ** MAX_SPAWNS,
+    spawns: spawn_mod.SpawnPool = .{},
 
     // IPC connection pool (Unix sockets)
-    ipcs: [MAX_IPC_CONNS]IpcSlot = [_]IpcSlot{.{}} ** MAX_IPC_CONNS,
+    ipcs: ipc_mod.IpcPool = .{},
 
     // Cached function references (set by initBoot)
     fn_get_handler: Janet = undefined,
@@ -385,9 +348,9 @@ pub const Dispatch = struct {
             } else if (std.mem.eql(u8, fx_name, "timer")) {
                 self.handleTimerFx(fx_val);
             } else if (std.mem.eql(u8, fx_name, "spawn")) {
-                self.handleSpawnFx(fx_val);
+                self.spawns.handleFx(fx_val, self.eventSink());
             } else if (std.mem.eql(u8, fx_name, "ipc")) {
-                self.handleIpcFx(fx_val);
+                self.ipcs.handleFx(fx_val, self.eventSink());
             } else {
                 // Look up registered fx executor
                 const executor = self.pcall(self.fn_get_fx_executor, &.{fx_key}) orelse continue;
@@ -799,733 +762,42 @@ pub const Dispatch = struct {
     }
 
     // -------------------------------------------------------------------
-    // Spawn pool (child processes)
+    // Spawn / IPC delegation (pools in spawn.zig / ipc.zig)
     // -------------------------------------------------------------------
 
-    /// Handle :spawn fx value. Spec: {:cmd ["cmd" "arg1"] :event :event-id :done :done-id}
-    fn handleSpawnFx(self: *Dispatch, val: Janet) void {
-        if (c.janet_checktype(val, c.JANET_TABLE) == 0 and
-            c.janet_checktype(val, c.JANET_STRUCT) == 0)
-        {
-            log.warn("spawn fx: expected table", .{});
-            return;
-        }
-
-        const cmd_val = janetGet(val, kw("cmd"));
-        const event_val = janetGet(val, kw("event"));
-        const done_val = janetGet(val, kw("done"));
-
-        const cmd_view = janetIndexedView(cmd_val);
-        if (cmd_view.items == null or cmd_view.len == 0) {
-            log.warn("spawn fx: empty or missing :cmd", .{});
-            return;
-        }
-
-        if (c.janet_checktype(event_val, c.JANET_KEYWORD) == 0) {
-            log.warn("spawn fx: missing :event keyword", .{});
-            return;
-        }
-
-        // Kill existing spawn with same event id (replacement semantics)
-        self.killSpawnByEvent(event_val);
-
-        // Build argv (max 32 args + null terminator)
-        const argc: usize = @intCast(cmd_view.len);
-        if (argc > 32) {
-            log.warn("spawn fx: too many args (max 32)", .{});
-            return;
-        }
-        var argv: [33]?[*:0]const u8 = [_]?[*:0]const u8{null} ** 33;
-        for (0..argc) |i| {
-            const s = cmd_view.items.?[i];
-            if (c.janet_checktype(s, c.JANET_STRING) != 0) {
-                argv[i] = @ptrCast(c.janet_unwrap_string(s));
-            } else if (c.janet_checktype(s, c.JANET_KEYWORD) != 0) {
-                argv[i] = @ptrCast(c.janet_unwrap_keyword(s));
-            } else if (c.janet_checktype(s, c.JANET_SYMBOL) != 0) {
-                argv[i] = @ptrCast(c.janet_unwrap_symbol(s));
-            } else {
-                log.warn("spawn fx: cmd element is not a string/keyword/symbol", .{});
-                return;
-            }
-        }
-
-        // Create pipe for child stdout
-        const pipe_fds = std.posix.pipe() catch {
-            log.warn("spawn fx: pipe() failed", .{});
-            return;
-        };
-
-        // Fork
-        const fork_result = std.posix.fork() catch {
-            log.warn("spawn fx: fork() failed", .{});
-            std.posix.close(pipe_fds[0]);
-            std.posix.close(pipe_fds[1]);
-            return;
-        };
-
-        if (fork_result == 0) {
-            // Child process
-            std.posix.close(pipe_fds[0]); // Close read end
-            _ = std.posix.dup2(pipe_fds[1], 1) catch std.process.exit(127); // stdout = pipe write end
-            std.posix.close(pipe_fds[1]); // Close original write end
-            _ = posix_c.execvp(argv[0].?, @ptrCast(&argv));
-            std.process.exit(127); // exec failed
-        }
-
-        // Parent process
-        std.posix.close(pipe_fds[1]); // Close write end
-
-        // Find free slot
-        for (&self.spawns) |*slot| {
-            if (!slot.active) {
-                slot.* = .{
-                    .active = true,
-                    .pid = @intCast(fork_result),
-                    .stdout_fd = pipe_fds[0],
-                    .event_id = event_val,
-                    .done_id = done_val,
-                    .line_len = 0,
-                };
-                c.janet_gcroot(event_val);
-                if (c.janet_checktype(done_val, c.JANET_KEYWORD) != 0) {
-                    c.janet_gcroot(done_val);
-                }
-                log.debug("spawn: pid={d} started", .{fork_result});
-                return;
-            }
-        }
-
-        log.warn("spawn fx: no free slots", .{});
-        _ = posix_c.kill(@intCast(fork_result), posix_c.SIGKILL);
-        _ = posix_c.waitpid(@intCast(fork_result), null, 0);
-        std.posix.close(pipe_fds[0]);
-    }
-
-    fn killSpawnByEvent(self: *Dispatch, event_id: Janet) void {
-        for (&self.spawns) |*slot| {
-            if (slot.active and c.janet_equals(slot.event_id, event_id) != 0) {
-                self.killSpawn(slot);
-                return;
-            }
-        }
-    }
-
-    fn killSpawn(self: *Dispatch, slot: *SpawnSlot) void {
-        if (slot.stdout_fd >= 0) {
-            std.posix.close(slot.stdout_fd);
-            slot.stdout_fd = -1;
-        }
-        _ = posix_c.kill(slot.pid, posix_c.SIGKILL);
-        _ = posix_c.waitpid(slot.pid, null, 0);
-        self.freeSpawnSlot(slot);
-    }
-
-    /// Called from main loop when poll indicates a spawn fd is readable.
     pub fn onSpawnReadable(self: *Dispatch, fd: std.posix.fd_t) void {
-        for (&self.spawns) |*slot| {
-            if (slot.active and slot.stdout_fd == fd) {
-                self.readSpawnSlot(slot);
-                return;
-            }
-        }
+        self.spawns.onReadable(fd, self.eventSink());
     }
 
-    fn readSpawnSlot(self: *Dispatch, slot: *SpawnSlot) void {
-        const available = SPAWN_BUF_SIZE - slot.line_len;
-        if (available == 0) {
-            // Buffer full with no newline — flush as a line
-            self.enqueueSpawnLine(slot, slot.line_buf[0..slot.line_len]);
-            slot.line_len = 0;
-            return;
-        }
-        const n = std.posix.read(slot.stdout_fd, slot.line_buf[slot.line_len..]) catch {
-            self.finishSpawn(slot);
-            return;
-        };
-        if (n == 0) {
-            self.finishSpawn(slot);
-            return;
-        }
-        slot.line_len += n;
-        self.drainSpawnLines(slot);
-    }
-
-    fn drainSpawnLines(self: *Dispatch, slot: *SpawnSlot) void {
-        var start: usize = 0;
-        for (0..slot.line_len) |i| {
-            if (slot.line_buf[i] == '\n') {
-                if (i > start) {
-                    self.enqueueSpawnLine(slot, slot.line_buf[start..i]);
-                }
-                start = i + 1;
-            }
-        }
-        if (start > 0) {
-            const remaining = slot.line_len - start;
-            if (remaining > 0) {
-                std.mem.copyForwards(u8, slot.line_buf[0..remaining], slot.line_buf[start..slot.line_len]);
-            }
-            slot.line_len = remaining;
-        }
-    }
-
-    fn enqueueSpawnLine(self: *Dispatch, slot: *SpawnSlot, line: []const u8) void {
-        const line_str = c.janet_string(line.ptr, @intCast(line.len));
-        const items = [2]Janet{ slot.event_id, c.janet_wrap_string(line_str) };
-        self.enqueue(makeTuple(&items));
-    }
-
-    fn finishSpawn(self: *Dispatch, slot: *SpawnSlot) void {
-        const pid = slot.pid;
-        if (slot.stdout_fd >= 0) {
-            std.posix.close(slot.stdout_fd);
-            slot.stdout_fd = -1;
-        }
-
-        // Flush remaining buffered data
-        if (slot.line_len > 0) {
-            self.enqueueSpawnLine(slot, slot.line_buf[0..slot.line_len]);
-            slot.line_len = 0;
-        }
-
-        // Reap child
-        var status: c_int = 0;
-        _ = posix_c.waitpid(pid, &status, 0);
-        const exit_code: i32 = if (posix_c.WIFEXITED(status))
-            @intCast(posix_c.WEXITSTATUS(status))
-        else
-            -1;
-
-        // Enqueue done event if configured
-        if (c.janet_checktype(slot.done_id, c.JANET_KEYWORD) != 0) {
-            const items = [2]Janet{ slot.done_id, c.janet_wrap_number(@floatFromInt(exit_code)) };
-            self.enqueue(makeTuple(&items));
-        }
-
-        self.freeSpawnSlot(slot);
-        log.debug("spawn: pid={d} exited code={d}", .{ pid, exit_code });
-    }
-
-    fn freeSpawnSlot(_: *Dispatch, slot: *SpawnSlot) void {
-        if (c.janet_checktype(slot.event_id, c.JANET_KEYWORD) != 0) {
-            _ = c.janet_gcunroot(slot.event_id);
-        }
-        if (c.janet_checktype(slot.done_id, c.JANET_KEYWORD) != 0) {
-            _ = c.janet_gcunroot(slot.done_id);
-        }
-        slot.active = false;
-        slot.stdout_fd = -1;
-    }
-
-    /// Fill a poll fd buffer with active spawn stdout fds. Returns count added.
     pub fn fillSpawnPollFds(self: *Dispatch, buf: []std.posix.pollfd) usize {
-        var count: usize = 0;
-        for (self.spawns) |slot| {
-            if (slot.active and slot.stdout_fd >= 0 and count < buf.len) {
-                buf[count] = .{ .fd = slot.stdout_fd, .events = std.posix.POLL.IN, .revents = 0 };
-                count += 1;
-            }
-        }
-        return count;
+        return self.spawns.fillPollFds(buf);
     }
 
-    // -------------------------------------------------------------------
-    // IPC connection pool (Unix sockets)
-    // -------------------------------------------------------------------
-
-    /// Handle :ipc fx value. Dispatches to connect/send/disconnect.
-    /// Value is a table with one of: {:connect {...}}, {:send {...}}, {:disconnect {:name :id}}
-    fn handleIpcFx(self: *Dispatch, val: Janet) void {
-        if (c.janet_checktype(val, c.JANET_TABLE) == 0 and
-            c.janet_checktype(val, c.JANET_STRUCT) == 0)
-        {
-            log.warn("ipc fx: expected table", .{});
-            return;
-        }
-
-        const connect_val = janetGet(val, kw("connect"));
-        if (c.janet_checktype(connect_val, c.JANET_NIL) == 0) {
-            self.handleIpcConnect(connect_val);
-        }
-
-        const send_val = janetGet(val, kw("send"));
-        if (c.janet_checktype(send_val, c.JANET_NIL) == 0) {
-            self.handleIpcSend(send_val);
-        }
-
-        const disconnect_val = janetGet(val, kw("disconnect"));
-        if (c.janet_checktype(disconnect_val, c.JANET_NIL) == 0) {
-            self.handleIpcDisconnect(disconnect_val);
-        }
-    }
-
-    /// Handle {:connect {:path "..." :name :id :framing :line/:netrepl :event :id ...}}
-    fn handleIpcConnect(self: *Dispatch, spec: Janet) void {
-        if (c.janet_checktype(spec, c.JANET_TABLE) == 0 and
-            c.janet_checktype(spec, c.JANET_STRUCT) == 0)
-        {
-            log.warn("ipc connect: expected table", .{});
-            return;
-        }
-
-        const name_val = janetGet(spec, kw("name"));
-        if (c.janet_checktype(name_val, c.JANET_KEYWORD) == 0) {
-            log.warn("ipc connect: missing :name keyword", .{});
-            return;
-        }
-
-        const path_val = janetGet(spec, kw("path"));
-        if (c.janet_checktype(path_val, c.JANET_STRING) == 0) {
-            log.warn("ipc connect: missing :path string", .{});
-            return;
-        }
-        const path_str = c.janet_unwrap_string(path_val);
-        const path_len: usize = @intCast(c.janet_string_length(path_str));
-        if (path_len >= 256) {
-            log.warn("ipc connect: path too long", .{});
-            return;
-        }
-
-        const event_val = janetGet(spec, kw("event"));
-        if (c.janet_checktype(event_val, c.JANET_KEYWORD) == 0) {
-            log.warn("ipc connect: missing :event keyword", .{});
-            return;
-        }
-
-        // Parse framing mode
-        const framing_val = janetGet(spec, kw("framing"));
-        const framing: IpcFraming = blk: {
-            if (c.janet_checktype(framing_val, c.JANET_KEYWORD) != 0) {
-                const s = std.mem.span(c.janet_unwrap_keyword(framing_val));
-                if (std.mem.eql(u8, s, "netrepl")) break :blk .netrepl;
-            }
-            break :blk .line;
-        };
-
-        // Optional event ids
-        const connected_val = janetGet(spec, kw("connected"));
-        const disconnected_val = janetGet(spec, kw("disconnected"));
-
-        // Reconnect delay
-        const reconnect_val = janetGet(spec, kw("reconnect"));
-        const reconnect_delay: f64 = if (c.janet_checktype(reconnect_val, c.JANET_NUMBER) != 0)
-            c.janet_unwrap_number(reconnect_val)
-        else
-            0;
-
-        // Handshake (for netrepl)
-        const handshake_val = janetGet(spec, kw("handshake"));
-
-        // Disconnect any existing connection with this name
-        self.disconnectByName(name_val);
-
-        // Create Unix socket and connect
-        const fd = self.ipcSocketConnect(path_str[0..path_len]) orelse {
-            log.warn("ipc connect: failed to connect to {s}", .{path_str[0..path_len]});
-            // Schedule reconnect if configured
-            if (reconnect_delay > 0) {
-                self.scheduleIpcReconnect(spec, reconnect_delay);
-            }
-            return;
-        };
-
-        // Find a free slot
-        for (&self.ipcs) |*slot| {
-            if (!slot.active) {
-                slot.active = true;
-                slot.fd = fd;
-                slot.name = name_val;
-                slot.event_id = event_val;
-                slot.connected_id = connected_val;
-                slot.disconnected_id = disconnected_val;
-                slot.framing = framing;
-                slot.reconnect_delay = reconnect_delay;
-                @memcpy(slot.path[0..path_len], path_str[0..path_len]);
-                slot.path_len = path_len;
-                slot.recv_len = 0;
-                slot.netrepl_msg_len = null;
-                slot.netrepl_hdr_len = 0;
-
-                // GC root all keyword values
-                c.janet_gcroot(name_val);
-                c.janet_gcroot(event_val);
-                if (c.janet_checktype(connected_val, c.JANET_KEYWORD) != 0) {
-                    c.janet_gcroot(connected_val);
-                }
-                if (c.janet_checktype(disconnected_val, c.JANET_KEYWORD) != 0) {
-                    c.janet_gcroot(disconnected_val);
-                }
-
-                // Store handshake if provided
-                if (c.janet_checktype(handshake_val, c.JANET_STRING) != 0) {
-                    const hs_str = c.janet_unwrap_string(handshake_val);
-                    const hs_len: usize = @intCast(c.janet_string_length(hs_str));
-                    slot.handshake = hs_str[0..hs_len];
-                    slot.handshake_janet = handshake_val;
-                    c.janet_gcroot(handshake_val);
-                } else {
-                    slot.handshake = null;
-                    slot.handshake_janet = c.janet_wrap_nil();
-                }
-
-                log.info("ipc: connected to {s} as :{s}", .{
-                    path_str[0..path_len],
-                    std.mem.span(c.janet_unwrap_keyword(name_val)),
-                });
-
-                // Send handshake if configured (netrepl: length-prefixed)
-                if (slot.handshake) |hs| {
-                    self.ipcSendRaw(slot, hs);
-                }
-
-                // Enqueue connected event
-                if (c.janet_checktype(connected_val, c.JANET_KEYWORD) != 0) {
-                    self.enqueue(makeEvent(std.mem.span(c.janet_unwrap_keyword(connected_val))));
-                }
-
-                return;
-            }
-        }
-
-        log.warn("ipc connect: no free slots", .{});
-        std.posix.close(fd);
-    }
-
-    /// Create a Unix socket and connect to the given path. Returns fd or null.
-    fn ipcSocketConnect(_: *Dispatch, path: []const u8) ?std.posix.fd_t {
-        const fd = std.posix.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0) catch {
-            return null;
-        };
-        errdefer std.posix.close(fd);
-
-        var addr: std.posix.sockaddr.un = .{ .path = undefined };
-        @memset(&addr.path, 0);
-        if (path.len > addr.path.len) return null;
-        @memcpy(addr.path[0..path.len], path);
-
-        std.posix.connect(
-            fd,
-            @ptrCast(&addr),
-            @intCast(@sizeOf(std.posix.sockaddr.un)),
-        ) catch {
-            std.posix.close(fd);
-            return null;
-        };
-
-        return fd;
-    }
-
-    /// Send raw bytes on an IPC slot. For netrepl, prepends 4-byte LE length header.
-    fn ipcSendRaw(_: *Dispatch, slot: *IpcSlot, data: []const u8) void {
-        if (slot.framing == .netrepl) {
-            // Netrepl: 4-byte LE length prefix
-            const len: u32 = @intCast(data.len);
-            const hdr = std.mem.toBytes(std.mem.nativeToLittle(u32, len));
-            _ = std.posix.write(slot.fd, &hdr) catch {
-                log.warn("ipc send: write header failed", .{});
-                return;
-            };
-        }
-        _ = std.posix.write(slot.fd, data) catch {
-            log.warn("ipc send: write failed", .{});
-        };
-    }
-
-    /// Handle {:send {:name :id :data "..."}}
-    fn handleIpcSend(self: *Dispatch, spec: Janet) void {
-        if (c.janet_checktype(spec, c.JANET_TABLE) == 0 and
-            c.janet_checktype(spec, c.JANET_STRUCT) == 0)
-        {
-            log.warn("ipc send: expected table", .{});
-            return;
-        }
-
-        const name_val = janetGet(spec, kw("name"));
-        if (c.janet_checktype(name_val, c.JANET_KEYWORD) == 0) {
-            log.warn("ipc send: missing :name keyword", .{});
-            return;
-        }
-
-        const data_val = janetGet(spec, kw("data"));
-        if (c.janet_checktype(data_val, c.JANET_STRING) == 0) {
-            log.warn("ipc send: missing :data string", .{});
-            return;
-        }
-        const data_str = c.janet_unwrap_string(data_val);
-        const data_len: usize = @intCast(c.janet_string_length(data_str));
-
-        for (&self.ipcs) |*slot| {
-            if (slot.active and c.janet_equals(slot.name, name_val) != 0) {
-                self.ipcSendRaw(slot, data_str[0..data_len]);
-                return;
-            }
-        }
-
-        log.warn("ipc send: no connection named :{s}", .{
-            std.mem.span(c.janet_unwrap_keyword(name_val)),
-        });
-    }
-
-    /// Handle {:disconnect {:name :id}}
-    fn handleIpcDisconnect(self: *Dispatch, spec: Janet) void {
-        const name_val = if (c.janet_checktype(spec, c.JANET_KEYWORD) != 0)
-            spec
-        else blk: {
-            if (c.janet_checktype(spec, c.JANET_TABLE) == 0 and
-                c.janet_checktype(spec, c.JANET_STRUCT) == 0)
-            {
-                log.warn("ipc disconnect: expected table or keyword", .{});
-                return;
-            }
-            break :blk janetGet(spec, kw("name"));
-        };
-
-        if (c.janet_checktype(name_val, c.JANET_KEYWORD) == 0) {
-            log.warn("ipc disconnect: missing :name keyword", .{});
-            return;
-        }
-
-        self.disconnectByName(name_val);
-    }
-
-    /// Disconnect and free an IPC connection by name. Does not schedule reconnect.
-    fn disconnectByName(self: *Dispatch, name: Janet) void {
-        for (&self.ipcs) |*slot| {
-            if (slot.active and c.janet_equals(slot.name, name) != 0) {
-                self.closeIpcSlot(slot, false);
-                return;
-            }
-        }
-    }
-
-    /// Close an IPC connection. If `reconnect` is true and the slot has reconnect
-    /// configured, schedules a reconnect timer.
-    fn closeIpcSlot(self: *Dispatch, slot: *IpcSlot, reconnect: bool) void {
-        if (slot.fd >= 0) {
-            std.posix.close(slot.fd);
-            slot.fd = -1;
-        }
-
-        log.info("ipc: disconnected :{s}", .{
-            std.mem.span(c.janet_unwrap_keyword(slot.name)),
-        });
-
-        // Enqueue disconnected event
-        if (c.janet_checktype(slot.disconnected_id, c.JANET_KEYWORD) != 0) {
-            self.enqueue(makeEvent(std.mem.span(c.janet_unwrap_keyword(slot.disconnected_id))));
-        }
-
-        // Schedule reconnect if applicable
-        if (reconnect and slot.reconnect_delay > 0) {
-            self.scheduleIpcReconnectFromSlot(slot);
-        }
-
-        self.freeIpcSlot(slot);
-    }
-
-    /// Schedule a reconnect by creating a timer that dispatches an internal
-    /// reconnect event. We store the connect spec in a :dispatch event.
-    fn scheduleIpcReconnect(self: *Dispatch, spec: Janet, delay: f64) void {
-        // Create timer: {:delay N :event [:_ipc-reconnect spec] :id :_ipc-reconnect/name}
-        const reconnect_event_items = [2]Janet{ kw("_ipc-reconnect"), spec };
-        const reconnect_event = makeTuple(&reconnect_event_items);
-
-        // Use the connection name as timer id so repeated failures replace
-        // rather than stack timers (named timers auto-replace in handleTimerFx)
-        const name_val = janetGet(spec, kw("name"));
-
-        const timer_spec = c.janet_table(4);
-        c.janet_table_put(timer_spec, kw("delay"), c.janet_wrap_number(delay));
-        c.janet_table_put(timer_spec, kw("event"), reconnect_event);
-        if (c.janet_checktype(name_val, c.JANET_NIL) == 0) {
-            c.janet_table_put(timer_spec, kw("id"), name_val);
-        }
-        self.handleTimerFx(c.janet_wrap_table(timer_spec));
-    }
-
-    /// Schedule reconnect from a slot that's about to be freed.
-    fn scheduleIpcReconnectFromSlot(self: *Dispatch, slot: *IpcSlot) void {
-        // Reconstruct the connect spec from the slot's stored values
-        const spec = c.janet_table(8);
-        const path_str = c.janet_string(slot.path[0..slot.path_len].ptr, @intCast(slot.path_len));
-        c.janet_table_put(spec, kw("path"), c.janet_wrap_string(path_str));
-        c.janet_table_put(spec, kw("name"), slot.name);
-        c.janet_table_put(spec, kw("event"), slot.event_id);
-        c.janet_table_put(spec, kw("framing"), kw(if (slot.framing == .netrepl) "netrepl" else "line"));
-        c.janet_table_put(spec, kw("reconnect"), c.janet_wrap_number(slot.reconnect_delay));
-        if (c.janet_checktype(slot.connected_id, c.JANET_KEYWORD) != 0) {
-            c.janet_table_put(spec, kw("connected"), slot.connected_id);
-        }
-        if (c.janet_checktype(slot.disconnected_id, c.JANET_KEYWORD) != 0) {
-            c.janet_table_put(spec, kw("disconnected"), slot.disconnected_id);
-        }
-        if (slot.handshake != null) {
-            c.janet_table_put(spec, kw("handshake"), slot.handshake_janet);
-        }
-
-        self.scheduleIpcReconnect(c.janet_wrap_table(spec), slot.reconnect_delay);
-    }
-
-    /// Called from main loop when poll indicates an IPC fd is readable.
     pub fn onIpcReadable(self: *Dispatch, fd: std.posix.fd_t) void {
-        for (&self.ipcs) |*slot| {
-            if (slot.active and slot.fd == fd) {
-                self.readIpcSlot(slot);
-                return;
-            }
-        }
+        self.ipcs.onReadable(fd, self.eventSink());
     }
 
-    fn readIpcSlot(self: *Dispatch, slot: *IpcSlot) void {
-        const available = IPC_BUF_SIZE - slot.recv_len;
-        if (available == 0) {
-            // Buffer full — for line mode, flush as oversized line; for netrepl, error
-            if (slot.framing == .line) {
-                self.enqueueIpcMessage(slot, slot.recv_buf[0..slot.recv_len], .line);
-                slot.recv_len = 0;
-            } else {
-                log.warn("ipc: netrepl recv buffer overflow", .{});
-                self.closeIpcSlot(slot, true);
-            }
-            return;
-        }
-
-        const n = std.posix.read(slot.fd, slot.recv_buf[slot.recv_len..]) catch {
-            self.closeIpcSlot(slot, true);
-            return;
-        };
-        if (n == 0) {
-            // EOF — remote closed
-            self.closeIpcSlot(slot, true);
-            return;
-        }
-
-        slot.recv_len += n;
-
-        switch (slot.framing) {
-            .line => self.drainIpcLines(slot),
-            .netrepl => self.drainIpcNetrepl(slot),
-        }
-    }
-
-    /// Line framing: split on newlines, enqueue each complete line.
-    fn drainIpcLines(self: *Dispatch, slot: *IpcSlot) void {
-        var start: usize = 0;
-        for (0..slot.recv_len) |i| {
-            if (slot.recv_buf[i] == '\n') {
-                if (i > start) {
-                    self.enqueueIpcMessage(slot, slot.recv_buf[start..i], .line);
-                }
-                start = i + 1;
-            }
-        }
-        if (start > 0) {
-            const remaining = slot.recv_len - start;
-            if (remaining > 0) {
-                std.mem.copyForwards(u8, slot.recv_buf[0..remaining], slot.recv_buf[start..slot.recv_len]);
-            }
-            slot.recv_len = remaining;
-        }
-    }
-
-    /// Netrepl framing: 4-byte LE length prefix + message body.
-    /// Messages may have a type byte: 0xFF = output, 0xFE = return.
-    fn drainIpcNetrepl(self: *Dispatch, slot: *IpcSlot) void {
-        while (slot.recv_len > 0) {
-            if (slot.netrepl_msg_len == null) {
-                // Reading header — need 4 bytes
-                while (slot.netrepl_hdr_len < 4 and slot.recv_len > 0) {
-                    // Consume one byte at a time from recv_buf into hdr_buf
-                    slot.netrepl_hdr_buf[slot.netrepl_hdr_len] = slot.recv_buf[0];
-                    slot.netrepl_hdr_len += 1;
-                    // Shift recv_buf forward by 1
-                    slot.recv_len -= 1;
-                    if (slot.recv_len > 0) {
-                        std.mem.copyForwards(u8, slot.recv_buf[0..slot.recv_len], slot.recv_buf[1 .. slot.recv_len + 1]);
-                    }
-                }
-                if (slot.netrepl_hdr_len < 4) break; // need more data
-
-                slot.netrepl_msg_len = std.mem.readInt(u32, &slot.netrepl_hdr_buf, .little);
-                slot.netrepl_hdr_len = 0;
-
-                if (slot.netrepl_msg_len.? > IPC_BUF_SIZE) {
-                    log.warn("ipc: netrepl message too large ({d} bytes)", .{slot.netrepl_msg_len.?});
-                    self.closeIpcSlot(slot, true);
-                    return;
-                }
-            }
-
-            const msg_len = slot.netrepl_msg_len.?;
-            if (slot.recv_len < msg_len) break; // need more data
-
-            // Have complete message
-            const payload = slot.recv_buf[0..msg_len];
-            self.enqueueIpcMessage(slot, payload, .netrepl);
-
-            // Consume message from buffer
-            const remaining = slot.recv_len - msg_len;
-            if (remaining > 0) {
-                std.mem.copyForwards(u8, slot.recv_buf[0..remaining], slot.recv_buf[msg_len..slot.recv_len]);
-            }
-            slot.recv_len = remaining;
-            slot.netrepl_msg_len = null;
-        }
-    }
-
-    /// Enqueue a received IPC message as an event.
-    /// Line mode: [:event-id "line"]
-    /// Netrepl mode: [:event-id :output/:return/:text "payload"]
-    fn enqueueIpcMessage(self: *Dispatch, slot: *IpcSlot, data: []const u8, framing: IpcFraming) void {
-        if (framing == .netrepl and data.len > 0) {
-            // Classify by first byte
-            const type_kw = switch (data[0]) {
-                0xFF => kw("output"),
-                0xFE => kw("return"),
-                else => kw("text"),
-            };
-            const payload = if (data[0] == 0xFF or data[0] == 0xFE) data[1..] else data;
-            const payload_str = c.janet_string(payload.ptr, @intCast(payload.len));
-            const items = [3]Janet{ slot.event_id, type_kw, c.janet_wrap_string(payload_str) };
-            self.enqueue(makeTuple(&items));
-        } else {
-            const data_str = c.janet_string(data.ptr, @intCast(data.len));
-            const items = [2]Janet{ slot.event_id, c.janet_wrap_string(data_str) };
-            self.enqueue(makeTuple(&items));
-        }
-    }
-
-    /// Fill a poll fd buffer with active IPC connection fds. Returns count added.
     pub fn fillIpcPollFds(self: *Dispatch, buf: []std.posix.pollfd) usize {
-        var count: usize = 0;
-        for (self.ipcs) |slot| {
-            if (slot.active and slot.fd >= 0 and count < buf.len) {
-                buf[count] = .{ .fd = slot.fd, .events = std.posix.POLL.IN, .revents = 0 };
-                count += 1;
-            }
-        }
-        return count;
+        return self.ipcs.fillPollFds(buf);
     }
 
-    fn freeIpcSlot(_: *Dispatch, slot: *IpcSlot) void {
-        if (c.janet_checktype(slot.name, c.JANET_KEYWORD) != 0) {
-            _ = c.janet_gcunroot(slot.name);
-        }
-        if (c.janet_checktype(slot.event_id, c.JANET_KEYWORD) != 0) {
-            _ = c.janet_gcunroot(slot.event_id);
-        }
-        if (c.janet_checktype(slot.connected_id, c.JANET_KEYWORD) != 0) {
-            _ = c.janet_gcunroot(slot.connected_id);
-        }
-        if (c.janet_checktype(slot.disconnected_id, c.JANET_KEYWORD) != 0) {
-            _ = c.janet_gcunroot(slot.disconnected_id);
-        }
-        if (slot.handshake != null) {
-            _ = c.janet_gcunroot(slot.handshake_janet);
-        }
-        slot.active = false;
-        slot.fd = -1;
+    /// Build an EventSink that routes enqueue/timer calls back to this Dispatch.
+    fn eventSink(self: *Dispatch) jutil.EventSink {
+        return .{
+            .ctx = @ptrCast(self),
+            .enqueue = enqueueAdapter,
+            .timer = timerAdapter,
+        };
+    }
+
+    fn enqueueAdapter(ctx: *anyopaque, event: Janet) void {
+        const self: *Dispatch = @ptrCast(@alignCast(ctx));
+        self.enqueue(event);
+    }
+
+    fn timerAdapter(ctx: *anyopaque, val: Janet) void {
+        const self: *Dispatch = @ptrCast(@alignCast(ctx));
+        self.handleTimerFx(val);
     }
 
     /// Update the db, managing GC roots.
@@ -1577,7 +849,7 @@ pub const Dispatch = struct {
         }
         const signal = c.janet_continue(fiber, c.janet_wrap_nil(), &out);
         if (signal != c.JANET_SIGNAL_OK) {
-            log.warn("pcall: Janet error: {s}", .{janetToStr(out)});
+            log.warn("pcall: Janet error: {s}", .{jutil.janetToStr(out)});
             return null;
         }
         return out;
@@ -1606,19 +878,11 @@ pub const Dispatch = struct {
             }
         }
         // Kill active spawns
-        for (&self.spawns) |*slot| {
-            if (slot.active) self.killSpawn(slot);
+        for (&self.spawns.slots) |*slot| {
+            if (slot.active) self.spawns.kill(slot);
         }
         // Close IPC connections
-        for (&self.ipcs) |*slot| {
-            if (slot.active) {
-                if (slot.fd >= 0) {
-                    std.posix.close(slot.fd);
-                    slot.fd = -1;
-                }
-                self.freeIpcSlot(slot);
-            }
-        }
+        self.ipcs.deinit();
         _ = c.janet_gcunroot(self.db);
     }
 };
@@ -1668,7 +932,7 @@ pub fn createDispatch() Dispatch {
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Helpers (janet.zig-local; shared helpers are in jutil.zig)
 // ---------------------------------------------------------------------------
 
 /// Get the first element of a Janet tuple.
@@ -1679,18 +943,6 @@ fn tupleFirst(val: Janet) ?Janet {
         if (len > 0) return t[0];
     }
     return null;
-}
-
-/// Look up a keyword-keyed value in a Janet table or struct.
-pub fn janetGet(collection: Janet, key: Janet) Janet {
-    if (c.janet_checktype(collection, c.JANET_TABLE) != 0) {
-        const tbl = c.janet_unwrap_table(collection);
-        return c.janet_table_get(tbl, key);
-    } else if (c.janet_checktype(collection, c.JANET_STRUCT) != 0) {
-        const s = c.janet_unwrap_struct(collection);
-        return c.janet_struct_get(s, key);
-    }
-    return c.janet_wrap_nil();
 }
 
 /// Get a keyword-keyed value from a handler entry (table).
@@ -1707,7 +959,6 @@ fn envLookup(env: *JanetTable, name: [:0]const u8) ?Janet {
     const sym = c.janet_csymbolv(name.ptr);
     const binding = c.janet_table_get(env, sym);
     if (c.janet_checktype(binding, c.JANET_NIL) != 0) return null;
-    // In Janet, environment entries are tables with a :value key
     if (c.janet_checktype(binding, c.JANET_TABLE) != 0) {
         const val = c.janet_table_get(c.janet_unwrap_table(binding), kw("value"));
         if (c.janet_checktype(val, c.JANET_NIL) != 0) return null;
@@ -1716,60 +967,9 @@ fn envLookup(env: *JanetTable, name: [:0]const u8) ?Janet {
     return null;
 }
 
-/// Wrap a Zig string as a Janet keyword.
-pub fn kw(name: [:0]const u8) Janet {
-    return c.janet_ckeywordv(name.ptr);
-}
-
 /// Get current monotonic time in seconds.
 fn monotonicNow() f64 {
     const ts = std.posix.clock_gettime(.MONOTONIC) catch return 0;
     return @as(f64, @floatFromInt(ts.sec)) + @as(f64, @floatFromInt(ts.nsec)) / 1_000_000_000.0;
-}
-
-/// Convert a Janet value to a string for logging.
-fn janetToStr(val: Janet) [*:0]const u8 {
-    return @ptrCast(c.janet_to_string(val));
-}
-
-/// Construct a Janet tuple from a slice of values.
-pub fn makeTuple(items: []const Janet) Janet {
-    const buf = c.janet_tuple_begin(@intCast(items.len));
-    for (items, 0..) |item, i| {
-        buf[@intCast(i)] = item;
-    }
-    return c.janet_wrap_tuple(c.janet_tuple_end(buf));
-}
-
-/// Construct a single-keyword event tuple like [:init]
-pub fn makeEvent(name: [:0]const u8) Janet {
-    const items = [1]Janet{kw(name)};
-    return makeTuple(&items);
-}
-
-/// Construct an event tuple with arguments like [:event-id arg1 arg2 ...]
-pub fn makeEventArgs(name: [:0]const u8, args: []const Janet) Janet {
-    const n = args.len + 1;
-    const buf = c.janet_tuple_begin(@intCast(n));
-    buf[0] = kw(name);
-    for (args, 0..) |arg, i| {
-        buf[@intCast(i + 1)] = arg;
-    }
-    return c.janet_wrap_tuple(c.janet_tuple_end(buf));
-}
-
-const IndexedView = struct {
-    items: ?[*c]const Janet,
-    len: i32,
-};
-
-/// Get an indexed view (items + len) from a tuple or array.
-fn janetIndexedView(val: Janet) IndexedView {
-    var items: [*c]const Janet = null;
-    var len: i32 = 0;
-    if (c.janet_indexed_view(val, &items, &len) != 0) {
-        return .{ .items = items, .len = len };
-    }
-    return .{ .items = null, .len = 0 };
 }
 
