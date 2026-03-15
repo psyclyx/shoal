@@ -86,10 +86,19 @@
      :timer {:delay 5.0 :event [:mem/tick] :repeat true :id :mem}}))
 
 (reg-sub :mem (fn [db] (get db :mem {})))
+(defn- fmt-mem [mb]
+  "Format MB as GiB with 1 decimal when >= 1024, otherwise as integer MB."
+  (if (>= mb 1024)
+    (let [gib (/ mb 1024)
+          whole (math/floor gib)
+          frac (math/floor (* 10 (- gib whole)))]
+      (string whole "." frac "G"))
+    (string (math/floor mb) "M")))
+
 (reg-sub :mem/text [:mem]
   (fn [mem]
-    (string "mem " (math/floor (get mem :used-mb 0))
-            "/" (math/floor (get mem :total-mb 0)) "M")))
+    (string "mem " (fmt-mem (get mem :used-mb 0))
+            "/" (fmt-mem (get mem :total-mb 0)))))
 
 # -- Battery --
 
