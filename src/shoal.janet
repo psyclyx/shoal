@@ -153,3 +153,10 @@
   "Return the registered root view function, or nil."
   []
   *view-fn*)
+
+# --- Internal handlers ---
+
+# IPC reconnect: timer fires this event with the original connect spec.
+(reg-event-handler :_ipc-reconnect
+  (fn [cofx event]
+    {:ipc {:connect (event 1)}}))

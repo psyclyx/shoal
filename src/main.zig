@@ -353,12 +353,14 @@ pub fn main() !void {
 
         // Poll Wayland fd + tidepool fd + spawn fds with timeout based on timers
         const tp_fd = module_manager.provider.getFd();
-        var poll_fds: [34]std.posix.pollfd = undefined; // 2 base + up to 16 spawns + headroom
+        var poll_fds: [42]std.posix.pollfd = undefined; // 2 base + 16 spawns + 8 ipc + headroom
         poll_fds[0] = .{ .fd = wl_fd, .events = std.posix.POLL.IN, .revents = 0 };
         poll_fds[1] = .{ .fd = tp_fd orelse -1, .events = std.posix.POLL.IN, .revents = 0 };
         var nfds: usize = if (tp_fd != null) 2 else 1;
         const spawn_fd_start = nfds;
         nfds += dispatch.fillSpawnPollFds(poll_fds[nfds..]);
+        const ipc_fd_start = nfds;
+        nfds += dispatch.fillIpcPollFds(poll_fds[nfds..]);
         const poll_timeout: i32 = dispatch.nextTimerTimeoutMs() orelse 100;
         _ = std.posix.poll(poll_fds[0..nfds], @min(poll_timeout, 100)) catch 0;
 
@@ -370,9 +372,16 @@ pub fn main() !void {
         if (display.dispatchPending() != .SUCCESS) break;
 
         // Process readable spawn fds
-        for (poll_fds[spawn_fd_start..nfds]) |pfd| {
+        for (poll_fds[spawn_fd_start..ipc_fd_start]) |pfd| {
             if (pfd.revents & (std.posix.POLL.IN | std.posix.POLL.HUP) != 0) {
                 dispatch.onSpawnReadable(pfd.fd);
+            }
+        }
+
+        // Process readable IPC fds
+        for (poll_fds[ipc_fd_start..nfds]) |pfd| {
+            if (pfd.revents & (std.posix.POLL.IN | std.posix.POLL.HUP) != 0) {
+                dispatch.onIpcReadable(pfd.fd);
             }
         }
 
