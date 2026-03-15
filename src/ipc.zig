@@ -367,26 +367,37 @@ pub const IpcPool = struct {
     /// Schedule reconnect from a slot that's about to be freed.
     fn reconnectFromSlot(slot: *IpcSlot, sink: jt.EventSink) void {
         // Reconstruct the connect spec from the slot's stored values
+        // Pre-intern all keywords before any Janet allocation — janet_string
+        // below allocates a GC-managed string, and interleaving kw() calls
+        // (which can allocate) would leave the string unrooted on the C stack.
+        const kw_path = jt.kw("path");
+        const kw_name = jt.kw("name");
+        const kw_event = jt.kw("event");
+        const kw_framing = jt.kw("framing");
+        const kw_reconnect = jt.kw("reconnect");
+        const kw_connected = jt.kw("connected");
+        const kw_disconnected = jt.kw("disconnected");
+        const kw_handshake = jt.kw("handshake");
+        const framing_kw = jt.kw(if (slot.framing == .netrepl) "netrepl" else "line");
+
         const spec = c.janet_table(8);
-        // Root spec immediately — subsequent janet_string/janet_table_put calls
-        // can trigger GC, and spec is only on the C stack (invisible to GC).
         const spec_val = c.janet_wrap_table(spec);
         c.janet_gcroot(spec_val);
         defer _ = c.janet_gcunroot(spec_val);
         const path_str = c.janet_string(slot.path[0..slot.path_len].ptr, @intCast(slot.path_len));
-        c.janet_table_put(spec, jt.kw("path"), c.janet_wrap_string(path_str));
-        c.janet_table_put(spec, jt.kw("name"), slot.name);
-        c.janet_table_put(spec, jt.kw("event"), slot.event_id);
-        c.janet_table_put(spec, jt.kw("framing"), jt.kw(if (slot.framing == .netrepl) "netrepl" else "line"));
-        c.janet_table_put(spec, jt.kw("reconnect"), c.janet_wrap_number(slot.reconnect_delay));
+        c.janet_table_put(spec, kw_path, c.janet_wrap_string(path_str));
+        c.janet_table_put(spec, kw_name, slot.name);
+        c.janet_table_put(spec, kw_event, slot.event_id);
+        c.janet_table_put(spec, kw_framing, framing_kw);
+        c.janet_table_put(spec, kw_reconnect, c.janet_wrap_number(slot.reconnect_delay));
         if (c.janet_checktype(slot.connected_id, c.JANET_KEYWORD) != 0) {
-            c.janet_table_put(spec, jt.kw("connected"), slot.connected_id);
+            c.janet_table_put(spec, kw_connected, slot.connected_id);
         }
         if (c.janet_checktype(slot.disconnected_id, c.JANET_KEYWORD) != 0) {
-            c.janet_table_put(spec, jt.kw("disconnected"), slot.disconnected_id);
+            c.janet_table_put(spec, kw_disconnected, slot.disconnected_id);
         }
         if (slot.handshake != null) {
-            c.janet_table_put(spec, jt.kw("handshake"), slot.handshake_janet);
+            c.janet_table_put(spec, kw_handshake, slot.handshake_janet);
         }
 
         scheduleReconnect(c.janet_wrap_table(spec), slot.reconnect_delay, sink);
