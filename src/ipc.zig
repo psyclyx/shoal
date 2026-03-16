@@ -229,14 +229,22 @@ pub const IpcPool = struct {
             // Netrepl: 4-byte LE length prefix
             const len: u32 = @intCast(data.len);
             const hdr = std.mem.toBytes(std.mem.nativeToLittle(u32, len));
-            _ = std.posix.write(slot.fd, &hdr) catch {
+            writeAll(slot.fd, &hdr) catch {
                 log.warn("ipc send: write header failed", .{});
                 return;
             };
         }
-        _ = std.posix.write(slot.fd, data) catch {
+        writeAll(slot.fd, data) catch {
             log.warn("ipc send: write failed", .{});
         };
+    }
+
+    /// Write all bytes to fd, retrying on partial writes.
+    fn writeAll(fd: std.posix.fd_t, data: []const u8) !void {
+        var remaining = data;
+        while (remaining.len > 0) {
+            remaining = remaining[std.posix.write(fd, remaining) catch |err| return err..];
+        }
     }
 
     /// Handle {:send {:name :id :data "..."}}
