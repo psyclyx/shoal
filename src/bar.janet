@@ -6,16 +6,16 @@
 # Uses subscriptions from tidepool.janet, clock.janet, sysinfo.janet.
 # Theme colors are Catppuccin Mocha (base16) in 0-255 RGBA.
 
-# -- Theme colors (Catppuccin Mocha, 0-255 RGBA) --
+# -- Theme colors (from config, Base16 semantics) --
 
-(def- bg      [30 30 46 255])
-(def- surface [24 24 37 255])
-(def- overlay [49 50 68 255])
-(def- muted   [69 71 90 255])
-(def- subtle  [88 91 112 255])
-(def- text-color [205 214 244 255])
-(def- accent  [137 180 250 255])
-(def- bright  [180 190 254 255])
+(def- bg         (theme :bg))
+(def- surface    (theme :surface))
+(def- overlay    (theme :overlay))
+(def- muted      (theme :muted))
+(def- subtle     (theme :subtle))
+(def- text-color (theme :text))
+(def- accent     (theme :accent))
+(def- bright     (theme :bright))
 
 # -- Helper: pill wrapper --
 
@@ -31,7 +31,7 @@
   (if (tag :focused)
     [:row {:id id :w 22 :h 22 :bg accent :radius 5 :align-x :center :align-y :center}
       [:text {:color bg :size 13} (string idx)]]
-    [:row {:id id :w 22 :h 22 :bg [69 71 90 (math/floor (* hover 255))]
+    [:row {:id id :w 22 :h 22 :bg [(muted 0) (muted 1) (muted 2) (math/floor (* hover 255))]
            :radius 5 :align-x :center :align-y :center}
       [:text {:color text-color :size 13} (string idx)]]))
 

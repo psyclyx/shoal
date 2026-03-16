@@ -143,7 +143,7 @@ pub fn main() !void {
     defer janet.deinit();
 
     dispatch = janet.createDispatch();
-    try dispatch.initBoot();
+    try dispatch.initBoot(cfg.theme);
     defer dispatch.deinitDispatch();
 
     // Dispatch :init — all modules register :init handlers (composed automatically)

@@ -4,6 +4,7 @@ const animation = @import("animation.zig");
 const jutil = @import("jutil.zig");
 const spawn_mod = @import("spawn.zig");
 const ipc_mod = @import("ipc.zig");
+const theme_mod = @import("theme.zig");
 const log = std.log.scoped(.janet);
 
 pub const c = jutil.c;
@@ -140,7 +141,7 @@ pub const Dispatch = struct {
     fn_get_view_fn: Janet = undefined,
 
     /// Load the shoal boot file into a fresh environment. Sets up registries.
-    pub fn initBoot(self: *Dispatch) !void {
+    pub fn initBoot(self: *Dispatch, theme: theme_mod.Theme) !void {
         // Set global dispatch pointer for Janet C functions
         global_dispatch = self;
 
@@ -200,6 +201,9 @@ pub const Dispatch = struct {
             &sysinfo_out,
         );
         if (sysinfo_status != 0) return error.SysinfoBootFailed;
+
+        // Inject theme colors into the environment (before bar.janet which reads them)
+        self.injectTheme(theme);
 
         // Load bar view (registers the root view function)
         var bar_out: Janet = undefined;
@@ -894,6 +898,43 @@ pub const Dispatch = struct {
         return doString(self.env, source, source_path);
     }
 
+    /// Inject theme colors as a `theme` def in the Janet environment.
+    /// Creates a table with semantic color names and the full Base16 palette,
+    /// each as a 4-element RGBA tuple (0-255 range).
+    fn injectTheme(self: *Dispatch, theme: theme_mod.Theme) void {
+        const t = c.janet_table(24);
+
+        // Semantic color names
+        c.janet_table_put(t, kw("bg"), colorToJanet(theme.background()));
+        c.janet_table_put(t, kw("surface"), colorToJanet(theme.surface()));
+        c.janet_table_put(t, kw("overlay"), colorToJanet(theme.overlay()));
+        c.janet_table_put(t, kw("muted"), colorToJanet(theme.muted()));
+        c.janet_table_put(t, kw("subtle"), colorToJanet(theme.subtle()));
+        c.janet_table_put(t, kw("text"), colorToJanet(theme.text()));
+        c.janet_table_put(t, kw("bright"), colorToJanet(theme.bright_text()));
+        c.janet_table_put(t, kw("accent"), colorToJanet(theme.accent()));
+
+        // Full Base16 palette
+        c.janet_table_put(t, kw("base00"), colorToJanet(theme.base00));
+        c.janet_table_put(t, kw("base01"), colorToJanet(theme.base01));
+        c.janet_table_put(t, kw("base02"), colorToJanet(theme.base02));
+        c.janet_table_put(t, kw("base03"), colorToJanet(theme.base03));
+        c.janet_table_put(t, kw("base04"), colorToJanet(theme.base04));
+        c.janet_table_put(t, kw("base05"), colorToJanet(theme.base05));
+        c.janet_table_put(t, kw("base06"), colorToJanet(theme.base06));
+        c.janet_table_put(t, kw("base07"), colorToJanet(theme.base07));
+        c.janet_table_put(t, kw("base08"), colorToJanet(theme.base08));
+        c.janet_table_put(t, kw("base09"), colorToJanet(theme.base09));
+        c.janet_table_put(t, kw("base0A"), colorToJanet(theme.base0A));
+        c.janet_table_put(t, kw("base0B"), colorToJanet(theme.base0B));
+        c.janet_table_put(t, kw("base0C"), colorToJanet(theme.base0C));
+        c.janet_table_put(t, kw("base0D"), colorToJanet(theme.base0D));
+        c.janet_table_put(t, kw("base0E"), colorToJanet(theme.base0E));
+        c.janet_table_put(t, kw("base0F"), colorToJanet(theme.base0F));
+
+        c.janet_def(self.env, "theme", c.janet_wrap_table(t), "Base16 theme colors from config");
+    }
+
     pub fn deinitDispatch(self: *Dispatch) void {
         // Free queued events
         while (self.queue_count > 0) {
@@ -999,6 +1040,16 @@ fn envLookup(env: *JanetTable, name: [:0]const u8) ?Janet {
         return val;
     }
     return null;
+}
+
+/// Convert a theme Color (0.0-1.0 f32 RGBA) to a Janet tuple (0-255 integer RGBA).
+fn colorToJanet(color: theme_mod.Color) Janet {
+    return jutil.makeTuple(&.{
+        c.janet_wrap_number(@round(@as(f64, color[0]) * 255.0)),
+        c.janet_wrap_number(@round(@as(f64, color[1]) * 255.0)),
+        c.janet_wrap_number(@round(@as(f64, color[2]) * 255.0)),
+        c.janet_wrap_number(@round(@as(f64, color[3]) * 255.0)),
+    });
 }
 
 /// Get current monotonic time in seconds.
