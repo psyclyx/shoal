@@ -516,11 +516,13 @@ pub const TextRenderer = struct {
         const font_id = self.next_font_id;
         self.next_font_id += 1;
 
-        const face = try FontFace.init(self.allocator, self.ft_lib, &self.atlas, path, size);
+        var face = try FontFace.init(self.allocator, self.ft_lib, &self.atlas, path, size);
+        errdefer face.deinit();
         try self.fonts.put(font_id, face);
 
         // Store owned copy of path as cache key
         const path_owned = try self.allocator.dupe(u8, path);
+        errdefer self.allocator.free(path_owned);
         try self.path_cache.put(path_owned, font_id);
 
         log.info("loaded fallback font id={} size={} path=\"{s}\"", .{ font_id, size, path });

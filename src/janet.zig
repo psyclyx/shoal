@@ -903,6 +903,9 @@ pub const Dispatch = struct {
     /// each as a 4-element RGBA tuple (0-255 range).
     fn injectTheme(self: *Dispatch, theme: theme_mod.Theme) void {
         const t = c.janet_table(24);
+        const t_val = c.janet_wrap_table(t);
+        c.janet_gcroot(t_val);
+        defer _ = c.janet_gcunroot(t_val);
 
         // Semantic color names
         c.janet_table_put(t, kw("bg"), colorToJanet(theme.background()));

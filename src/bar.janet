@@ -4,18 +4,16 @@
 # Layout: left (workspaces) | center (title) | right (clock, cpu, mem, bat)
 #
 # Uses subscriptions from tidepool.janet, clock.janet, sysinfo.janet.
-# Theme colors are Catppuccin Mocha (base16) in 0-255 RGBA.
+# Theme colors from config (Base16) in 0-255 RGBA.
 
 # -- Theme colors (from config, Base16 semantics) --
 
 (def- bg         (theme :bg))
 (def- surface    (theme :surface))
-(def- overlay    (theme :overlay))
 (def- muted      (theme :muted))
 (def- subtle     (theme :subtle))
 (def- text-color (theme :text))
 (def- accent     (theme :accent))
-(def- bright     (theme :bright))
 
 # -- Helper: pill wrapper --
 
