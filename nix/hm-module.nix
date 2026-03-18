@@ -148,7 +148,7 @@ in {
         base0D = "#${colors.base0D}";
         base0E = "#${colors.base0E}";
         base0F = "#${colors.base0F}";
-        font_family = fonts.sansSerif.name;
+        font_family = fonts.monospace.name;
         font_size = fonts.sizes.desktop;
       });
     })
