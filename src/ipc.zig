@@ -5,7 +5,10 @@ const Janet = jt.Janet;
 const log = std.log.scoped(.ipc);
 
 pub const MAX_IPC_CONNS = 8;
-const BUF_SIZE = 65536;
+const BUF_SIZE = 8192;
+const MAX_MSG_SIZE = 16 * 1024 * 1024; // 16MB sanity limit
+
+const alloc = std.heap.c_allocator;
 
 pub const IpcFraming = enum { line, netrepl };
 
@@ -23,7 +26,7 @@ pub const IpcSlot = struct {
     handshake: ?[]const u8 = null, // netrepl handshake payload (GC-rooted string)
     handshake_janet: Janet = undefined, // the Janet string value (for GC root)
 
-    // Recv buffer
+    // Recv buffer (fixed, for socket reads)
     recv_buf: [BUF_SIZE]u8 = undefined,
     recv_len: usize = 0,
 
@@ -31,6 +34,18 @@ pub const IpcSlot = struct {
     netrepl_msg_len: ?u32 = null, // expected message length (null = reading header)
     netrepl_hdr_buf: [4]u8 = undefined, // partial header bytes
     netrepl_hdr_len: usize = 0,
+
+    // Dynamic buffer for large netrepl messages that exceed recv_buf
+    netrepl_msg_buf: ?[]u8 = null,
+    netrepl_msg_pos: usize = 0,
+
+    fn freeMsgBuf(self: *IpcSlot) void {
+        if (self.netrepl_msg_buf) |buf| {
+            alloc.free(buf);
+            self.netrepl_msg_buf = null;
+            self.netrepl_msg_pos = 0;
+        }
+    }
 };
 
 pub const IpcPool = struct {
@@ -151,6 +166,7 @@ pub const IpcPool = struct {
                 slot.recv_len = 0;
                 slot.netrepl_msg_len = null;
                 slot.netrepl_hdr_len = 0;
+                slot.freeMsgBuf();
 
                 // GC root all keyword values
                 c.janet_gcroot(name_val);
@@ -422,6 +438,30 @@ pub const IpcPool = struct {
     }
 
     fn readSlot(self: *IpcPool, slot: *IpcSlot, sink: jt.EventSink) void {
+        // If accumulating a large netrepl message, read directly into msg_buf
+        if (slot.netrepl_msg_buf) |msg_buf| {
+            const msg_len = slot.netrepl_msg_len.?;
+            const remaining = msg_len - slot.netrepl_msg_pos;
+            const n = std.posix.read(slot.fd, msg_buf[slot.netrepl_msg_pos..][0..remaining]) catch {
+                slot.freeMsgBuf();
+                self.closeSlot(slot, true, sink);
+                return;
+            };
+            if (n == 0) {
+                slot.freeMsgBuf();
+                self.closeSlot(slot, true, sink);
+                return;
+            }
+            slot.netrepl_msg_pos += n;
+            if (slot.netrepl_msg_pos >= msg_len) {
+                // Complete — enqueue and free
+                enqueueMessage(slot, msg_buf[0..msg_len], .netrepl, sink);
+                slot.freeMsgBuf();
+                slot.netrepl_msg_len = null;
+            }
+            return;
+        }
+
         const available = BUF_SIZE - slot.recv_len;
         if (available == 0) {
             // Buffer full — for line mode, flush as oversized line; for netrepl, error
@@ -475,6 +515,7 @@ pub const IpcPool = struct {
 
     /// Netrepl framing: 4-byte LE length prefix + message body.
     /// Uses a read cursor to avoid shifting the buffer per-byte/per-message.
+    /// Messages larger than BUF_SIZE are accumulated into a heap-allocated buffer.
     fn drainNetrepl(self: *IpcPool, slot: *IpcSlot, sink: jt.EventSink) void {
         var cursor: usize = 0;
 
@@ -493,9 +534,47 @@ pub const IpcPool = struct {
                 slot.netrepl_msg_len = std.mem.readInt(u32, &slot.netrepl_hdr_buf, .little);
                 slot.netrepl_hdr_len = 0;
 
-                if (slot.netrepl_msg_len.? > BUF_SIZE) {
+                if (slot.netrepl_msg_len.? > MAX_MSG_SIZE) {
                     log.warn("ipc: netrepl message too large ({d} bytes)", .{slot.netrepl_msg_len.?});
                     self.closeSlot(slot, true, sink);
+                    return;
+                }
+
+                // Large message — allocate dynamic buffer and copy any bytes
+                // already in recv_buf, then let readSlot fill the rest directly.
+                if (slot.netrepl_msg_len.? > BUF_SIZE) {
+                    const msg_len = slot.netrepl_msg_len.?;
+                    const msg_buf = alloc.alloc(u8, msg_len) catch {
+                        log.warn("ipc: alloc failed for {d} byte message", .{msg_len});
+                        self.closeSlot(slot, true, sink);
+                        return;
+                    };
+                    // Copy any remaining recv_buf data into msg_buf
+                    const avail2 = slot.recv_len - cursor;
+                    const take2 = @min(avail2, msg_len);
+                    @memcpy(msg_buf[0..take2], slot.recv_buf[cursor..][0..take2]);
+                    slot.netrepl_msg_buf = msg_buf;
+                    slot.netrepl_msg_pos = take2;
+                    slot.recv_len = 0;
+
+                    if (take2 >= msg_len) {
+                        // Already have the full message in recv_buf
+                        enqueueMessage(slot, msg_buf[0..msg_len], .netrepl, sink);
+                        slot.freeMsgBuf();
+                        slot.netrepl_msg_len = null;
+                        // Any remaining recv_buf data after this message
+                        cursor += take2;
+                        // Move leftover back
+                        const leftover = avail2 - take2;
+                        if (leftover > 0) {
+                            @memcpy(slot.recv_buf[0..leftover], slot.recv_buf[cursor..][0..leftover]);
+                            slot.recv_len = leftover;
+                            // Continue draining from the leftover
+                            cursor = 0;
+                            continue;
+                        }
+                    }
+                    // readSlot will fill the rest on subsequent reads
                     return;
                 }
             }
@@ -559,6 +638,7 @@ pub const IpcPool = struct {
     }
 
     fn freeSlot(slot: *IpcSlot) void {
+        slot.freeMsgBuf();
         if (c.janet_checktype(slot.name, c.JANET_KEYWORD) != 0) {
             _ = c.janet_gcunroot(slot.name);
         }
