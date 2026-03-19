@@ -158,6 +158,29 @@ dispatched as Janet events:
 
 ---
 
+## Pointer Input
+
+All surfaces receive pointer events. Hover tracking is automatic based on
+element `:id` attributes:
+
+```janet
+# Hover enter/leave — id is the element's :id string
+(reg-event-handler :pointer-enter (fn [cofx event] (def id (event 1)) ...))
+(reg-event-handler :pointer-leave (fn [cofx event] (def id (event 1)) ...))
+
+# Click — fired on button release over an element
+(reg-event-handler :click (fn [cofx event] (def id (event 1)) ...))
+
+# Scroll — direction is "up" or "down", id is the topmost hovered element
+(reg-event-handler :scroll
+  (fn [cofx event]
+    (def dir (event 1))   # "up" or "down"
+    (def id (event 2))    # element id string, or nil
+    ...))
+```
+
+---
+
 ## Dynamic Surfaces
 
 Modules can create and destroy layer-shell surfaces at runtime via the `:surface` effect:
