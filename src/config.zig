@@ -47,6 +47,7 @@ pub const Config = struct {
 
 pub const LoadResult = struct {
     config: Config,
+    dmenu: DmenuConfig = .{},
     arena: std.heap.ArenaAllocator,
 
     pub fn deinit(self: *LoadResult) void {
@@ -75,7 +76,19 @@ pub fn load(backing_allocator: std.mem.Allocator) LoadResult {
 
     applyOverrides(&config, overrides);
 
-    return .{ .config = config, .arena = arena };
+    if (overrides.dmenu.enabled) {
+        // Override config for dmenu mode
+        config.layer = .overlay;
+        config.anchor = .{ .top = true, .left = true, .right = true };
+        config.width = 0;
+        config.height = 460;
+        config.exclusive_zone = 0;
+        config.margin = .{ .top = 200, .left = 0, .right = 0, .bottom = 0 };
+        config.namespace = "shoal-dmenu";
+        config.keyboard_interactivity = .exclusive;
+    }
+
+    return .{ .config = config, .dmenu = overrides.dmenu, .arena = arena };
 }
 
 // --- File loading ---
@@ -175,6 +188,11 @@ fn resolveConfigPath(allocator: std.mem.Allocator) ![:0]const u8 {
 
 // --- CLI parsing ---
 
+pub const DmenuConfig = struct {
+    enabled: bool = false,
+    prompt: [:0]const u8 = ":",
+};
+
 const CliOverrides = struct {
     config_path: ?[:0]const u8 = null,
     layer: ?Config.Layer = null,
@@ -186,6 +204,7 @@ const CliOverrides = struct {
     keyboard_interactivity: ?Config.KeyboardInteractivity = null,
     margin: ?Config.Margin = null,
     help: bool = false,
+    dmenu: DmenuConfig = .{},
 };
 
 fn parseArgs(allocator: std.mem.Allocator) !CliOverrides {
@@ -215,6 +234,10 @@ fn parseArgs(allocator: std.mem.Allocator) !CliOverrides {
             overrides.keyboard_interactivity = parseEnum(Config.KeyboardInteractivity, args.next() orelse return error.MissingValue) orelse return error.InvalidValue;
         } else if (eql(arg, "--margin")) {
             overrides.margin = parseMargin(args.next() orelse return error.MissingValue) orelse return error.InvalidValue;
+        } else if (eql(arg, "--dmenu") or eql(arg, "-d")) {
+            overrides.dmenu.enabled = true;
+        } else if (eql(arg, "--prompt") or eql(arg, "-p")) {
+            overrides.dmenu.prompt = args.next() orelse return error.MissingValue;
         } else {
             log.err("unknown argument: {s}", .{arg});
             return error.UnknownArgument;
@@ -306,6 +329,8 @@ fn printUsage() void {
         \\  --margin <t,r,b,l>              Margin in pixels (single value or top,right,bottom,left)
         \\  --namespace <name>              Surface namespace
         \\  --keyboard-interactivity <mode> Keyboard mode (none|exclusive|on_demand)
+        \\  -d, --dmenu                     dmenu mode: read items from stdin, output selection to stdout
+        \\  -p, --prompt <text>             Prompt text for dmenu mode (default: ":")
         \\  -h, --help                      Show this help
         \\
         \\Config is loaded in order: defaults → XDG config file → --config file → CLI overrides

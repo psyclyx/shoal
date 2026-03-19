@@ -27,6 +27,7 @@ const clock_source = @embedFile("clock.janet");
 const sysinfo_source = @embedFile("sysinfo.janet");
 const bar_source = @embedFile("bar.janet");
 const launcher_source = @embedFile("launcher.janet");
+const dmenu_source = @embedFile("dmenu.janet");
 
 /// Initialize the Janet VM. Must be called before any other Janet operations.
 pub fn init() !void {
@@ -83,6 +84,8 @@ const fx_order = [_][:0]const u8{
     "exec",
     "ipc",
     "surface",
+    "stdout",
+    "exit",
     "render",
 };
 
@@ -148,7 +151,7 @@ pub const Dispatch = struct {
     fn_get_view_fn: Janet = undefined,
 
     /// Load the shoal boot file into a fresh environment. Sets up registries.
-    pub fn initBoot(self: *Dispatch, theme: theme_mod.Theme) !void {
+    pub fn initBoot(self: *Dispatch, theme: theme_mod.Theme, dmenu_mode: bool) !void {
         // Set global dispatch pointer for Janet C functions
         global_dispatch = self;
 
@@ -182,14 +185,12 @@ pub const Dispatch = struct {
         // Inject theme colors into the environment (before modules which read them)
         self.injectTheme(theme);
 
-        // Load modules: user config dir takes precedence over embedded defaults.
-        // If ~/.config/shoal/ has .janet files, those are loaded (alphabetically)
-        // and no embedded stdlib/view files load. Otherwise, embedded defaults
-        // (tidepool, clock, sysinfo, bar) are loaded.
-        //
-        // Framework files (shoal.janet, json.janet) always load from embedded —
-        // they define the reactive primitives that everything else builds on.
-        self.loadModules();
+        if (dmenu_mode) {
+            self.loadDmenuModule();
+        } else {
+            // Load modules: user config dir takes precedence over embedded defaults.
+            self.loadModules();
+        }
 
         // Cache lookup functions from the environment
         self.fn_get_handler = envLookup(self.env, "get-handler") orelse return error.BootMissingGetHandler;
@@ -347,6 +348,10 @@ pub const Dispatch = struct {
                 self.ipcs.handleFx(fx_val, self.eventSink());
             } else if (std.mem.eql(u8, fx_name, "surface")) {
                 self.enqueueSurfaceRequest(fx_val);
+            } else if (std.mem.eql(u8, fx_name, "stdout")) {
+                handleStdoutFx(fx_val);
+            } else if (std.mem.eql(u8, fx_name, "exit")) {
+                handleExitFx(fx_val);
             } else {
                 // Look up registered fx executor
                 const executor = self.pcall(self.fn_get_fx_executor, &.{fx_key}) orelse continue;
@@ -1004,6 +1009,28 @@ pub const Dispatch = struct {
         _ = self.loadSource(launcher_source.ptr, "launcher.janet");
     }
 
+    /// Load only the dmenu module (skips all other modules).
+    pub fn loadDmenuModule(self: *Dispatch) void {
+        _ = self.loadSource(dmenu_source.ptr, "dmenu.janet");
+    }
+
+    /// Inject items into the Janet db for dmenu mode.
+    pub fn injectDmenuItems(self: *Dispatch, items: []const []const u8, prompt: []const u8) void {
+        const arr = c.janet_array(@intCast(items.len));
+        for (items) |item| {
+            const s = c.janet_string(@ptrCast(item.ptr), @as(i32, @intCast(item.len)));
+            c.janet_array_push(arr, c.janet_wrap_string(s));
+        }
+
+        // Set :dmenu/items and :dmenu/prompt in the db table
+        if (c.janet_checktype(self.db, c.JANET_TABLE) != 0) {
+            const t = c.janet_unwrap_table(self.db);
+            c.janet_table_put(t, kw("dmenu/items"), c.janet_wrap_array(arr));
+            const ps = c.janet_string(@ptrCast(prompt.ptr), @as(i32, @intCast(prompt.len)));
+            c.janet_table_put(t, kw("dmenu/prompt"), c.janet_wrap_string(ps));
+        }
+    }
+
     /// Try to open the user config dir and load all .janet files.
     /// Returns true if any user modules were loaded.
     fn resolveAndLoadUserModules(self: *Dispatch) bool {
@@ -1356,6 +1383,40 @@ fn handleExecFx(val: Janet) void {
 
     // Parent: reap first child immediately
     _ = std.posix.waitpid(fork_result, 0);
+}
+
+/// Handle :stdout fx — write a string to stdout. Value: "text" or {:text "..." :newline true}
+fn handleStdoutFx(val: Janet) void {
+    const text = if (c.janet_checktype(val, c.JANET_STRING) != 0) blk: {
+        const s = c.janet_unwrap_string(val);
+        const len: usize = @intCast(c.janet_string_length(s));
+        break :blk s[0..len];
+    } else if (c.janet_checktype(val, c.JANET_TABLE) != 0 or c.janet_checktype(val, c.JANET_STRUCT) != 0) blk: {
+        const text_val = jutil.janetGet(val, kw("text"));
+        if (c.janet_checktype(text_val, c.JANET_STRING) == 0) {
+            log.warn("stdout fx: missing :text string", .{});
+            return;
+        }
+        const s = c.janet_unwrap_string(text_val);
+        const len: usize = @intCast(c.janet_string_length(s));
+        break :blk s[0..len];
+    } else {
+        log.warn("stdout fx: expected string or table", .{});
+        return;
+    };
+
+    const stdout = std.fs.File.stdout();
+    stdout.writeAll(text) catch {};
+    stdout.writeAll("\n") catch {};
+}
+
+/// Handle :exit fx — exit the process with a given code. Value: number (exit code)
+fn handleExitFx(val: Janet) void {
+    const code: u8 = if (c.janet_checktype(val, c.JANET_NUMBER) != 0)
+        @intFromFloat(c.janet_unwrap_number(val))
+    else
+        0;
+    std.process.exit(code);
 }
 
 const anim_cfun = [_]c.JanetReg{

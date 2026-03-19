@@ -154,14 +154,35 @@ pub fn main() !void {
     var config_result = config_mod.load(allocator);
     defer config_result.deinit();
     cfg = config_result.config;
+    const dmenu = config_result.dmenu;
 
     // Initialize the Janet VM and reactive dispatch
     try janet.init();
     defer janet.deinit();
 
     dispatch = janet.createDispatch();
-    try dispatch.initBoot(cfg.theme);
+    try dispatch.initBoot(cfg.theme, dmenu.enabled);
     defer dispatch.deinitDispatch();
+
+    // In dmenu mode: read stdin items and inject into db
+    if (dmenu.enabled) {
+        var stdin_buf: [65536]u8 = undefined;
+        const bytes = std.fs.File.stdin().readAll(&stdin_buf) catch 0;
+        const content = stdin_buf[0..bytes];
+
+        // Collect line slices (pointing into stdin_buf)
+        var item_ptrs: [4096][]const u8 = undefined;
+        var item_count: usize = 0;
+        var lines = std.mem.splitScalar(u8, content, '\n');
+        while (lines.next()) |line| {
+            if (line.len > 0 and item_count < item_ptrs.len) {
+                item_ptrs[item_count] = line;
+                item_count += 1;
+            }
+        }
+
+        dispatch.injectDmenuItems(item_ptrs[0..item_count], dmenu.prompt);
+    }
 
     // Dispatch :init — all modules register :init handlers (composed automatically)
     dispatch.enqueue(janet.makeEvent("init"));
