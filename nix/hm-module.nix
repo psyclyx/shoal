@@ -104,8 +104,8 @@ in {
       systemd.user.services.shoal = {
         Unit = {
           Description = "Shoal wayland shell";
-          PartOf = [ "graphical-session.target" ];
-          After = [ "graphical-session.target" ];
+          PartOf = [ "graphical-session.target" "tidepool.service" ];
+          After = [ "graphical-session.target" "tidepool.service" ];
         };
         Service = {
           ExecStart = lib.getExe cfg.package;
