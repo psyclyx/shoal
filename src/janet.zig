@@ -27,6 +27,7 @@ const clock_source = @embedFile("clock.janet");
 const sysinfo_source = @embedFile("sysinfo.janet");
 const bar_source = @embedFile("bar.janet");
 const launcher_source = @embedFile("launcher.janet");
+const osd_source = @embedFile("osd.janet");
 const dmenu_source = @embedFile("dmenu.janet");
 
 /// Initialize the Janet VM. Must be called before any other Janet operations.
@@ -1007,6 +1008,7 @@ pub const Dispatch = struct {
         _ = self.loadSource(sysinfo_source.ptr, "sysinfo.janet");
         _ = self.loadSource(bar_source.ptr, "bar.janet");
         _ = self.loadSource(launcher_source.ptr, "launcher.janet");
+        _ = self.loadSource(osd_source.ptr, "osd.janet");
     }
 
     /// Load only the dmenu module (skips all other modules).

@@ -48,6 +48,7 @@ otherwise from embedded defaults.
 | `sysinfo.janet` | CPU, memory, battery, disk, network data sources |
 | `bar.janet` | Status bar view (workspaces, title, system info modules) |
 | `launcher.janet` | Universal seam: launcher/command palette (apps, windows, tags, actions) |
+| `osd.janet` | Volume/brightness on-screen display (triggered by tidepool signals) |
 | `dmenu.janet` | dmenu compatibility: stdin/stdout item picker (loaded in `--dmenu` mode) |
 
 ---
