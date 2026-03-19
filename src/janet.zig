@@ -236,6 +236,8 @@ pub const Dispatch = struct {
 
     /// Dispatch a single event immediately (not queued). Used internally.
     fn dispatchImmediate(self: *Dispatch, event: Janet) void {
+        const t_start = std.time.microTimestamp();
+
         // Extract event-id (first element of tuple)
         const event_id = tupleFirst(event) orelse {
             log.warn("dispatch: event is not a tuple or is empty", .{});
@@ -270,13 +272,31 @@ pub const Dispatch = struct {
         const cofx = self.buildCofx(event, cofx_keys);
         defer _ = c.janet_gcunroot(cofx);
 
+        const t_handler_start = std.time.microTimestamp();
+
         // Call handler: (handler-fn cofx event) → fx-map
         const fx_map = self.pcall(handler_fn, &.{ cofx, event }) orelse return;
         c.janet_gcroot(fx_map);
         defer _ = c.janet_gcunroot(fx_map);
 
+        const t_handler_end = std.time.microTimestamp();
+
         // Execute effects
         self.executeFx(fx_map);
+
+        const t_end = std.time.microTimestamp();
+        const total = t_end - t_start;
+        if (total > 500) { // only log if > 0.5ms
+            if (c.janet_checktype(event_id, c.JANET_KEYWORD) != 0) {
+                const kw_str = std.mem.span(c.janet_unwrap_keyword(event_id));
+                log.info("dispatch :{s}: total={d}us handler={d}us fx={d}us", .{
+                    kw_str,
+                    total,
+                    t_handler_end - t_handler_start,
+                    t_end - t_handler_end,
+                });
+            }
+        }
     }
 
     /// Build the cofx table with built-in values, then inject declared cofx.
