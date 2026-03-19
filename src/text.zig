@@ -341,6 +341,11 @@ const FallbackEntry = struct {
     found: bool,
 };
 
+const MeasureKey = struct {
+    font_id: u16,
+    hash: u64,
+};
+
 pub const TextRenderer = struct {
     ft_lib: c.FT_Library,
     atlas: GlyphAtlas,
@@ -351,6 +356,8 @@ pub const TextRenderer = struct {
     fallback_cache: std.AutoHashMap(u32, FallbackEntry),
     // Font path → font_id (avoid loading same fallback font twice)
     path_cache: std.StringHashMap(u16),
+    // Text measurement cache: (font_id, text_hash) → (width, height)
+    measure_cache: std.AutoHashMap(MeasureKey, [2]f32),
 
     pub fn init(allocator: std.mem.Allocator) !TextRenderer {
         var ft_lib: c.FT_Library = null;
@@ -366,6 +373,7 @@ pub const TextRenderer = struct {
             .next_font_id = 0,
             .fallback_cache = std.AutoHashMap(u32, FallbackEntry).init(allocator),
             .path_cache = std.StringHashMap(u16).init(allocator),
+            .measure_cache = std.AutoHashMap(MeasureKey, [2]f32).init(allocator),
         };
     }
 
@@ -382,6 +390,7 @@ pub const TextRenderer = struct {
         }
         self.path_cache.deinit();
         self.fallback_cache.deinit();
+        self.measure_cache.deinit();
         self.atlas.deinit();
         _ = c.FT_Done_FreeType(self.ft_lib);
     }
@@ -472,15 +481,25 @@ pub const TextRenderer = struct {
 
     /// Measure text dimensions. Returns .{ width, height }.
     /// Suitable for use as a Clay text measurement callback.
+    /// Results are cached by (font_id, text_hash) to avoid redundant shaping.
     pub fn measureText(self: *TextRenderer, text: []const u8, font_id: u16, font_size: u16) [2]f32 {
         _ = font_size; // size is baked into the FontFace
+
+        const key = MeasureKey{
+            .font_id = font_id,
+            .hash = std.hash.Wyhash.hash(0, text),
+        };
+        if (self.measure_cache.get(key)) |cached| return cached;
+
         const face_ptr = self.fonts.getPtr(font_id) orelse return .{ 0, 0 };
 
         var shaped = shapeTextInternal(self.allocator, face_ptr.hb_font, font_id, text) catch return .{ 0, 0 };
         self.substituteFallbackGlyphs(&shaped, font_id, text);
         defer shaped.deinit(self.allocator);
 
-        return .{ shaped.total_width, face_ptr.ascender - face_ptr.descender };
+        const result: [2]f32 = .{ shaped.total_width, face_ptr.ascender - face_ptr.descender };
+        self.measure_cache.put(key, result) catch {};
+        return result;
     }
 
     /// Get the GL texture handle for the shared glyph atlas.
