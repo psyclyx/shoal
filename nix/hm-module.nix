@@ -96,16 +96,19 @@ in {
       description = "Base16 theme colors and font config.";
     };
 
-    initExtra = lib.mkOption {
-      type = lib.types.lines;
-      default = "";
-      description = "Extra Janet code for ~/.config/shoal/init.janet. Loaded after stdlib modules, before views. Use for custom handlers, subscriptions, and data sources.";
-    };
-
-    barConfig = lib.mkOption {
-      type = lib.types.nullOr lib.types.lines;
-      default = null;
-      description = "Custom bar view Janet code for ~/.config/shoal/bar.janet. Overrides the built-in default bar.";
+    modules = lib.mkOption {
+      type = lib.types.attrsOf lib.types.lines;
+      default = {};
+      description = ''
+        Janet modules to write to ~/.config/shoal/.
+        Each key becomes a filename (e.g. "bar" → bar.janet).
+        When any modules are present, embedded defaults do not load —
+        the user has full control. Files are loaded alphabetically.
+      '';
+      example = {
+        "10-tidepool" = "(reg-event-handler :init ...)";
+        "20-bar" = "(reg-view (fn [] [:row ...]))";
+      };
     };
   };
 
@@ -133,13 +136,11 @@ in {
       xdg.configFile."shoal/config.json".text = configJson;
     })
 
-    # Generate user Janet files
-    (lib.mkIf (cfg.initExtra != "") {
-      xdg.configFile."shoal/init.janet".text = cfg.initExtra;
-    })
-
-    (lib.mkIf (cfg.barConfig != null) {
-      xdg.configFile."shoal/bar.janet".text = cfg.barConfig;
+    # Generate user Janet modules
+    (lib.mkIf (cfg.modules != {}) {
+      xdg.configFile = lib.mapAttrs' (name: text:
+        lib.nameValuePair "shoal/${name}.janet" { inherit text; }
+      ) cfg.modules;
     })
 
     # Stylix integration

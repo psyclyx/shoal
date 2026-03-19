@@ -172,43 +172,17 @@ pub const Dispatch = struct {
         );
         if (json_status != 0) return error.JsonBootFailed;
 
-        // Load tidepool module (registers handlers + subs for compositor IPC)
-        var tp_out: Janet = undefined;
-        const tp_status = c.janet_dostring(
-            self.env,
-            tidepool_source.ptr,
-            "tidepool.janet",
-            &tp_out,
-        );
-        if (tp_status != 0) return error.TidepoolBootFailed;
-
-        // Load clock module (registers handlers + subs for time data)
-        var clock_out: Janet = undefined;
-        const clock_status = c.janet_dostring(
-            self.env,
-            clock_source.ptr,
-            "clock.janet",
-            &clock_out,
-        );
-        if (clock_status != 0) return error.ClockBootFailed;
-
-        // Load sysinfo module (registers handlers + subs for cpu/mem/battery)
-        var sysinfo_out: Janet = undefined;
-        const sysinfo_status = c.janet_dostring(
-            self.env,
-            sysinfo_source.ptr,
-            "sysinfo.janet",
-            &sysinfo_out,
-        );
-        if (sysinfo_status != 0) return error.SysinfoBootFailed;
-
-        // Inject theme colors into the environment (before view files which read them)
+        // Inject theme colors into the environment (before modules which read them)
         self.injectTheme(theme);
 
-        // Load user files from ~/.config/shoal/ (init.janet, then view files)
-        // User init.janet runs after stdlib, can register custom handlers/subs
-        // User bar.janet overrides the embedded default bar view
-        self.loadUserFiles();
+        // Load modules: user config dir takes precedence over embedded defaults.
+        // If ~/.config/shoal/ has .janet files, those are loaded (alphabetically)
+        // and no embedded stdlib/view files load. Otherwise, embedded defaults
+        // (tidepool, clock, sysinfo, bar) are loaded.
+        //
+        // Framework files (shoal.janet, json.janet) always load from embedded —
+        // they define the reactive primitives that everything else builds on.
+        self.loadModules();
 
         // Cache lookup functions from the environment
         self.fn_get_handler = envLookup(self.env, "get-handler") orelse return error.BootMissingGetHandler;
@@ -933,89 +907,117 @@ pub const Dispatch = struct {
         c.janet_def(self.env, "theme", c.janet_wrap_table(t), "Base16 theme colors from config");
     }
 
-    /// Resolve the user config directory (~/.config/shoal/).
-    fn resolveConfigDir() ?[*:0]const u8 {
-        // Try XDG_CONFIG_HOME first, then HOME/.config
-        if (std.posix.getenv("XDG_CONFIG_HOME")) |config_home| {
-            var buf: [4096]u8 = undefined;
-            const path = std.fmt.bufPrint(&buf, "{s}/shoal", .{config_home}) catch return null;
-            if (path.len >= buf.len) return null;
-            buf[path.len] = 0;
-            // Check if directory exists
-            std.fs.accessAbsolute(buf[0..path.len :0], .{}) catch return null;
-            return @ptrCast(buf[0..path.len :0]);
+    /// Try to load a Janet source string. Returns true on success.
+    fn loadSource(self: *Dispatch, source: [*:0]const u8, name: [*:0]const u8) bool {
+        var out: Janet = undefined;
+        const status = c.janet_dostring(self.env, source, name, &out);
+        if (status != 0) {
+            log.warn("failed to evaluate {s}", .{name});
+            return false;
         }
-        if (std.posix.getenv("HOME")) |home| {
-            var buf: [4096]u8 = undefined;
-            const path = std.fmt.bufPrint(&buf, "{s}/.config/shoal", .{home}) catch return null;
-            if (path.len >= buf.len) return null;
-            buf[path.len] = 0;
-            std.fs.accessAbsolute(buf[0..path.len :0], .{}) catch return null;
-            return @ptrCast(buf[0..path.len :0]);
-        }
-        return null;
+        return true;
     }
 
     /// Try to load a Janet file from disk. Returns true if loaded successfully.
-    fn loadFileFromDisk(self: *Dispatch, dir: [*:0]const u8, filename: [:0]const u8, display_name: [:0]const u8) bool {
-        var path_buf: [4096]u8 = undefined;
-        const path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ std.mem.span(dir), filename }) catch return false;
-        if (path.len >= path_buf.len) return false;
-        path_buf[path.len] = 0;
+    fn loadFileFromDisk(self: *Dispatch, path: []const u8) bool {
+        if (path.len == 0 or path.len >= 4095) return false;
 
-        const file = std.fs.openFileAbsolute(path_buf[0..path.len :0], .{}) catch return false;
+        var path_z: [4096]u8 = undefined;
+        @memcpy(path_z[0..path.len], path);
+        path_z[path.len] = 0;
+
+        const file = std.fs.openFileAbsolute(path_z[0..path.len :0], .{}) catch return false;
         defer file.close();
 
         // Read up to 1MB
         var content_buf: [1 << 20]u8 = undefined;
         const n = file.readAll(&content_buf) catch return false;
-        if (n == 0) return false;
-        if (n >= content_buf.len) {
-            log.warn("user file {s} too large, skipping", .{display_name});
-            return false;
-        }
+        if (n == 0 or n >= content_buf.len) return false;
         content_buf[n] = 0;
 
         var out: Janet = undefined;
-        const status = c.janet_dostring(self.env, @ptrCast(content_buf[0..n :0]), display_name.ptr, &out);
+        const status = c.janet_dostring(self.env, @ptrCast(content_buf[0..n :0]), @ptrCast(path_z[0..path.len :0]), &out);
         if (status != 0) {
-            log.warn("user file {s} failed to evaluate", .{display_name});
+            log.warn("failed to evaluate {s}", .{path_z[0..path.len :0]});
             return false;
         }
-        log.info("loaded user file: {s}", .{display_name});
+        log.info("loaded {s}", .{path_z[0..path.len :0]});
         return true;
     }
 
-    /// Load user Janet files from ~/.config/shoal/.
-    /// - init.janet: runs after stdlib, registers custom handlers/subs/data sources
-    /// - bar.janet: overrides the embedded default bar view
-    /// Falls back to embedded defaults when user files are not present.
-    fn loadUserFiles(self: *Dispatch) void {
-        const config_dir = resolveConfigDir();
+    /// Load modules: user config dir overrides embedded defaults.
+    ///
+    /// If ~/.config/shoal/ contains .janet files, those are loaded alphabetically
+    /// and no embedded modules load. This gives the user full control.
+    ///
+    /// If the config dir is empty or absent, embedded defaults load:
+    /// tidepool.janet, clock.janet, sysinfo.janet, bar.janet.
+    fn loadModules(self: *Dispatch) void {
+        // Try to find and load user modules
+        const config_dir = self.resolveAndLoadUserModules();
+        if (config_dir) return;
 
-        // Load user init.janet if present (custom handlers, subs, data sources)
-        if (config_dir) |dir| {
-            _ = self.loadFileFromDisk(dir, "init.janet", "~/.config/shoal/init.janet");
-        }
+        // No user modules — load embedded defaults
+        log.info("no user modules found, loading embedded defaults", .{});
+        _ = self.loadSource(tidepool_source.ptr, "tidepool.janet");
+        _ = self.loadSource(clock_source.ptr, "clock.janet");
+        _ = self.loadSource(sysinfo_source.ptr, "sysinfo.janet");
+        _ = self.loadSource(bar_source.ptr, "bar.janet");
+    }
 
-        // Load bar view: try user file first, fall back to embedded default
-        const loaded_user_bar = if (config_dir) |dir|
-            self.loadFileFromDisk(dir, "bar.janet", "~/.config/shoal/bar.janet")
-        else
-            false;
-
-        if (!loaded_user_bar) {
-            var bar_out: Janet = undefined;
-            const bar_status = c.janet_dostring(
-                self.env,
-                bar_source.ptr,
-                "bar.janet",
-                &bar_out,
-            );
-            if (bar_status != 0) {
-                log.err("embedded bar.janet failed to evaluate", .{});
+    /// Try to open the user config dir and load all .janet files.
+    /// Returns true if any user modules were loaded.
+    fn resolveAndLoadUserModules(self: *Dispatch) bool {
+        // Resolve config dir path
+        var dir_path_buf: [4096]u8 = undefined;
+        const dir_path = blk: {
+            if (std.posix.getenv("XDG_CONFIG_HOME")) |xdg| {
+                break :blk std.fmt.bufPrint(&dir_path_buf, "{s}/shoal", .{xdg}) catch return false;
             }
+            if (std.posix.getenv("HOME")) |home| {
+                break :blk std.fmt.bufPrint(&dir_path_buf, "{s}/.config/shoal", .{home}) catch return false;
+            }
+            return false;
+        };
+
+        // Open the directory
+        var dir = std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch return false;
+        defer dir.close();
+
+        // Collect .janet filenames, sort alphabetically
+        var names: [64][]const u8 = undefined;
+        var name_storage: [64][256]u8 = undefined;
+        var count: usize = 0;
+
+        var iter = dir.iterate();
+        while (iter.next() catch null) |entry| {
+            if (entry.kind != .file) continue;
+            if (!std.mem.endsWith(u8, entry.name, ".janet")) continue;
+            if (count >= 64) break;
+            const len = @min(entry.name.len, 255);
+            @memcpy(name_storage[count][0..len], entry.name[0..len]);
+            names[count] = name_storage[count][0..len];
+            count += 1;
         }
+
+        if (count == 0) return false;
+
+        // Sort alphabetically
+        std.mem.sortUnstable([]const u8, names[0..count], {}, struct {
+            fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+                return std.mem.order(u8, a, b) == .lt;
+            }
+        }.lessThan);
+
+        // Load each file
+        var path_buf: [4096]u8 = undefined;
+        for (names[0..count]) |name| {
+            const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, name }) catch continue;
+            _ = self.loadFileFromDisk(full_path);
+        }
+
+        log.info("loaded {d} user module(s) from {s}", .{ count, dir_path });
+        return true;
     }
 
     pub fn deinitDispatch(self: *Dispatch) void {

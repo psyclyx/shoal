@@ -311,9 +311,10 @@ fn printUsage() void {
         \\Config is loaded in order: defaults → XDG config file → --config file → CLI overrides
         \\XDG config path: $XDG_CONFIG_HOME/shoal/config.json (or ~/.config/shoal/config.json)
         \\
-        \\User Janet files (loaded from ~/.config/shoal/):
-        \\  init.janet  Custom handlers, subscriptions, and data sources (loaded after stdlib)
-        \\  bar.janet   Custom bar view (overrides the built-in default)
+        \\User Janet modules (loaded from ~/.config/shoal/):
+        \\  If the config dir contains .janet files, they are loaded alphabetically
+        \\  and the embedded defaults (tidepool, clock, sysinfo, bar) do not load.
+        \\  If absent or empty, embedded defaults are used.
         \\
     ;
     std.fs.File.stderr().writeAll(usage) catch {};
