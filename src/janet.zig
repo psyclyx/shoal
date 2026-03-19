@@ -80,6 +80,7 @@ const fx_order = [_][:0]const u8{
     "dispatch",
     "timer",
     "spawn",
+    "exec",
     "ipc",
     "surface",
     "render",
@@ -340,6 +341,8 @@ pub const Dispatch = struct {
                 self.handleTimerFx(fx_val);
             } else if (std.mem.eql(u8, fx_name, "spawn")) {
                 self.spawns.handleFx(fx_val, self.eventSink());
+            } else if (std.mem.eql(u8, fx_name, "exec")) {
+                handleExecFx(fx_val);
             } else if (std.mem.eql(u8, fx_name, "ipc")) {
                 self.ipcs.handleFx(fx_val, self.eventSink());
             } else if (std.mem.eql(u8, fx_name, "surface")) {
@@ -1130,9 +1133,235 @@ fn janetDiskUsageFn(argc: i32, argv: [*c]Janet) callconv(.c) Janet {
     return c.janet_wrap_table(t);
 }
 
+/// Janet C function: (desktop-apps) → array of {:name "..." :exec "..." :icon "..."}
+/// Scans XDG_DATA_DIRS and XDG_DATA_HOME for .desktop files.
+fn janetDesktopAppsFn(argc: i32, _: [*c]Janet) callconv(.c) Janet {
+    _ = argc;
+    const posix_c = @cImport(@cInclude("dirent.h"));
+
+    const results = c.janet_array(64);
+
+    // Build list of data dirs to scan
+    var dirs_buf: [8][]const u8 = undefined;
+    var dir_count: usize = 0;
+
+    // XDG_DATA_HOME (default ~/.local/share)
+    if (std.posix.getenv("XDG_DATA_HOME")) |home| {
+        dirs_buf[dir_count] = home;
+        dir_count += 1;
+    } else if (std.posix.getenv("HOME")) |home| {
+        // Will construct path manually below
+        dirs_buf[dir_count] = home;
+        dir_count += 1;
+    }
+
+    // XDG_DATA_DIRS (default /usr/local/share:/usr/share)
+    const xdg_dirs = std.posix.getenv("XDG_DATA_DIRS") orelse "/usr/local/share:/usr/share";
+    var it = std.mem.splitScalar(u8, xdg_dirs, ':');
+    while (it.next()) |dir| {
+        if (dir.len > 0 and dir_count < dirs_buf.len) {
+            dirs_buf[dir_count] = dir;
+            dir_count += 1;
+        }
+    }
+
+    var path_buf: [4096]u8 = undefined;
+
+    for (dirs_buf[0..dir_count], 0..) |base_dir, di| {
+        // Build "base_dir/applications" or "base_dir/.local/share/applications"
+        const app_path = blk: {
+            if (di == 0 and std.posix.getenv("XDG_DATA_HOME") == null) {
+                // HOME fallback: construct ~/.local/share/applications
+                break :blk std.fmt.bufPrint(&path_buf, "{s}/.local/share/applications", .{base_dir}) catch continue;
+            } else {
+                break :blk std.fmt.bufPrint(&path_buf, "{s}/applications", .{base_dir}) catch continue;
+            }
+        };
+
+        if (app_path.len >= path_buf.len - 1) continue;
+        path_buf[app_path.len] = 0;
+
+        const dir = posix_c.opendir(@ptrCast(path_buf[0..app_path.len :0]));
+        if (dir == null) continue;
+        defer _ = posix_c.closedir(dir);
+
+        while (posix_c.readdir(dir)) |entry| {
+            const name_ptr: [*:0]const u8 = @ptrCast(&entry.*.d_name);
+            const name = std.mem.span(name_ptr);
+            if (!std.mem.endsWith(u8, name, ".desktop")) continue;
+
+            // Build full path
+            var file_path_buf: [4096]u8 = undefined;
+            const file_path = std.fmt.bufPrint(&file_path_buf, "{s}/{s}", .{ app_path, name }) catch continue;
+            if (file_path.len >= file_path_buf.len - 1) continue;
+            file_path_buf[file_path.len] = 0;
+
+            // Read and parse .desktop file
+            const file = std.fs.openFileAbsolute(file_path_buf[0..file_path.len :0], .{}) catch continue;
+            defer file.close();
+
+            var read_buf: [8192]u8 = undefined;
+            const bytes_read = file.readAll(&read_buf) catch continue;
+            const content = read_buf[0..bytes_read];
+
+            var app_name: ?[]const u8 = null;
+            var app_exec: ?[]const u8 = null;
+            var app_icon: ?[]const u8 = null;
+            var no_display = false;
+            var hidden = false;
+
+            var lines = std.mem.splitScalar(u8, content, '\n');
+            while (lines.next()) |line| {
+                if (std.mem.startsWith(u8, line, "Name=") and app_name == null) {
+                    app_name = line[5..];
+                } else if (std.mem.startsWith(u8, line, "Exec=")) {
+                    app_exec = line[5..];
+                } else if (std.mem.startsWith(u8, line, "Icon=")) {
+                    app_icon = line[5..];
+                } else if (std.mem.startsWith(u8, line, "NoDisplay=true")) {
+                    no_display = true;
+                } else if (std.mem.startsWith(u8, line, "Hidden=true")) {
+                    hidden = true;
+                }
+            }
+
+            if (no_display or hidden) continue;
+            const display_name = app_name orelse continue;
+            const exec_cmd = app_exec orelse continue;
+
+            // Strip field codes (%f, %F, %u, %U, etc.) from exec
+            var clean_exec_buf: [2048]u8 = undefined;
+            var clean_len: usize = 0;
+            var ei: usize = 0;
+            while (ei < exec_cmd.len) : (ei += 1) {
+                if (exec_cmd[ei] == '%' and ei + 1 < exec_cmd.len) {
+                    ei += 1; // skip the field code letter
+                    // Also skip leading space before %
+                    if (clean_len > 0 and clean_exec_buf[clean_len - 1] == ' ') {
+                        clean_len -= 1;
+                    }
+                } else {
+                    if (clean_len < clean_exec_buf.len) {
+                        clean_exec_buf[clean_len] = exec_cmd[ei];
+                        clean_len += 1;
+                    }
+                }
+            }
+            // Trim trailing spaces
+            while (clean_len > 0 and clean_exec_buf[clean_len - 1] == ' ') {
+                clean_len -= 1;
+            }
+
+            const t = c.janet_table(3);
+            c.janet_table_put(t, kw("name"), c.janet_wrap_string(
+                c.janet_string(@ptrCast(display_name.ptr), @as(i32, @intCast(display_name.len))),
+            ));
+            c.janet_table_put(t, kw("exec"), c.janet_wrap_string(
+                c.janet_string(@ptrCast(clean_exec_buf[0..clean_len].ptr), @as(i32, @intCast(clean_len))),
+            ));
+            if (app_icon) |icon| {
+                c.janet_table_put(t, kw("icon"), c.janet_wrap_string(
+                    c.janet_string(@ptrCast(icon.ptr), @as(i32, @intCast(icon.len))),
+                ));
+            }
+            c.janet_array_push(results, c.janet_wrap_table(t));
+        }
+    }
+    return c.janet_wrap_array(results);
+}
+
+/// Handle :exec fx — fire-and-forget process launch (for desktop apps).
+/// Value: {:cmd "command string"} or {:cmd ["arg0" "arg1" ...]}
+fn handleExecFx(val: Janet) void {
+    if (c.janet_checktype(val, c.JANET_TABLE) == 0 and
+        c.janet_checktype(val, c.JANET_STRUCT) == 0)
+    {
+        log.warn("exec fx: expected table", .{});
+        return;
+    }
+
+    const cmd_val = jutil.janetGet(val, kw("cmd"));
+
+    // Support string command (passed to sh -c) or array command
+    var use_shell = false;
+    var shell_cmd: ?[]const u8 = null;
+    var argv: [33]?[*:0]const u8 = [_]?[*:0]const u8{null} ** 33;
+    var argc: usize = 0;
+
+    if (c.janet_checktype(cmd_val, c.JANET_STRING) != 0) {
+        // String: run via sh -c
+        const str = c.janet_unwrap_string(cmd_val);
+        const len: usize = @intCast(c.janet_string_length(str));
+        shell_cmd = str[0..len];
+        use_shell = true;
+    } else {
+        // Array: direct exec
+        const view = jutil.janetIndexedView(cmd_val);
+        if (view.items == null or view.len == 0) {
+            log.warn("exec fx: empty or missing :cmd", .{});
+            return;
+        }
+        argc = @intCast(view.len);
+        if (argc > 32) {
+            log.warn("exec fx: too many args (max 32)", .{});
+            return;
+        }
+        for (0..argc) |i| {
+            const s = view.items.?[i];
+            if (c.janet_checktype(s, c.JANET_STRING) != 0) {
+                argv[i] = @ptrCast(c.janet_unwrap_string(s));
+            } else if (c.janet_checktype(s, c.JANET_KEYWORD) != 0) {
+                argv[i] = @ptrCast(c.janet_unwrap_keyword(s));
+            } else {
+                log.warn("exec fx: cmd element is not a string/keyword", .{});
+                return;
+            }
+        }
+    }
+
+    const posix_c2 = @cImport(@cInclude("unistd.h"));
+    const fork_result = std.posix.fork() catch {
+        log.warn("exec fx: fork() failed", .{});
+        return;
+    };
+
+    if (fork_result == 0) {
+        // Child: double-fork to fully detach
+        const fork2 = std.posix.fork() catch std.process.exit(127);
+        if (fork2 != 0) std.process.exit(0); // first child exits immediately
+
+        // Grandchild: new session, redirect stdio to /dev/null
+        _ = posix_c2.setsid();
+        const devnull = std.posix.open("/dev/null", .{ .ACCMODE = .WRONLY }, 0) catch std.process.exit(127);
+        _ = std.posix.dup2(devnull, 0) catch {};
+        _ = std.posix.dup2(devnull, 1) catch {};
+        _ = std.posix.dup2(devnull, 2) catch {};
+        if (devnull > 2) std.posix.close(devnull);
+
+        if (use_shell) {
+            // Copy shell_cmd to a stack buffer (parent memory is shared until exec)
+            var cmd_buf: [4096]u8 = undefined;
+            const scmd = shell_cmd orelse std.process.exit(127);
+            if (scmd.len >= cmd_buf.len) std.process.exit(127);
+            @memcpy(cmd_buf[0..scmd.len], scmd);
+            cmd_buf[scmd.len] = 0;
+            const cmd_z: [*:0]const u8 = @ptrCast(cmd_buf[0..scmd.len :0]);
+            const sh_argv = [_]?[*:0]const u8{ "/bin/sh", "-c", cmd_z, null };
+            _ = posix_c2.execvp("/bin/sh", @ptrCast(&sh_argv));
+        } else {
+            _ = posix_c2.execvp(argv[0].?, @ptrCast(&argv));
+        }
+        std.process.exit(127);
+    }
+
+    // Parent: reap first child immediately
+    _ = std.posix.waitpid(fork_result, 0);
+}
+
 const anim_cfun = [_]c.JanetReg{
     .{ .name = "anim", .cfun = janetAnimFn, .documentation = "(anim :id) — get current animated value" },
     .{ .name = "disk-usage", .cfun = janetDiskUsageFn, .documentation = "(disk-usage path) — get filesystem usage for a mount point" },
+    .{ .name = "desktop-apps", .cfun = janetDesktopAppsFn, .documentation = "(desktop-apps) — scan XDG dirs for .desktop files" },
     .{ .name = null, .cfun = null, .documentation = null },
 };
 

@@ -4,9 +4,10 @@
 # Creates a transient overlay surface with keyboard interactivity.
 #
 # Prefix-based modes:
-#   (none) — all items (windows + tags)
+#   (none) — all items (apps + windows + tags)
 #   @      — windows only
 #   #      — tags only
+#   !      — apps only
 
 # --- Helpers ---
 
@@ -29,12 +30,20 @@
   (cond
     (string/has-prefix? "@" query) [:window (string/slice query 1)]
     (string/has-prefix? "#" query) [:tag (string/slice query 1)]
+    (string/has-prefix? "!" query) [:app (string/slice query 1)]
     [:all query]))
 
 (defn- build-items [db mode]
   "Build the item list based on the current mode."
   (def tp (get db :tp {}))
   (def items @[])
+
+  # Apps (from desktop files, cached in db)
+  (when (or (= mode :all) (= mode :app))
+    (each app (get db :launcher/apps [])
+      (array/push items {:label (app :name)
+                         :kind :app
+                         :exec (app :exec)})))
 
   # Windows
   (when (or (= mode :all) (= mode :window))
@@ -97,6 +106,7 @@
 (defn- result-item [idx item selected]
   (def active (= idx selected))
   (def kind-color (case (item :kind)
+                    :app (theme :base0B)
                     :window accent
                     :tag muted
                     subtle))
@@ -129,7 +139,7 @@
       [:text {:color subtle :size 11}
         (string (length results) " result"
                 (if (not= (length results) 1) "s" "")
-                " · @windows #tags")]]])
+                " · !apps @windows #tags")]]])
 
 (reg-view :launcher launcher-view)
 
@@ -138,8 +148,21 @@
 (reg-event-handler :launcher/open
   (fn [cofx event]
     (def db (cofx :db))
-    (def items (build-items db :all))
-    {:db (-> db
+    # Scan desktop apps (cached per open so we pick up new installs)
+    (def apps (desktop-apps))
+    # Deduplicate by name, keep first occurrence
+    (def seen @{})
+    (def unique-apps @[])
+    (each app apps
+      (def n (get app :name ""))
+      (when (and (> (length n) 0) (not (get seen n)))
+        (put seen n true)
+        (array/push unique-apps app)))
+    # Sort alphabetically
+    (sort unique-apps |(< (get $0 :name "") (get $1 :name "")))
+    (def db2 (put db :launcher/apps unique-apps))
+    (def items (build-items db2 :all))
+    {:db (-> db2
              (put :launcher/open? true)
              (put :launcher/query "")
              (put :launcher/selected 0)
@@ -172,6 +195,7 @@
     (when (and (> (length results) 0) (<= selected (- (length results) 1)))
       (def item (results selected))
       (case (item :kind)
+        :app    {:exec {:cmd (item :exec)} :dispatch [:launcher/close]}
         :window {:dispatch-n [[:tp/focus-window (item :wid)] [:launcher/close]]}
         :tag    {:dispatch-n [[:tp/focus-tag (item :tag-num)] [:launcher/close]]}
         {:dispatch [:launcher/close]}))))
@@ -228,8 +252,8 @@
                                                (+ selected 1)))}
 
           (= sym "Tab")
-          (let [next-mode (case mode :all :window :window :tag :tag :all)
-                prefix (case next-mode :window "@" :tag "#" "")
+          (let [next-mode (case mode :all :app :app :window :window :tag :tag :all)
+                prefix (case next-mode :app "!" :window "@" :tag "#" "")
                 new-items (build-items db next-mode)]
             {:db (-> db
                      (put :launcher/query prefix)
