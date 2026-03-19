@@ -229,8 +229,13 @@
              (put :launcher/query "")
              (put :launcher/items [])
              (put :launcher/selected 0))
-     :surface {:destroy :launcher}
+     :anim {:id :launcher/reveal :to 0 :duration 0.12 :easing :ease-in-out-quad
+            :on-complete [:launcher/destroy]}
      :ipc {:disconnect {:name :tp-query}}}))
+
+(reg-event-handler :launcher/destroy
+  (fn [cofx event]
+    {:surface {:destroy :launcher}}))
 
 # -- Tidepool query connection (for action introspection) --
 
