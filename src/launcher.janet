@@ -148,7 +148,12 @@
   (def selected (sub :launcher/selected))
   (def reveal (anim :launcher/reveal))
   (def max-visible 12)
-  (def n (min max-visible (length results)))
+  (def total (length results))
+
+  # Scroll offset: keep selected item visible
+  (def scroll-off (max 0 (min (- selected (- max-visible 1))
+                               (- total max-visible))))
+  (def visible-end (min total (+ scroll-off max-visible)))
 
   (def alpha (math/floor (* reveal 255)))
   (def bg-a [(bg 0) (bg 1) (bg 2) alpha])
@@ -161,7 +166,7 @@
         (string query "│")]]
     # Results list
     [:col {:w :grow :h :grow :gap 2 :pad [8 0 0 0]}
-      ;(seq [i :range [0 n]
+      ;(seq [i :range [scroll-off visible-end]
              :let [item (results i)]]
          (result-item i item selected))]
     # Footer hint
