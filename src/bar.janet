@@ -60,10 +60,10 @@
     (match name
       "master-stack"
       [:row {:gap 1 :h 16 :align-y :center}
-        [:row {:w 9 :h 16 :bg hi :radius 1}]
+        [:row {:w 10 :h 16 :bg hi :radius 1}]
         [:col {:gap 1}
-          [:row {:w 6 :h 7 :bg c :radius 1}]
-          [:row {:w 6 :h 7 :bg c :radius 1}]]]
+          [:row {:w 5 :h 7 :bg c :radius 1}]
+          [:row {:w 5 :h 7 :bg c :radius 1}]]]
       "grid"
       [:col {:gap 1}
         [:row {:gap 1}
@@ -80,13 +80,20 @@
         [:row {:w 5 :h 16 :bg hi :radius 1}]
         [:row {:w 4 :h 12 :bg c :radius 1}]]
       "dwindle"
-      [:row {:gap 1 :h 16}
-        [:row {:w 8 :h 16 :bg hi :radius 1}]
-        [:col {:gap 1}
-          [:row {:w 7 :h 8 :bg c :radius 1}]
-          [:row {:gap 1 :h 7}
-            [:row {:w 3 :h 7 :bg c :radius 1}]
-            [:row {:w 3 :h 7 :bg c :radius 1}]]]]
+      [:col {:gap 1 :w 16}
+        [:row {:w 16 :h 8 :bg hi :radius 1}]
+        [:row {:gap 1 :h 7}
+          [:row {:w 8 :h 7 :bg c :radius 1}]
+          [:col {:gap 1}
+            [:row {:w 7 :h 3 :bg c :radius 1}]
+            [:row {:w 7 :h 3 :bg c :radius 1}]]]]
+      "tabbed"
+      [:col {:gap 0 :h 16}
+        [:row {:gap 1 :h 4 :align-y :center}
+          [:row {:w 5 :h 4 :bg hi :radius [1 1 0 0]}]
+          [:row {:w 4 :h 3 :bg c :radius [1 1 0 0]}]
+          [:row {:w 4 :h 3 :bg c :radius [1 1 0 0]}]]
+        [:row {:w 15 :h 11 :bg [(hi 0) (hi 1) (hi 2) 80] :radius [0 0 1 1]}]]
       "centered-master"
       [:row {:gap 1 :h 16 :align-y :center}
         [:row {:w 4 :h 12 :bg c :radius 1}]
@@ -107,13 +114,21 @@
       (def vp-w (get vp :w 0))
       (def scroll-off (get vp :scroll-offset 0))
       (def minimap-h 18)
-      # Scale to fit — clamp minimap width to a reasonable range
       (def minimap-w (min 180 (max 60 (* minimap-h (/ total-w (max 1 (get vp :h 1)))))))
       (def scale (/ minimap-w (max 1 total-w)))
 
       (def windows (sub :tp/windows))
       (def focused-win (find |($ :focused) windows))
       (def focused-col (when focused-win (get focused-win :column)))
+
+      # Group visible windows by column index
+      (def col-rows @{})
+      (each w windows
+        (when (w :visible)
+          (def ci (w :column))
+          (def existing (get col-rows ci @[]))
+          (array/push existing w)
+          (put col-rows ci existing)))
 
       # Build column position table
       (var cx 0)
@@ -132,11 +147,21 @@
                                 (> (+ (col :x) (col :w)) scroll-off))
                      is-focused (= (col :i) focused-col)
                      scaled-w (max 3 (math/floor (* (col :w) scale)))
-                     color (cond
-                             is-focused accent
-                             in-vp overlay
-                             [(muted 0) (muted 1) (muted 2) 100])]]
-           [:row {:w scaled-w :h minimap-h :bg color :radius 2}])])))
+                     rows (get col-rows (col :i))
+                     n-rows (if rows (length rows) 1)
+                     base-color (cond
+                                  is-focused accent
+                                  in-vp overlay
+                                  [(muted 0) (muted 1) (muted 2) 100])]]
+           (if (<= n-rows 1)
+             [:row {:w scaled-w :h minimap-h :bg base-color :radius 2}]
+             [:col {:gap 1 :w scaled-w :h minimap-h :radius 2}
+               ;(seq [r :range [0 n-rows]
+                      :let [row-h (max 2 (math/floor (/ (- minimap-h (- n-rows 1)) n-rows)))
+                            rw (get rows r)
+                            row-focused (and rw (rw :focused))
+                            color (if row-focused accent base-color)]]
+                  [:row {:w scaled-w :h row-h :bg color :radius 1}])]))]))))
 
 # -- Title --
 
