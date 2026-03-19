@@ -120,6 +120,7 @@ var pointer_surface: ?*wl.Surface = null;
 var pointer_button_pressed: bool = false;
 var pointer_button_just_released: bool = false;
 var pointer_surface_changed: bool = false;
+var pointer_scroll_y: f64 = 0; // accumulated vertical scroll within frame
 
 // Hover tracking — stores element IDs hovered in the previous frame
 const MAX_HOVER_IDS = 8;
@@ -954,6 +955,7 @@ fn pointerListener(_: *wl.Pointer, event: wl.Pointer.Event, _: *const void) void
             pointer_y = -1;
             pointer_button_pressed = false;
             pointer_button_just_released = false;
+            pointer_scroll_y = 0;
             pointer_surface_changed = true;
         },
         .motion => |ev| {
@@ -974,7 +976,33 @@ fn pointerListener(_: *wl.Pointer, event: wl.Pointer.Event, _: *const void) void
                 }
             }
         },
+        .axis => |ev| {
+            if (ev.axis == .vertical_scroll) {
+                pointer_scroll_y += ev.value.toDouble();
+            }
+        },
         .frame => {
+            // Dispatch scroll events accumulated during this frame
+            if (pointer_scroll_y != 0) {
+                const dir_str: [:0]const u8 = if (pointer_scroll_y > 0) "down" else "up";
+                const dir = janet.c.janet_stringv(dir_str.ptr, @as(i32, @intCast(dir_str.len)));
+                janet.c.janet_gcroot(dir);
+                defer _ = janet.c.janet_gcunroot(dir);
+
+                // Find hovered element IDs to include in scroll event
+                if (prev_hover_count > 0) {
+                    const top_str = prev_hover_strs[prev_hover_count - 1];
+                    const top_len = prev_hover_lens[prev_hover_count - 1];
+                    const id_val = janet.c.janet_stringv(&top_str, @as(i32, @intCast(top_len)));
+                    janet.c.janet_gcroot(id_val);
+                    defer _ = janet.c.janet_gcunroot(id_val);
+                    dispatch.enqueue(janet.makeEventArgs("scroll", &.{ dir, id_val }));
+                } else {
+                    dispatch.enqueue(janet.makeEventArgs("scroll", &.{dir}));
+                }
+                pointer_scroll_y = 0;
+            }
+
             // Pointer state has been atomically updated — re-render affected surfaces.
             // Surface transitions (enter/leave) mark all dirty to clear stale hover
             // state on the old surface. Motion/button only dirties the pointer surface.
