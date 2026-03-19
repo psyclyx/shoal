@@ -21,20 +21,24 @@
   (def tp (get db :tp {}))
   (def outputs (get data :outputs []))
   (var occupied (get data :occupied []))
+  (def existing-outputs (get tp :outputs []))
 
-  # Build output tag state
+  # Build output tag state, preserving layout/viewport data from existing outputs
   (def out-list
     (seq [o :in outputs]
       (def tags (get o :tags []))
       (def focused (get o :focused false))
-      {:name (get o :name "")
-       :x (get o :x 0)
-       :y (get o :y 0)
-       :focused focused
-       :tags (seq [i :range [0 11]]
-               {:focused (truthy? (some |(= $ i) tags))
-                :occupied (or (truthy? (some |(= $ i) tags))
-                              (truthy? (some |(= $ i) occupied)))})}))
+      (def name (get o :name ""))
+      (def existing (find |(= ($ :name) name) existing-outputs))
+      (merge (or existing {})
+             {:name name
+              :x (get o :x 0)
+              :y (get o :y 0)
+              :focused focused
+              :tags (seq [i :range [0 11]]
+                      {:focused (truthy? (some |(= $ i) tags))
+                       :occupied (or (truthy? (some |(= $ i) tags))
+                                     (truthy? (some |(= $ i) occupied)))})})))
 
   # Flat tags from focused output
   (def focused-out (find |($ :focused) out-list))
