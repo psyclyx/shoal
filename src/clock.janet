@@ -5,7 +5,7 @@
 
 (reg-event-handler :clock/tick
   (fn [cofx event]
-    (def d (os/date))
+    (def d (os/date (os/time) true))
     {:db (put (cofx :db) :clock
               {:hours (d :hours)
                :minutes (d :minutes)

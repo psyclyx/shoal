@@ -27,7 +27,7 @@
 # -- Helper: pill wrapper --
 
 (defn- pill [& children]
-  [:row {:pad [4 8] :bg surface :radius 6}
+  [:row {:pad [4 8] :bg surface :radius 6 :gap 6 :align-y :center}
     ;children])
 
 # -- Workspace tags --
@@ -161,7 +161,7 @@
                             rw (get rows r)
                             row-focused (and rw (rw :focused))
                             color (if row-focused accent base-color)]]
-                  [:row {:w scaled-w :h row-h :bg color :radius 1}])])]))))
+                  [:row {:w scaled-w :h row-h :bg color :radius 1}])]))])))
 
 # -- Title --
 
@@ -172,50 +172,50 @@
     [:row {:gap 6 :align-y :center}
       (when (and app-id (> (length app-id) 0) (not= app-id title))
         [:text {:color muted :size 13} app-id])
-      [:text {:color text-color :size 15} title]]
-    [:text {:color subtle :size 15} ""]))
+      [:text {:color text-color :size 17} title]]
+    [:text {:color subtle :size 17} ""]))
 
 # -- Right-side modules --
 
 (defn- pct-color [pct]
   (cond (>= pct 80) red (>= pct 50) yellow green))
 
-(defn- fill-bar [pct color &opt w]
-  (default w 32)
-  [:row {:w w :h 4 :bg [(muted 0) (muted 1) (muted 2) 80] :radius 2}
-    [:row {:w (max 1 (math/floor (* w (/ (min pct 100) 100)))) :h 4 :bg color :radius 2}]])
+(defn- fmt-gb [g]
+  (let [w (math/floor g)
+        f (math/floor (* 10 (- g w)))]
+    (string w "." f)))
+
+(defn- fmt-rate [bps]
+  "Format bytes/sec as human-readable rate. Uses K+ units for stability."
+  (cond
+    (>= bps 1073741824) (string/format "%.1fG" (/ bps 1073741824))
+    (>= bps 104857600)  (string/format "%.0fM" (/ bps 1048576))
+    (>= bps 1048576)    (string/format "%.1fM" (/ bps 1048576))
+    (>= bps 102400)     (string/format "%.0fK" (/ bps 1024))
+    (>= bps 1024)       (string/format "%.1fK" (/ bps 1024))
+    (> bps 0)           (string/format "%.1fK" (/ bps 1024))
+    "0K"))
 
 (defn- cpu-view []
   (def pct (sub :cpu/percent))
-  [:row {:pad [4 8] :bg surface :radius 6 :gap 6 :align-y :center}
-    [:col {:gap 3 :align-y :center}
-      [:text {:color text-color :size 13} (string (math/floor pct) "%")]
-      (fill-bar pct (pct-color pct) 28)]
-    [:text {:color subtle :size 11} "cpu"]])
+  (pill
+    [:text {:color (pct-color pct) :size 14}
+      (string (math/floor pct) "%")]
+    [:text {:color subtle :size 11} "cpu"]))
 
 (defn- mem-view []
   (def mem (sub :mem))
   (def pct (get mem :percent 0))
   (def used (get mem :used-mb 0))
   (def total (get mem :total-mb 0))
-  [:row {:pad [4 8] :bg surface :radius 6 :gap 6 :align-y :center}
-    [:col {:gap 3 :align-y :center}
-      [:text {:color text-color :size 13}
-        (string (if (>= used 1024)
-                  (let [g (/ used 1024)
-                        w (math/floor g)
-                        f (math/floor (* 10 (- g w)))]
-                    (string w "." f))
-                  (string (math/floor used)))
-                "/"
-                (if (>= total 1024)
-                  (let [g (/ total 1024)
-                        w (math/floor g)
-                        f (math/floor (* 10 (- g w)))]
-                    (string w "." f "G"))
-                  (string (math/floor total) "M")))]
-      (fill-bar pct (pct-color pct) 36)]
-    [:text {:color subtle :size 11} "mem"]])
+  (def used-str (if (>= used 1024) (fmt-gb (/ used 1024)) (string (math/floor used))))
+  (def total-str (if (>= total 1024)
+                   (string (fmt-gb (/ total 1024)) "G")
+                   (string (math/floor total) "M")))
+  (pill
+    [:text {:color (pct-color pct) :size 13}
+      (string used-str "/" total-str)]
+    [:text {:color subtle :size 11} "mem"]))
 
 (defn- bat-view []
   (def bat (sub :bat))
@@ -223,15 +223,36 @@
     (def pct (get bat :percent 0))
     (def charging (bat :charging))
     (def color (cond charging accent (< pct 20) red (< pct 50) yellow green))
-    [:row {:pad [4 8] :bg surface :radius 6 :gap 6 :align-y :center}
-      [:col {:gap 3 :align-y :center}
-        [:text {:color text-color :size 13}
-          (string (if charging "+" "") (math/floor pct) "%")]
-        (fill-bar pct color 24)]
-      [:text {:color subtle :size 11} "bat"]]))
+    (pill
+      [:text {:color color :size 14}
+        (string (if charging "⚡" "") (math/floor pct) "%")]
+      [:text {:color subtle :size 11} "bat"])))
+
+(defn- disk-view []
+  (def disk (sub :disk))
+  (def pct (get disk :percent 0))
+  (def used (get disk :used-gb 0))
+  (def total (get disk :total-gb 0))
+  (pill
+    [:text {:color (pct-color pct) :size 13}
+      (string (fmt-gb used) "/" (fmt-gb total) "G")]
+    [:text {:color subtle :size 11} "disk"]))
+
+(defn- net-view []
+  (def net (sub :net))
+  (def rx (get net :rx-rate 0))
+  (def tx (get net :tx-rate 0))
+  (def iface (get net :iface ""))
+  (def ipv4 (get net :ipv4 ""))
+  [:row {:pad [4 8] :bg surface :radius 6 :gap 6 :align-y :center}
+    [:text {:color green :size 12} (string "↓" (fmt-rate rx))]
+    [:text {:color accent :size 12} (string "↑" (fmt-rate tx))]
+    (when (> (length ipv4) 0)
+      [:text {:color muted :size 11} ipv4])
+    [:text {:color subtle :size 11} iface]])
 
 (defn- clock-view []
-  (pill [:text {:color text-color :size 15} (sub :clock/time)]))
+  (pill [:text {:color text-color :size 17} (sub :clock/time)]))
 
 # -- Root bar view --
 
@@ -247,8 +268,10 @@
       (title-view)]
     # Right: system info
     [:row {:w :grow :gap 6 :align-x :right :align-y :center}
+      (net-view)
       (cpu-view)
       (mem-view)
+      (disk-view)
       (bat-view)
       (clock-view)]])
 

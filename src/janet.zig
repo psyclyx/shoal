@@ -980,8 +980,41 @@ fn janetAnimFn(argc: i32, argv: [*c]Janet) callconv(.c) Janet {
     return c.janet_wrap_number(d.getAnimValue(id));
 }
 
+/// Janet C function: (disk-usage "/") → {:total N :used N :available N :percent N}
+fn janetDiskUsageFn(argc: i32, argv: [*c]Janet) callconv(.c) Janet {
+    if (argc != 1) return c.janet_wrap_nil();
+    if (c.janet_checktype(argv[0], c.JANET_STRING) == 0) return c.janet_wrap_nil();
+
+    const str = c.janet_unwrap_string(argv[0]);
+    const len: usize = @intCast(c.janet_string_length(str));
+
+    var path_buf: [4096]u8 = undefined;
+    if (len >= path_buf.len) return c.janet_wrap_nil();
+    @memcpy(path_buf[0..len], str[0..len]);
+    path_buf[len] = 0;
+
+    const posix_c = @cImport(@cInclude("sys/vfs.h"));
+    var stat: posix_c.struct_statfs = undefined;
+    const rc = posix_c.statfs(@ptrCast(path_buf[0..len :0]), &stat);
+    if (rc != 0) return c.janet_wrap_nil();
+
+    const bsize: f64 = @floatFromInt(stat.f_bsize);
+    const total = @as(f64, @floatFromInt(stat.f_blocks)) * bsize;
+    const free_bytes = @as(f64, @floatFromInt(stat.f_bfree)) * bsize;
+    const avail = @as(f64, @floatFromInt(stat.f_bavail)) * bsize;
+    const used = total - free_bytes;
+
+    const t = c.janet_table(4);
+    c.janet_table_put(t, kw("total"), c.janet_wrap_number(total));
+    c.janet_table_put(t, kw("used"), c.janet_wrap_number(used));
+    c.janet_table_put(t, kw("available"), c.janet_wrap_number(avail));
+    c.janet_table_put(t, kw("percent"), c.janet_wrap_number(if (total > 0) used / total * 100.0 else 0));
+    return c.janet_wrap_table(t);
+}
+
 const anim_cfun = [_]c.JanetReg{
     .{ .name = "anim", .cfun = janetAnimFn, .documentation = "(anim :id) — get current animated value" },
+    .{ .name = "disk-usage", .cfun = janetDiskUsageFn, .documentation = "(disk-usage path) — get filesystem usage for a mount point" },
     .{ .name = null, .cfun = null, .documentation = null },
 };
 

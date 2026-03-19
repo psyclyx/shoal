@@ -480,7 +480,7 @@ pub const TextRenderer = struct {
         self.substituteFallbackGlyphs(&shaped, font_id, text);
         defer shaped.deinit(self.allocator);
 
-        return .{ shaped.total_width, face_ptr.line_height };
+        return .{ shaped.total_width, face_ptr.ascender - face_ptr.descender };
     }
 
     /// Get the GL texture handle for the shared glyph atlas.

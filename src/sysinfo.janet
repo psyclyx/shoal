@@ -110,14 +110,17 @@
 
 (defn- find-battery-path []
   "Discover battery sysfs path. Handles BAT0, BAT1, macsmc-battery, etc."
+  (var result nil)
   (try
     (each entry (os/dir "/sys/class/power_supply")
       (def type-path (string "/sys/class/power_supply/" entry "/type"))
       (when (= (slurp-trim type-path) "Battery")
         (def cap-path (string "/sys/class/power_supply/" entry "/capacity"))
         (when (slurp-trim cap-path)
-          (break (string "/sys/class/power_supply/" entry)))))
-    ([_] nil)))
+          (set result (string "/sys/class/power_supply/" entry))
+          (break))))
+    ([_] nil))
+  result)
 
 (var- bat-path nil)
 
@@ -150,3 +153,125 @@
     (if (bat :present)
       (string "bat " (if (bat :charging) "+" "") (math/floor (get bat :percent 0)) "%")
       nil)))
+
+# -- Disk --
+
+(reg-event-handler :disk/tick
+  (fn [cofx event]
+    (def info (disk-usage "/"))
+    (when info
+      (def total (get info :total 0))
+      (def used (get info :used 0))
+      (def pct (get info :percent 0))
+      {:db (put (cofx :db) :disk {:total-gb (/ total 1073741824)
+                                   :used-gb (/ used 1073741824)
+                                   :percent (math/round pct)})})))
+
+(reg-event-handler :init
+  (fn [cofx event]
+    {:dispatch [:disk/tick]
+     :timer {:delay 30.0 :event [:disk/tick] :repeat true :id :disk}}))
+
+(reg-sub :disk (fn [db] (get db :disk {})))
+
+# -- Network --
+
+(defn- default-iface []
+  "Find the default route interface from /proc/net/route."
+  (def data (try (slurp "/proc/net/route") ([_] nil)))
+  (when data
+    (var result nil)
+    (each line (string/split "\n" data)
+      (def parts (string/split "\t" line))
+      (when (and (>= (length parts) 2)
+                 (= (get parts 1) "00000000"))
+        (set result (get parts 0))
+        (break)))
+    result))
+
+(defn- get-local-ipv4 []
+  "Get a non-loopback local IPv4 from /proc/net/fib_trie."
+  (def data (try (slurp "/proc/net/fib_trie") ([_] nil)))
+  (when data
+    (var result nil)
+    (each line (string/split "\n" data)
+      (def trimmed (string/trim line))
+      (when (and (string/has-prefix? "+-- " trimmed)
+                 (string/find "/32 host LOCAL" trimmed))
+        (def ip (get (string/split "/" (string/slice trimmed 4)) 0))
+        (when (and ip (not (string/has-prefix? "127." ip)))
+          (set result ip)
+          (break))))
+    result))
+
+(defn- get-ipv6-for-iface [iface]
+  "Get global-scope IPv6 address for iface from /proc/net/if_inet6."
+  (def data (try (slurp "/proc/net/if_inet6") ([_] nil)))
+  (when data
+    (var result nil)
+    (each line (string/split "\n" data)
+      (def parts (seq [p :in (string/split " " line)
+                       :when (> (length p) 0)] p))
+      # Format: hex_addr ifindex prefix scope flags iface
+      (when (and (>= (length parts) 6)
+                 (= (string/trim (get parts 5)) iface)
+                 (= (get parts 3) "00"))
+        (def hex (get parts 0))
+        (when (= (length hex) 32)
+          (def groups (seq [i :range [0 8]]
+                       (string/slice hex (* i 4) (+ (* i 4) 4))))
+          (set result (string/join groups ":"))
+          (break))))
+    result))
+
+(defn- parse-iface-bytes [iface]
+  "Read RX/TX bytes for a specific interface from /proc/net/dev."
+  (def data (try (slurp "/proc/net/dev") ([_] nil)))
+  (when data
+    (var result nil)
+    (each line (string/split "\n" data)
+      (when (string/find ":" line)
+        (def halves (string/split ":" line))
+        (def name (string/trim (get halves 0 "")))
+        (when (= name iface)
+          (def parts (seq [p :in (string/split " " (get halves 1 ""))
+                           :when (> (length p) 0)] p))
+          (when (>= (length parts) 10)
+            (set result {:rx (or (scan-number (get parts 0)) 0)
+                         :tx (or (scan-number (get parts 8)) 0)})
+            (break)))))
+    result))
+
+(var- net-iface nil)
+
+(reg-event-handler :net/tick
+  (fn [cofx event]
+    (when (nil? net-iface)
+      (set net-iface (or (default-iface) "wlan0")))
+    (def now (parse-iface-bytes net-iface))
+    (when now
+      (def prev (get (cofx :db) :net {}))
+      (def prev-rx (get prev :prev-rx 0))
+      (def prev-tx (get prev :prev-tx 0))
+      (def dt 2.0)
+      (def rx-rate (if (> prev-rx 0) (/ (- (now :rx) prev-rx) dt) 0))
+      (def tx-rate (if (> prev-tx 0) (/ (- (now :tx) prev-tx) dt) 0))
+      (def tick-count (+ 1 (get prev :tick-count 0)))
+      (def update-ips (or (nil? (get prev :ipv4)) (= 0 (% tick-count 30))))
+      (def ipv4 (if update-ips (or (get-local-ipv4) "") (get prev :ipv4 "")))
+      (def ipv6 (if update-ips (or (get-ipv6-for-iface net-iface) "") (get prev :ipv6 "")))
+      {:db (put (cofx :db) :net {:rx-rate (max 0 rx-rate)
+                                  :tx-rate (max 0 tx-rate)
+                                  :prev-rx (now :rx)
+                                  :prev-tx (now :tx)
+                                  :iface net-iface
+                                  :ipv4 ipv4
+                                  :ipv6 ipv6
+                                  :tick-count tick-count})})))
+
+(reg-event-handler :init
+  (fn [cofx event]
+    {:dispatch [:net/tick]
+     :timer {:delay 2.0 :event [:net/tick] :repeat true :id :net}}))
+
+(reg-sub :net (fn [db] (get db :net {})))
