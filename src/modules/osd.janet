@@ -1,7 +1,7 @@
 # osd — on-screen display for volume and brightness
 #
 # Shows a transient overlay with a progress bar when volume or brightness
-# changes. Triggered by tidepool signals:
+# changes. Triggered by compositor signals (wm/signal):
 #   volume-up, volume-down, volume-mute
 #   brightness-up, brightness-down
 #
@@ -185,7 +185,7 @@
 
 # --- Signal integration ---
 
-(reg-event-handler :tp/signal
+(reg-event-handler :wm/signal
   (fn [cofx event]
     (def name (get event 1 ""))
     (case name

@@ -3,14 +3,16 @@
 # One surface, one interaction, every "choose and act" moment.
 # Creates a transient overlay surface with keyboard interactivity.
 #
+# Compositor-agnostic: uses wm/* subscriptions and events.
+#
 # Prefix-based modes:
 #   (none) — all items (apps + windows + tags)
 #   @      — windows only
 #   #      — tags only
 #   !      — apps only
-#   >      — tidepool actions
-#   :      — tidepool command (dispatched directly)
-#   =      — eval Janet on tidepool REPL
+#   >      — compositor actions
+#   :      — compositor command (dispatched directly)
+#   =      — eval on compositor REPL
 
 # --- Helpers ---
 
@@ -71,10 +73,10 @@
 
 (defn- build-live-items [db mode]
   "Build only the live (non-cached) items: windows + tags."
-  (def tp (get db :tp {}))
+  (def wm (get db :wm {}))
   (def items @[])
   (when (or (= mode :all) (= mode :window))
-    (each w (get tp :windows [])
+    (each w (get wm :windows [])
       (def title (get w :title ""))
       (def app-id (get w :app-id ""))
       (def label (if (and (> (length app-id) 0) (not= app-id title))
@@ -87,7 +89,7 @@
                            :tag (get w :tag 0)
                            :focused (get w :focused false)}))))
   (when (or (= mode :all) (= mode :tag))
-    (def tags (get tp :tags []))
+    (def tags (get wm :tags []))
     (for i 1 10
       (def tag (get tags i))
       (def occupied (and tag (get tag :occupied false)))
@@ -115,21 +117,11 @@
   (def [_ stripped] (parse-mode query))
   (put db :launcher/results (filter-items items stripped)))
 
-# --- Caching: scan apps and query actions on startup + timer + close ---
+# --- Caching: scan apps on startup + timer ---
 
 (defn- launcher/build-app-items [apps]
   "Pre-build app item structs from raw desktop app data."
   (map |(do {:label ($ :name) :kind :app :exec ($ :exec)}) apps))
-
-(defn- launcher/build-action-items [actions]
-  "Pre-build action item structs from raw action data."
-  (map |(do
-    (def key (get $ :key ""))
-    (def label (string ($ :name)
-                       (when (> (length key) 0) (string "  [" key "]"))
-                       (when (get $ :desc)
-                         (string " — " ($ :desc)))))
-    {:label label :kind :action :action-name ($ :name)}) actions))
 
 (defn- launcher/cache-apps [db]
   "Scan desktop apps and store deduplicated sorted list + pre-built items in db."
@@ -154,35 +146,7 @@
 (reg-event-handler :launcher/refresh
   (fn [cofx event]
     {:db (launcher/cache-apps (cofx :db))
-     :dispatch [:launcher/query-actions]}))
-
-(reg-event-handler :launcher/query-actions
-  (fn [cofx event]
-    (when (get-in (cofx :db) [:tp :connected])
-      {:ipc {:send {:name :tp-cmd
-                     :data "(ipc/list-actions)\n"}}})))
-
-# When tp-cmd connects, query actions immediately
-(reg-event-handler :tp-cmd/connected
-  (fn [cofx event]
-    {:dispatch [:launcher/query-actions]}))
-
-# Handle tp-cmd responses — detect action list by shape
-(reg-event-handler :tp-cmd/recv
-  (fn [cofx event]
-    (def msg-type (get event 1))
-    (def payload (get event 2))
-    (when (= msg-type :return)
-      (try
-        (do
-          (def data (json/decode payload true))
-          (when (and data (indexed? data)
-                     (> (length data) 0)
-                     (get (first data) :name))
-            {:db (-> (cofx :db)
-                     (put :launcher/actions data)
-                     (put :launcher/action-items (launcher/build-action-items data)))}))
-        ([err] nil)))))
+     :dispatch [:wm/query-actions]}))
 
 # --- Subscriptions ---
 
@@ -314,33 +278,23 @@
     (def [mode stripped] (parse-mode query))
 
     (case mode
-      # Direct command: dispatch action by name
       :command
       (when (> (length stripped) 0)
-        {:dispatch-n [[:tp/dispatch-action stripped] [:launcher/close]]})
+        {:dispatch-n [[:wm/dispatch-action stripped] [:launcher/close]]})
 
-      # Eval: send arbitrary Janet to tidepool REPL
       :eval
       (when (> (length stripped) 0)
-        {:ipc {:send {:name :tp-cmd :data (string stripped "\n")}}
-         :dispatch [:launcher/close]})
+        {:dispatch-n [[:wm/eval stripped] [:launcher/close]]})
 
       # Normal item selection
       (when (and (> (length results) 0) (<= selected (- (length results) 1)))
         (def item (results selected))
         (case (item :kind)
           :app    {:exec {:cmd (item :exec)} :dispatch [:launcher/close]}
-          :action {:dispatch-n [[:tp/dispatch-action (item :action-name)] [:launcher/close]]}
-          :window {:dispatch-n [[:tp/focus-window (item :wid)] [:launcher/close]]}
-          :tag    {:dispatch-n [[:tp/focus-tag (item :tag-num)] [:launcher/close]]}
+          :action {:dispatch-n [[:wm/dispatch-action (item :action-name)] [:launcher/close]]}
+          :window {:dispatch-n [[:wm/focus-window (item :wid)] [:launcher/close]]}
+          :tag    {:dispatch-n [[:wm/focus-tag (item :tag-num)] [:launcher/close]]}
           {:dispatch [:launcher/close]})))))
-
-# Focus a window by wid — send to tidepool
-(reg-event-handler :tp/focus-window
-  (fn [cofx event]
-    (def wid (get event 1 0))
-    {:ipc {:send {:name :tp-cmd
-                  :data (string "(ipc/dispatch \"focus-window\" " wid ")\n")}}}))
 
 # --- Keyboard handling (only when launcher is open) ---
 
@@ -443,9 +397,9 @@
         {:db (put db :launcher/selected (min (max 0 (- result-count 1))
                                               (+ selected 1)))}))))
 
-# --- Signal integration: tidepool signals can trigger the launcher ---
+# --- Signal integration: compositor signals can trigger the launcher ---
 
-(reg-event-handler :tp/signal
+(reg-event-handler :wm/signal
   (fn [cofx event]
     (def name (get event 1 ""))
     (case name

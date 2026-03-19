@@ -3,7 +3,7 @@
 # Pure Janet view functions producing hiccup for a status bar.
 # Layout: left (workspaces, layout glyph, scroll minimap) | center (title) | right (clock, cpu, mem, bat)
 #
-# Uses subscriptions from tidepool.janet, clock.janet, sysinfo.janet.
+# Uses wm/* subscriptions (compositor-agnostic), clock.janet, sysinfo.janet.
 # Theme colors from config (Base16) in 0-255 RGBA.
 
 # -- Theme colors --
@@ -21,7 +21,7 @@
 
 # -- Derived subscriptions --
 
-(reg-sub :tp/focused-output [:tp/outputs]
+(reg-sub :wm/focused-output [:wm/outputs]
   (fn [outputs] (find |($ :focused) outputs)))
 
 # -- Helper: pill wrapper --
@@ -43,7 +43,7 @@
       [:text {:color text-color :size 14} (string idx)]]))
 
 (defn- workspaces-view []
-  (def tags (sub :tp/tags))
+  (def tags (sub :wm/tags))
   [:row {:gap 4 :align-y :center :pad [2 4] :bg surface :radius 6}
     ;(seq [i :range [1 10]
            :let [tag (get tags i {:focused false :occupied false})]
@@ -53,7 +53,7 @@
 # -- Layout glyph --
 
 (defn- layout-glyph []
-  (def name (sub :tp/layout))
+  (def name (sub :wm/layout))
   (when (and name (> (length name) 0))
     (def c muted)
     (def hi accent)
@@ -107,7 +107,7 @@
 # -- Scroll minimap --
 
 (defn- scroll-minimap []
-  (def focused-out (sub :tp/focused-output))
+  (def focused-out (sub :wm/focused-output))
   (when (and focused-out (= (focused-out :layout) "scroll"))
     (def vp (get focused-out :viewport))
     (when (and vp (get vp :column-widths) (> (get vp :total-content-w 0) 0))
@@ -119,7 +119,7 @@
       (def minimap-w (min 180 (max 60 (* minimap-h (/ total-w (max 1 (get vp :h 1)))))))
       (def scale (/ minimap-w (max 1 total-w)))
 
-      (def windows (sub :tp/windows))
+      (def windows (sub :wm/windows))
       (def focused-win (find |($ :focused) windows))
       (def focused-col (when focused-win (get focused-win :column)))
 
@@ -168,8 +168,8 @@
 # -- Title --
 
 (defn- title-view []
-  (def title (sub :tp/title))
-  (def app-id (sub :tp/app-id))
+  (def title (sub :wm/title))
+  (def app-id (sub :wm/app-id))
   (if (and title (> (length title) 0))
     [:row {:id "title" :gap 6 :align-y :center}
       (when (and app-id (> (length app-id) 0) (not= app-id title))
@@ -313,13 +313,13 @@
     (cond
       (string/has-prefix? "tag-" id)
       (let [tag (scan-number (string/slice id 4))]
-        (when tag {:dispatch [:tp/focus-tag tag]}))
+        (when tag {:dispatch [:wm/focus-tag tag]}))
 
       (= id "launcher")
       {:dispatch [:launcher/open]}
 
       (= id "layout")
-      {:dispatch [:tp/cycle-layout "next"]}
+      {:dispatch [:wm/cycle-layout "next"]}
 
       (= id "audio")
       {:dispatch [:osd/volume-mute]}
@@ -334,7 +334,7 @@
     (cond
       # Scroll on workspace tags: switch tags
       (string/has-prefix? "tag-" id)
-      (let [tags (get (get (cofx :db) :tp {}) :tags [])
+      (let [tags (get (get (cofx :db) :wm {}) :tags [])
             current (do (var found 1)
                      (for i 1 10
                        (def tag (get tags i))
@@ -346,11 +346,11 @@
                    (max 1 (- current 1))
                    (min 9 (+ current 1)))]
         (when (not= next current)
-          {:dispatch [:tp/focus-tag next]}))
+          {:dispatch [:wm/focus-tag next]}))
 
       # Scroll on layout glyph: cycle layout
       (= id "layout")
-      {:dispatch [:tp/cycle-layout (if (= dir "up") "prev" "next")]}
+      {:dispatch [:wm/cycle-layout (if (= dir "up") "prev" "next")]}
 
       # Scroll on audio: adjust volume
       (= id "audio")
@@ -358,6 +358,6 @@
 
       # Scroll on title: cycle focus
       (= id "title")
-      {:dispatch [:tp/focus (if (= dir "up") "prev" "next")]})))
+      {:dispatch [:wm/focus (if (= dir "up") "prev" "next")]})))
 
 (reg-view bar-view)

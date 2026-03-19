@@ -1,15 +1,11 @@
-# tidepool — compositor IPC module
+# tidepool — compositor integration for tidepool WM
 #
 # Connects to tidepool's netrepl socket, subscribes to state events,
-# parses JSON updates, and stores compositor state in the db under :tp.
+# parses JSON updates, and stores compositor state in the db under :wm.
 #
-# Event flow:
-#   :init → :ipc connect → handshake (automatic via :handshake key)
-#   :tp/connected → send subscription expression
-#   :tp/recv [:output payload] → split JSON lines → apply to db
-#   :tp/disconnected → mark disconnected in db
+# Populates the standard wm/* interface that modules consume.
 
-# -- Helpers (defined first — Janet uses early binding) --
+# -- Helpers --
 
 (defn- tidepool-socket-path []
   (let [runtime (os/getenv "XDG_RUNTIME_DIR")
@@ -18,12 +14,11 @@
       (string runtime "/tidepool-" display))))
 
 (defn- tp/apply-tags [db data]
-  (def tp (get db :tp {}))
+  (def wm (get db :wm {}))
   (def outputs (get data :outputs []))
   (var occupied (get data :occupied []))
-  (def existing-outputs (get tp :outputs []))
+  (def existing-outputs (get wm :outputs []))
 
-  # Build output tag state, preserving layout/viewport data from existing outputs
   (def out-list
     (seq [o :in outputs]
       (def tags (get o :tags []))
@@ -40,7 +35,6 @@
                        :occupied (or (truthy? (some |(= $ i) tags))
                                      (truthy? (some |(= $ i) occupied)))})})))
 
-  # Flat tags from focused output
   (def focused-out (find |($ :focused) out-list))
   (def flat-tags
     (if focused-out
@@ -49,10 +43,10 @@
         {:focused false
          :occupied (truthy? (some |(= $ i) occupied))})))
 
-  (put db :tp (merge tp {:outputs out-list :tags flat-tags})))
+  (put db :wm (merge wm {:outputs out-list :tags flat-tags})))
 
 (defn- tp/apply-layout [db data]
-  (def tp (get db :tp {}))
+  (def wm (get db :wm {}))
   (def outputs (get data :outputs []))
 
   (def out-layouts
@@ -67,8 +61,7 @@
        :active-row (get o :active-row 0)
        :viewport (get o :viewport {})}))
 
-  # Merge layout info into existing outputs or use as-is
-  (def existing (get tp :outputs []))
+  (def existing (get wm :outputs []))
   (def merged
     (seq [ol :in out-layouts]
       (def existing-out
@@ -77,19 +70,18 @@
         (merge existing-out ol)
         ol)))
 
-  # Flat layout from focused output
   (def focused-out (find |($ :focused) out-layouts))
 
-  (put db :tp (merge tp {:outputs merged
-                         :layout (if focused-out (focused-out :layout) (get tp :layout ""))})))
+  (put db :wm (merge wm {:outputs merged
+                         :layout (if focused-out (focused-out :layout) (get wm :layout ""))})))
 
 (defn- tp/apply-title [db data]
-  (def tp (get db :tp {}))
-  (put db :tp (merge tp {:title (get data :title "")
+  (def wm (get db :wm {}))
+  (put db :wm (merge wm {:title (get data :title "")
                          :app-id (get data :app-id "")})))
 
 (defn- tp/apply-windows [db data]
-  (def tp (get db :tp {}))
+  (def wm (get db :wm {}))
   (def windows
     (seq [w :in (get data :windows [])]
       {:wid (get w :wid 0)
@@ -106,11 +98,11 @@
        :column-total (get-in w [:meta :column-total] 0)
        :row-in-col (get-in w [:meta :row] 0)
        :row-in-col-total (get-in w [:meta :row-total] 0)}))
-  (put db :tp (merge tp {:windows windows})))
+  (put db :wm (merge wm {:windows windows})))
 
 (defn- tp/apply-signal [db data]
-  (def tp (get db :tp {}))
-  (put db :tp (merge tp {:signal {:name (get data :name "")}})))
+  (def wm (get db :wm {}))
+  (put db :wm (merge wm {:signal {:name (get data :name "")}})))
 
 (defn- tp/apply-event [db data]
   (match (data :event)
@@ -121,13 +113,13 @@
     "signal"  (tp/apply-signal db data)
     _ db))
 
-# -- Handler registrations --
+# -- IPC connection --
 
 (reg-event-handler :init
   (fn [cofx event]
     (def path (tidepool-socket-path))
     (if path
-      {:db (put (cofx :db) :tp {:connected false})
+      {:db (put (cofx :db) :wm {:connected false})
        :ipc {:connect {:path path
                        :name :tidepool
                        :framing :netrepl
@@ -137,9 +129,8 @@
                        :disconnected :tp/disconnected
                        :reconnect 1.0}}
        :dispatch [:tp-cmd/init]}
-      {:db (put (cofx :db) :tp {:connected false})})))
+      {:db (put (cofx :db) :wm {:connected false})})))
 
-# Command connection — separate from the watch stream
 (reg-event-handler :tp-cmd/init
   (fn [cofx event]
     (def path (tidepool-socket-path))
@@ -155,25 +146,46 @@
 
 (reg-event-handler :tp-cmd/connected
   (fn [cofx event]
-    (eprintf "tp-cmd: command channel connected")))
+    {:dispatch [:wm/query-actions]}))
 
 (reg-event-handler :tp-cmd/disconnected
   (fn [cofx event]
     (eprintf "tp-cmd: command channel disconnected")))
 
 (reg-event-handler :tp-cmd/recv
-  (fn [cofx event] nil))
+  (fn [cofx event]
+    (def msg-type (get event 1))
+    (def payload (get event 2))
+    (when (= msg-type :return)
+      (try
+        (do
+          (def data (json/decode payload true))
+          (when (and data (indexed? data)
+                     (> (length data) 0)
+                     (get (first data) :name))
+            (def action-items
+              (map |(do
+                (def key (get $ :key ""))
+                (def label (string ($ :name)
+                                   (when (> (length key) 0) (string "  [" key "]"))
+                                   (when (get $ :desc)
+                                     (string " — " ($ :desc)))))
+                {:label label :kind :action :action-name ($ :name)}) data))
+            {:db (-> (cofx :db)
+                     (put :launcher/actions data)
+                     (put :launcher/action-items action-items))}))
+        ([err] nil)))))
 
 (reg-event-handler :tp/connected
   (fn [cofx event]
-    {:db (put (cofx :db) :tp
-              (merge (get (cofx :db) :tp {}) {:connected true}))
+    {:db (put (cofx :db) :wm
+              (merge (get (cofx :db) :wm {}) {:connected true}))
      :ipc {:send {:name :tidepool
                   :data "(ipc/watch-json [:tags :layout :title :windows :signal])\n"}}}))
 
 (reg-event-handler :tp/disconnected
   (fn [cofx event]
-    {:db (put (cofx :db) :tp {:connected false})}))
+    {:db (put (cofx :db) :wm {:connected false})}))
 
 (reg-event-handler :tp/recv
   (fn [cofx event]
@@ -191,10 +203,9 @@
                 (def data (json/decode line true))
                 (when data
                   (set db (tp/apply-event db data))
-                  # Signals become Janet events for other modules to handle
                   (when (= (get data :event) "signal")
                     (array/push dispatches
-                      [:tp/signal (get data :name "")]))))
+                      [:wm/signal (get data :name "")]))))
               ([err]
                 (eprintf "tidepool: recv error: %s (line: %.80s)" (string err) line)))))
         (if (> (length dispatches) 0)
@@ -202,81 +213,92 @@
           {:db db}))
 
       :return
-      # watch-json exited (write error or unexpected return) — the connection
-      # is alive but tidepool's netrepl is waiting for a new command while
-      # shoal waits for data, deadlocking the IPC. Disconnect and schedule
-      # a fresh connection via :init to re-establish the watch.
       (do
         (eprintf "tidepool: watch ended (got :return), forcing reconnect")
-        {:db (put (cofx :db) :tp {:connected false})
+        {:db (put (cofx :db) :wm {:connected false})
          :ipc {:disconnect {:name :tidepool}}
          :timer {:delay 1.0 :event [:init] :id :tp-reconnect}}))))
 
-# -- Action helpers: send commands to tidepool --
+# -- Action dispatch --
 
 (defn- tp/dispatch-cmd [& args]
-  "Build an :ipc send fx that dispatches an action to tidepool.
-  Args are stringified and passed to (ipc/dispatch ...) on the command channel."
   (def cmd (string "(ipc/dispatch "
                    (string/join (map |(string/format "%q" $) args) " ")
                    ")\n"))
   {:ipc {:send {:name :tp-cmd
                 :data cmd}}})
 
-# Common action event handlers
-(reg-event-handler :tp/focus-tag
+(reg-event-handler :wm/focus-tag
   (fn [cofx event]
     (tp/dispatch-cmd "focus-tag" (string (get event 1 1)))))
 
-(reg-event-handler :tp/toggle-tag
+(reg-event-handler :wm/toggle-tag
   (fn [cofx event]
     (tp/dispatch-cmd "toggle-tag" (string (get event 1 1)))))
 
-(reg-event-handler :tp/set-tag
+(reg-event-handler :wm/set-tag
   (fn [cofx event]
     (tp/dispatch-cmd "set-tag" (string (get event 1 1)))))
 
-(reg-event-handler :tp/set-layout
+(reg-event-handler :wm/set-layout
   (fn [cofx event]
     (tp/dispatch-cmd "set-layout" (string (get event 1 "master-stack")))))
 
-(reg-event-handler :tp/cycle-layout
+(reg-event-handler :wm/cycle-layout
   (fn [cofx event]
     (tp/dispatch-cmd "cycle-layout" (string (get event 1 "next")))))
 
-(reg-event-handler :tp/focus
+(reg-event-handler :wm/focus
   (fn [cofx event]
     (tp/dispatch-cmd "focus" (string (get event 1 "next")))))
 
-(reg-event-handler :tp/close
+(reg-event-handler :wm/close
   (fn [cofx event]
     (tp/dispatch-cmd "close")))
 
-(reg-event-handler :tp/zoom
+(reg-event-handler :wm/zoom
   (fn [cofx event]
     (tp/dispatch-cmd "zoom")))
 
-(reg-event-handler :tp/fullscreen
+(reg-event-handler :wm/fullscreen
   (fn [cofx event]
     (tp/dispatch-cmd "fullscreen")))
 
-(reg-event-handler :tp/float
+(reg-event-handler :wm/float
   (fn [cofx event]
     (tp/dispatch-cmd "float")))
 
-(reg-event-handler :tp/dispatch-action
+(reg-event-handler :wm/dispatch-action
   (fn [cofx event]
     (def name (get event 1 ""))
     (tp/dispatch-cmd name)))
 
+(reg-event-handler :wm/focus-window
+  (fn [cofx event]
+    (def wid (get event 1 0))
+    {:ipc {:send {:name :tp-cmd
+                  :data (string "(ipc/dispatch \"focus-window\" " wid ")\n")}}}))
+
+(reg-event-handler :wm/query-actions
+  (fn [cofx event]
+    (when (get-in (cofx :db) [:wm :connected])
+      {:ipc {:send {:name :tp-cmd
+                     :data "(ipc/list-actions)\n"}}})))
+
+(reg-event-handler :wm/eval
+  (fn [cofx event]
+    (def expr (get event 1 ""))
+    (when (> (length expr) 0)
+      {:ipc {:send {:name :tp-cmd :data (string expr "\n")}}})))
+
 # -- Subscriptions --
 
-(reg-sub :tp (fn [db] (get db :tp {})))
-(reg-sub :tp/connected [:tp] (fn [tp] (get tp :connected false)))
-(reg-sub :tp/tags [:tp] (fn [tp] (get tp :tags [])))
-(reg-sub :tp/outputs [:tp] (fn [tp] (get tp :outputs [])))
-(reg-sub :tp/layout [:tp] (fn [tp] (get tp :layout "")))
-(reg-sub :tp/title [:tp] (fn [tp] (get tp :title "")))
-(reg-sub :tp/app-id [:tp] (fn [tp] (get tp :app-id "")))
-(reg-sub :tp/windows [:tp] (fn [tp] (get tp :windows [])))
-(reg-sub :tp/signal [:tp] (fn [tp] (get tp :signal nil)))
+(reg-sub :wm (fn [db] (get db :wm {})))
+(reg-sub :wm/connected [:wm] (fn [wm] (get wm :connected false)))
+(reg-sub :wm/tags [:wm] (fn [wm] (get wm :tags [])))
+(reg-sub :wm/outputs [:wm] (fn [wm] (get wm :outputs [])))
+(reg-sub :wm/layout [:wm] (fn [wm] (get wm :layout "")))
+(reg-sub :wm/title [:wm] (fn [wm] (get wm :title "")))
+(reg-sub :wm/app-id [:wm] (fn [wm] (get wm :app-id "")))
+(reg-sub :wm/windows [:wm] (fn [wm] (get wm :windows [])))
+(reg-sub :wm/signal [:wm] (fn [wm] (get wm :signal nil)))
