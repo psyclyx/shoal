@@ -256,13 +256,18 @@
 
 # -- Root bar view --
 
+(defn- launcher-trigger []
+  [:row {:id "launcher" :pad [4 8] :bg surface :radius 6 :align-y :center}
+    [:text {:color subtle :size 14} "⌕"]])
+
 (defn- bar-view []
   [:row {:w :grow :h :grow :pad [0 8] :bg bg :radius 8 :align-y :center}
-    # Left: workspaces + layout + minimap
+    # Left: workspaces + layout + minimap + launcher
     [:row {:w :grow :gap 6 :align-y :center}
       (workspaces-view)
       (layout-glyph)
-      (scroll-minimap)]
+      (scroll-minimap)
+      (launcher-trigger)]
     # Center: title
     [:row {:w :grow :align-x :center :align-y :center}
       (title-view)]
@@ -292,9 +297,12 @@
 (reg-event-handler :click
   (fn [cofx event]
     (def id (get event 1 ""))
-    (when (string/has-prefix? "tag-" id)
-      (def tag (scan-number (string/slice id 4)))
-      (when tag
-        {:dispatch [:tp/focus-tag tag]}))))
+    (cond
+      (string/has-prefix? "tag-" id)
+      (let [tag (scan-number (string/slice id 4))]
+        (when tag {:dispatch [:tp/focus-tag tag]}))
+
+      (= id "launcher")
+      {:dispatch [:launcher/open]})))
 
 (reg-view bar-view)

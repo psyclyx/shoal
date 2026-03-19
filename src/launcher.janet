@@ -1,0 +1,262 @@
+# launcher — Universal Seam
+#
+# One surface, one interaction, every "choose and act" moment.
+# Creates a transient overlay surface with keyboard interactivity.
+#
+# Prefix-based modes:
+#   (none) — all items (windows + tags)
+#   @      — windows only
+#   #      — tags only
+
+# --- Helpers ---
+
+(defn- fuzzy-match [query label]
+  "Case-insensitive substring match."
+  (when (and query label)
+    (string/find (string/ascii-lower query)
+                 (string/ascii-lower label))))
+
+(defn- filter-items [items query]
+  (if (or (nil? query) (= query ""))
+    items
+    (filter |(fuzzy-match query ($ :label)) items)))
+
+(defn- clamp [v lo hi]
+  (min hi (max lo v)))
+
+(defn- parse-mode [query]
+  "Parse prefix from query. Returns [mode stripped-query]."
+  (cond
+    (string/has-prefix? "@" query) [:window (string/slice query 1)]
+    (string/has-prefix? "#" query) [:tag (string/slice query 1)]
+    [:all query]))
+
+(defn- build-items [db mode]
+  "Build the item list based on the current mode."
+  (def tp (get db :tp {}))
+  (def items @[])
+
+  # Windows
+  (when (or (= mode :all) (= mode :window))
+    (each w (get tp :windows [])
+      (def title (get w :title ""))
+      (def app-id (get w :app-id ""))
+      (def label (if (and (> (length app-id) 0) (not= app-id title))
+                   (string title " — " app-id)
+                   title))
+      (when (> (length label) 0)
+        (array/push items {:label label
+                           :kind :window
+                           :wid (get w :wid 0)
+                           :tag (get w :tag 0)
+                           :focused (get w :focused false)}))))
+
+  # Tags
+  (when (or (= mode :all) (= mode :tag))
+    (def tags (get tp :tags []))
+    (for i 1 10
+      (def tag (get tags i))
+      (def occupied (and tag (get tag :occupied false)))
+      (def focused (and tag (get tag :focused false)))
+      (array/push items {:label (string (if focused "● " (if occupied "○ " "  "))
+                                        "Tag " i)
+                         :kind :tag
+                         :tag-num i})))
+
+  items)
+
+# --- Subscriptions ---
+
+(reg-sub :launcher/open?
+  (fn [db] (get db :launcher/open? false)))
+
+(reg-sub :launcher/query
+  (fn [db] (get db :launcher/query "")))
+
+(reg-sub :launcher/selected
+  (fn [db] (get db :launcher/selected 0)))
+
+(reg-sub :launcher/results
+  (fn [db]
+    (def items (get db :launcher/items []))
+    (def query (get db :launcher/query ""))
+    (def [mode stripped] (parse-mode query))
+    (filter-items items stripped)))
+
+# --- View ---
+
+(def- bg (theme :bg))
+(def- surface-color (theme :surface))
+(def- overlay-color (theme :overlay))
+(def- text-color (theme :text))
+(def- bright (theme :bright))
+(def- muted (theme :muted))
+(def- subtle (theme :subtle))
+(def- accent (theme :accent))
+
+(defn- result-item [idx item selected]
+  (def active (= idx selected))
+  (def kind-color (case (item :kind)
+                    :window accent
+                    :tag muted
+                    subtle))
+  [:row {:w :grow :h 32
+         :bg (if active overlay-color bg)
+         :radius 4 :pad [4 12] :align-y :center :gap 8}
+    [:row {:w 4 :h 16 :bg (if active kind-color [0 0 0 0]) :radius 2}]
+    [:text {:color (if active bright text-color) :size 14}
+      (item :label)]])
+
+(defn launcher-view []
+  (def query (sub :launcher/query))
+  (def results (sub :launcher/results))
+  (def selected (sub :launcher/selected))
+  (def max-visible 12)
+  (def n (min max-visible (length results)))
+
+  [:col {:w :grow :h :grow :bg bg :radius 8 :pad 12}
+    # Input field
+    [:row {:h 40 :w :grow :bg surface-color :radius 6 :pad [8 12] :align-y :center}
+      [:text {:color text-color :size 16}
+        (string query "│")]]
+    # Results list
+    [:col {:w :grow :h :grow :gap 2 :pad [8 0 0 0]}
+      ;(seq [i :range [0 n]
+             :let [item (results i)]]
+         (result-item i item selected))]
+    # Footer hint
+    [:row {:h 20 :w :grow :align-x :center :align-y :center}
+      [:text {:color subtle :size 11}
+        (string (length results) " result"
+                (if (not= (length results) 1) "s" "")
+                " · @windows #tags")]]])
+
+(reg-view :launcher launcher-view)
+
+# --- Event Handlers ---
+
+(reg-event-handler :launcher/open
+  (fn [cofx event]
+    (def db (cofx :db))
+    (def items (build-items db :all))
+    {:db (-> db
+             (put :launcher/open? true)
+             (put :launcher/query "")
+             (put :launcher/selected 0)
+             (put :launcher/items items))
+     :surface {:create {:name :launcher
+                        :layer :overlay
+                        :width 600
+                        :height 460
+                        :anchor {:top true}
+                        :margin {:top 200}
+                        :keyboard-interactivity :exclusive}}}))
+
+(reg-event-handler :launcher/close
+  (fn [cofx event]
+    {:db (-> (cofx :db)
+             (put :launcher/open? false)
+             (put :launcher/query "")
+             (put :launcher/items [])
+             (put :launcher/selected 0))
+     :surface {:destroy :launcher}}))
+
+(reg-event-handler :launcher/select
+  (fn [cofx event]
+    (def db (cofx :db))
+    (def items (get db :launcher/items []))
+    (def query (get db :launcher/query ""))
+    (def [mode stripped] (parse-mode query))
+    (def results (filter-items items stripped))
+    (def selected (get db :launcher/selected 0))
+    (when (and (> (length results) 0) (<= selected (- (length results) 1)))
+      (def item (results selected))
+      (case (item :kind)
+        :window {:dispatch-n [[:tp/focus-window (item :wid)] [:launcher/close]]}
+        :tag    {:dispatch-n [[:tp/focus-tag (item :tag-num)] [:launcher/close]]}
+        {:dispatch [:launcher/close]}))))
+
+# Focus a window by wid — send to tidepool
+(reg-event-handler :tp/focus-window
+  (fn [cofx event]
+    (def wid (get event 1 0))
+    {:ipc {:send {:name :tidepool
+                  :data (string "(ipc/dispatch \"focus-window\" " wid ")\n")}}}))
+
+# --- Keyboard handling (only when launcher is open) ---
+
+(reg-event-handler :key
+  (fn [cofx event]
+    (def db (cofx :db))
+    (when (get db :launcher/open?)
+      (def info (event 1))
+      (when (info :pressed)
+        (def sym (info :sym))
+        (def text (info :text))
+        (def query (get db :launcher/query ""))
+        (def items (get db :launcher/items []))
+        (def selected (get db :launcher/selected 0))
+        (def [mode stripped] (parse-mode query))
+        (def results (filter-items items stripped))
+        (def result-count (length results))
+
+        (cond
+          (= sym "Escape")
+          {:dispatch [:launcher/close]}
+
+          (= sym "Return")
+          {:dispatch [:launcher/select]}
+
+          (= sym "BackSpace")
+          (let [new-query (if (> (length query) 0)
+                            (string/slice query 0 (- (length query) 1))
+                            "")
+                [new-mode new-stripped] (parse-mode new-query)
+                new-items (build-items db new-mode)
+                new-results (filter-items new-items new-stripped)]
+            {:db (-> db
+                     (put :launcher/query new-query)
+                     (put :launcher/items new-items)
+                     (put :launcher/selected (clamp selected 0
+                                              (max 0 (- (length new-results) 1)))))})
+
+          (or (= sym "Up") (and (= sym "p") (info :ctrl)))
+          {:db (put db :launcher/selected (max 0 (- selected 1)))}
+
+          (or (= sym "Down") (and (= sym "n") (info :ctrl)))
+          {:db (put db :launcher/selected (min (max 0 (- result-count 1))
+                                               (+ selected 1)))}
+
+          (= sym "Tab")
+          (let [next-mode (case mode :all :window :window :tag :tag :all)
+                prefix (case next-mode :window "@" :tag "#" "")
+                new-items (build-items db next-mode)]
+            {:db (-> db
+                     (put :launcher/query prefix)
+                     (put :launcher/items new-items)
+                     (put :launcher/selected 0))})
+
+          # Regular text input
+          (and (> (length text) 0) (not (info :ctrl)) (not (info :alt)) (not (info :super)))
+          (let [new-query (string query text)
+                [new-mode new-stripped] (parse-mode new-query)
+                new-items (build-items db new-mode)
+                new-results (filter-items new-items new-stripped)]
+            {:db (-> db
+                     (put :launcher/query new-query)
+                     (put :launcher/items new-items)
+                     (put :launcher/selected (clamp selected 0
+                                              (max 0 (- (length new-results) 1)))))}))))))
+
+# --- Signal integration: tidepool signals can trigger the launcher ---
+
+(reg-event-handler :tp/signal
+  (fn [cofx event]
+    (def name (get event 1 ""))
+    (case name
+      "open-launcher"
+      (if (get (cofx :db) :launcher/open?)
+        {:dispatch [:launcher/close]}
+        {:dispatch [:launcher/open]})
+      "close-launcher"
+      {:dispatch [:launcher/close]})))
