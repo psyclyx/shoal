@@ -171,11 +171,11 @@
   (def title (sub :tp/title))
   (def app-id (sub :tp/app-id))
   (if (and title (> (length title) 0))
-    [:row {:gap 6 :align-y :center}
+    [:row {:id "title" :gap 6 :align-y :center}
       (when (and app-id (> (length app-id) 0) (not= app-id title))
         [:text {:color muted :size 13} app-id])
       [:text {:color text-color :size 17} title]]
-    [:text {:color subtle :size 17} ""]))
+    [:text {:id "title" :color subtle :size 17} ""]))
 
 # -- Right-side modules --
 
@@ -322,7 +322,10 @@
       {:dispatch [:tp/cycle-layout "next"]}
 
       (= id "audio")
-      {:dispatch [:osd/volume-mute]})))
+      {:dispatch [:osd/volume-mute]}
+
+      (= id "title")
+      {:dispatch [:launcher/open "@"]})))
 
 (reg-event-handler :scroll
   (fn [cofx event]
@@ -351,6 +354,10 @@
 
       # Scroll on audio: adjust volume
       (= id "audio")
-      {:dispatch [(if (= dir "up") :osd/volume-up :osd/volume-down)]})))
+      {:dispatch [(if (= dir "up") :osd/volume-up :osd/volume-down)]}
+
+      # Scroll on title: cycle focus
+      (= id "title")
+      {:dispatch [:tp/focus (if (= dir "up") "prev" "next")]})))
 
 (reg-view bar-view)

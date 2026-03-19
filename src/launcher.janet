@@ -217,6 +217,8 @@
 (reg-event-handler :launcher/open
   (fn [cofx event]
     (def db (cofx :db))
+    (def initial-query (or (get event 1) ""))
+    (def [init-mode _] (parse-mode initial-query))
     # Scan desktop apps (cached per open so we pick up new installs)
     (def apps (desktop-apps))
     # Deduplicate by name, keep first occurrence
@@ -230,10 +232,10 @@
     # Sort alphabetically
     (sort unique-apps |(< (get $0 :name "") (get $1 :name "")))
     (def db2 (put db :launcher/apps unique-apps))
-    (def items (build-items db2 :all))
+    (def items (build-items db2 init-mode))
     {:db (-> db2
              (put :launcher/open? true)
-             (put :launcher/query "")
+             (put :launcher/query initial-query)
              (put :launcher/selected 0)
              (put :launcher/items items))
      :surface {:create {:name :launcher
