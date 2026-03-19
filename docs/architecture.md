@@ -43,10 +43,11 @@ otherwise from embedded defaults.
 
 | Embedded default | Role |
 |------------------|------|
-| `tidepool.janet` | IPC client for tidepool WM (tags, layout, title, windows) |
+| `tidepool.janet` | IPC client for tidepool WM (tags, layout, title, windows, signals) |
 | `clock.janet` | Clock data source (1s timer, os/date) |
 | `sysinfo.janet` | CPU, memory, battery, disk, network data sources |
 | `bar.janet` | Status bar view (workspaces, title, system info modules) |
+| `launcher.janet` | Universal seam: launcher/command palette (windows, tags) |
 
 ---
 
