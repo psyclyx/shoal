@@ -338,7 +338,7 @@ fn printUsage() void {
         \\
         \\User Janet modules (loaded from ~/.config/shoal/):
         \\  If the config dir contains .janet files, they are loaded alphabetically
-        \\  and the embedded defaults (tidepool, clock, sysinfo, bar) do not load.
+        \\  and the embedded preset modules do not load.
         \\  If absent or empty, embedded defaults are used.
         \\
     ;

@@ -20,15 +20,9 @@ pub const makeEventArgs = jutil.makeEventArgs;
 pub const janetIndexedView = jutil.janetIndexedView;
 pub const IndexedView = jutil.IndexedView;
 
-const boot_source = @embedFile("shoal.janet");
-const json_source = @embedFile("json.janet");
-const tidepool_source = @embedFile("tidepool.janet");
-const clock_source = @embedFile("clock.janet");
-const sysinfo_source = @embedFile("sysinfo.janet");
-const bar_source = @embedFile("bar.janet");
-const launcher_source = @embedFile("launcher.janet");
-const osd_source = @embedFile("osd.janet");
-const dmenu_source = @embedFile("dmenu.janet");
+const boot_source = @embedFile("../framework/shoal.janet");
+const json_source = @embedFile("../framework/json.janet");
+const preset = @import("../presets/privclyx.zig");
 
 /// Initialize the Janet VM. Must be called before any other Janet operations.
 pub fn init() !void {
@@ -173,7 +167,7 @@ pub const Dispatch = struct {
         );
         if (status != 0) return error.BootFailed;
 
-        // Load JSON decoder (used by tidepool and other data sources)
+        // Load JSON decoder (used by compositor integrations and data sources)
         var json_out: Janet = undefined;
         const json_status = c.janet_dostring(
             self.env,
@@ -1000,25 +994,22 @@ pub const Dispatch = struct {
     /// and no embedded modules load. This gives the user full control.
     ///
     /// If the config dir is empty or absent, embedded defaults load:
-    /// tidepool.janet, clock.janet, sysinfo.janet, bar.janet.
+    /// the embedded preset modules.
     fn loadModules(self: *Dispatch) void {
         // Try to find and load user modules
         const config_dir = self.resolveAndLoadUserModules();
         if (config_dir) return;
 
-        // No user modules — load embedded defaults
-        log.info("no user modules found, loading embedded defaults", .{});
-        _ = self.loadSource(tidepool_source.ptr, "tidepool.janet");
-        _ = self.loadSource(clock_source.ptr, "clock.janet");
-        _ = self.loadSource(sysinfo_source.ptr, "sysinfo.janet");
-        _ = self.loadSource(bar_source.ptr, "bar.janet");
-        _ = self.loadSource(launcher_source.ptr, "launcher.janet");
-        _ = self.loadSource(osd_source.ptr, "osd.janet");
+        // No user modules — load embedded preset
+        log.info("no user modules found, loading embedded defaults ({s})", .{preset.name});
+        inline for (preset.modules) |mod| {
+            _ = self.loadSource(mod.source.ptr, mod.name);
+        }
     }
 
     /// Load only the dmenu module (skips all other modules).
     pub fn loadDmenuModule(self: *Dispatch) void {
-        _ = self.loadSource(dmenu_source.ptr, "dmenu.janet");
+        _ = self.loadSource(preset.dmenu_source.ptr, "dmenu.janet");
     }
 
     /// Inject items into the Janet db for dmenu mode.

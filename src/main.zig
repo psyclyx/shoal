@@ -2,14 +2,14 @@ const std = @import("std");
 const wl = @import("wayland").client.wl;
 const zwlr = @import("wayland").client.zwlr;
 const clay = @import("clay");
-const config_mod = @import("config.zig");
+const config_mod = @import("engine/config.zig");
 const Config = config_mod.Config;
-const Renderer = @import("renderer.zig").Renderer;
-const TextRenderer = @import("text.zig").TextRenderer;
-const Layout = @import("layout.zig").Layout;
-const animation = @import("animation.zig");
-const janet = @import("janet.zig");
-const hiccup_mod = @import("hiccup.zig");
+const Renderer = @import("engine/renderer.zig").Renderer;
+const TextRenderer = @import("engine/text.zig").TextRenderer;
+const Layout = @import("engine/layout.zig").Layout;
+const animation = @import("engine/animation.zig");
+const janet = @import("engine/janet.zig");
+const hiccup_mod = @import("engine/hiccup.zig");
 
 const c = @cImport({
     @cInclude("wayland-egl.h");
@@ -44,7 +44,7 @@ const Surface = struct {
     configured: bool = false,
     frame_pending: bool = false,
     frame_requested_ms: i64 = 0,
-    // Output identity from wl_output events (for matching tidepool outputs)
+    // Output identity from wl_output events (for matching compositor outputs)
     output_x: i32 = 0,
     output_y: i32 = 0,
     output_name: [64]u8 = undefined,
