@@ -128,6 +128,62 @@ Janet modules can call Zig-provided functions:
 
 ---
 
+## Keyboard Input
+
+Surfaces with keyboard interactivity (`on_demand` or `exclusive`) receive key events
+dispatched as Janet events:
+
+```janet
+# :key event — sym is the xkb keysym name, text is UTF-8 output
+(reg-event-handler :key
+  (fn [cofx event]
+    (def info (event 1))
+    (def sym (info :sym))      # "Return", "a", "Escape", etc.
+    (def text (info :text))    # "a", "", etc.
+    (def pressed (info :pressed))
+    (def ctrl (info :ctrl))
+    (def alt (info :alt))
+    (def shift (info :shift))
+    (def super (info :super))
+    ...))
+
+# Focus tracking
+(reg-event-handler :keyboard-enter (fn [cofx event] ...))
+(reg-event-handler :keyboard-leave (fn [cofx event] ...))
+```
+
+---
+
+## Dynamic Surfaces
+
+Modules can create and destroy layer-shell surfaces at runtime via the `:surface` effect:
+
+```janet
+# Create a surface — renders the :launcher named view
+(reg-event-handler :open-launcher
+  (fn [cofx event]
+    {:surface {:create {:name :launcher
+                        :layer :overlay
+                        :width 600
+                        :height 400
+                        :anchor {:top true :left true :right true}
+                        :keyboard-interactivity :exclusive}}}))
+
+# Destroy it
+(reg-event-handler :close-launcher
+  (fn [cofx event]
+    {:surface {:destroy :launcher}}))
+
+# Register the view that renders on the launcher surface
+(reg-view :launcher (fn [] [:col {:w :grow :h :grow :bg (theme :bg)} ...]))
+```
+
+Available surface properties: `:layer`, `:width`, `:height`, `:anchor`,
+`:exclusive-zone`, `:margin`, `:keyboard-interactivity`. The `:name` field
+is required and determines which named view renders on the surface.
+
+---
+
 ## Nix Integration
 
 The home-manager module generates `~/.config/shoal/config.json` from Nix
