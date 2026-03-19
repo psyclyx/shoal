@@ -405,10 +405,10 @@
                      (put :launcher/items new-items)
                      (put :launcher/selected 0))})
 
-          (or (= sym "Up") (and (= sym "p") (info :ctrl)))
+          (or (= sym "Up") (and (= sym "p") (info :ctrl)) (and (= sym "k") (info :ctrl)))
           {:db (put db :launcher/selected (max 0 (- selected 1)))}
 
-          (or (= sym "Down") (and (= sym "n") (info :ctrl)))
+          (or (= sym "Down") (and (= sym "n") (info :ctrl)) (and (= sym "j") (info :ctrl)))
           {:db (put db :launcher/selected (min (max 0 (- result-count 1))
                                                (+ selected 1)))}
 
