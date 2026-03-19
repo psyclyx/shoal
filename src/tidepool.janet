@@ -153,18 +153,31 @@
   (fn [cofx event]
     (def msg-type (get event 1))
     (def payload (get event 2))
-    (when (= msg-type :output)
-      (var db (cofx :db))
-      (each line (string/split "\n" payload)
-        (when (> (length line) 0)
-          (try
-            (do
-              (def data (json/decode line true))
-              (when data
-                (set db (tp/apply-event db data))))
-            ([err]
-              (eprintf "tidepool: recv error: %s (line: %.80s)" (string err) line)))))
-      {:db db})))
+    (case msg-type
+      :output
+      (do
+        (var db (cofx :db))
+        (each line (string/split "\n" payload)
+          (when (> (length line) 0)
+            (try
+              (do
+                (def data (json/decode line true))
+                (when data
+                  (set db (tp/apply-event db data))))
+              ([err]
+                (eprintf "tidepool: recv error: %s (line: %.80s)" (string err) line)))))
+        {:db db})
+
+      :return
+      # watch-json exited (write error or unexpected return) — the connection
+      # is alive but tidepool's netrepl is waiting for a new command while
+      # shoal waits for data, deadlocking the IPC. Disconnect and schedule
+      # a fresh connection via :init to re-establish the watch.
+      (do
+        (eprintf "tidepool: watch ended (got :return), forcing reconnect")
+        {:db (put (cofx :db) :tp {:connected false})
+         :ipc {:disconnect {:name :tidepool}}
+         :timer {:delay 1.0 :event [:init] :id :tp-reconnect}}))))
 
 # -- Action helpers: send commands to tidepool --
 

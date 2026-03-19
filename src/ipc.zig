@@ -5,7 +5,7 @@ const Janet = jt.Janet;
 const log = std.log.scoped(.ipc);
 
 pub const MAX_IPC_CONNS = 8;
-const BUF_SIZE = 8192;
+const BUF_SIZE = 65536;
 
 pub const IpcFraming = enum { line, netrepl };
 
