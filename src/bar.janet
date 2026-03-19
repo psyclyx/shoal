@@ -310,4 +310,29 @@
       (= id "layout")
       {:dispatch [:tp/cycle-layout "next"]})))
 
+(reg-event-handler :scroll
+  (fn [cofx event]
+    (def dir (get event 1 ""))
+    (def id (get event 2 ""))
+    (cond
+      # Scroll on workspace tags: switch tags
+      (string/has-prefix? "tag-" id)
+      (let [tags (get (get (cofx :db) :tp {}) :tags [])
+            current (do (var found 1)
+                     (for i 1 10
+                       (def tag (get tags i))
+                       (when (and tag (tag :focused))
+                         (set found i)
+                         (break)))
+                     found)
+            next (if (= dir "up")
+                   (max 1 (- current 1))
+                   (min 9 (+ current 1)))]
+        (when (not= next current)
+          {:dispatch [:tp/focus-tag next]}))
+
+      # Scroll on layout glyph: cycle layout
+      (= id "layout")
+      {:dispatch [:tp/cycle-layout (if (= dir "up") "prev" "next")]})))
+
 (reg-view bar-view)
