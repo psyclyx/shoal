@@ -161,7 +161,9 @@
       (def vol (or (scan-number vol-str) 0))
       (def pct (math/round (* vol 100)))
       (def muted (truthy? (string/find "[MUTED]" line)))
-      (osd/show (cofx :db) "Volume" pct muted))))
+      # Update both OSD and bar audio state
+      (def db (put (cofx :db) :audio {:percent pct :muted muted}))
+      (osd/show db "Volume" pct muted))))
 
 # --- Brightness ---
 
