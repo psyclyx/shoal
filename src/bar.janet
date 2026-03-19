@@ -253,6 +253,16 @@
       [:text {:color muted :size 11} ipv4])
     [:text {:color subtle :size 11} iface]])
 
+(defn- audio-view []
+  (def audio (sub :audio))
+  (def pct (get audio :percent 0))
+  (def muted (get audio :muted false))
+  (def color (cond muted red (>= pct 100) yellow accent))
+  (pill
+    [:text {:color color :size 14}
+      (string (if muted "婢" "") (math/floor pct) "%")]
+    [:text {:color subtle :size 11} "vol"]))
+
 (defn- clock-view []
   (pill [:text {:color text-color :size 17} (sub :clock/time)]))
 
@@ -275,6 +285,7 @@
       (title-view)]
     # Right: system info
     [:row {:w :grow :gap 6 :align-x :right :align-y :center}
+      (audio-view)
       (net-view)
       (cpu-view)
       (mem-view)

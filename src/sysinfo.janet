@@ -275,3 +275,28 @@
      :timer {:delay 2.0 :event [:net/tick] :repeat true :id :net}}))
 
 (reg-sub :net (fn [db] (get db :net {})))
+
+# -- Audio (PipeWire/PulseAudio via wpctl) --
+
+(reg-event-handler :audio/query
+  (fn [cofx event]
+    {:spawn {:cmd ["wpctl" "get-volume" "@DEFAULT_AUDIO_SINK@"]
+             :event :audio/read}}))
+
+(reg-event-handler :audio/read
+  (fn [cofx event]
+    # wpctl output: "Volume: 0.50" or "Volume: 0.50 [MUTED]"
+    (def line (get event 1 ""))
+    (def parts (string/split " " line))
+    (when (>= (length parts) 2)
+      (def vol (or (scan-number (get parts 1 "0")) 0))
+      (def pct (math/round (* vol 100)))
+      (def muted (truthy? (string/find "[MUTED]" line)))
+      {:db (put (cofx :db) :audio {:percent pct :muted muted})})))
+
+(reg-event-handler :init
+  (fn [cofx event]
+    {:dispatch [:audio/query]
+     :timer {:delay 2.0 :event [:audio/query] :repeat true :id :audio}}))
+
+(reg-sub :audio (fn [db] (get db :audio {})))
