@@ -53,6 +53,8 @@ const Surface = struct {
     view_name_str: ?[:0]const u8 = null,
     // Dynamic surfaces are created/destroyed from Janet via :surface fx
     is_dynamic: bool = false,
+    // Hot surface: pre-created with EGL ready, waiting to be claimed
+    is_hot: bool = false,
 
     const frame_watchdog_ms: i64 = 500;
 
@@ -266,6 +268,9 @@ pub fn main() !void {
     if (egl_context == c.EGL_NO_CONTEXT) return error.EGLContextFailed;
     defer _ = c.eglDestroyContext(egl_display, egl_context);
 
+    // Disable vsync blocking — frame callbacks handle pacing
+    _ = c.eglSwapInterval(egl_display, 0);
+
     // Wait for configure events
     if (display.roundtrip() != .SUCCESS) return error.RoundtripFailed;
 
@@ -308,6 +313,10 @@ pub fn main() !void {
     defer layout.deinit(allocator);
 
     static_surface_count = surface_count;
+
+    // Pre-create a hot overlay surface so dynamic surface creation is instant
+    createHotSurface();
+
     log.info("shoal running on {d} output(s)", .{surface_count});
 
     // Force initial render — request frame callback BEFORE render so the
@@ -382,30 +391,48 @@ pub fn main() !void {
 
         // Check timers, process event queue
         dispatch.checkTimers();
-        var changed = false;
+        var db_changed = false;
+        const loop_t0 = std.time.microTimestamp();
         _ = dispatch.processQueue();
+        const loop_t1 = std.time.microTimestamp();
 
         // Process surface lifecycle requests from Janet
         processSurfaceRequests();
+        const loop_t2 = std.time.microTimestamp();
 
         if (dispatch.render_dirty) {
             dispatch.render_dirty = false;
-            changed = true;
+            db_changed = true;
         }
 
         // Tick animations
         const dt = frame_clock.tick();
-        changed = changed or dispatch.tickAnimations(dt);
+        const anim_active = dispatch.tickAnimations(dt);
 
         // Process any completion events from finished animations
         _ = dispatch.processQueue();
         if (dispatch.render_dirty) {
             dispatch.render_dirty = false;
-            changed = true;
+            db_changed = true;
         }
 
-        if (changed) {
+        if (db_changed) {
+            // DB or explicit render change — all surfaces need re-render
+            const loop_t3 = std.time.microTimestamp();
             markAllDirty();
+            const loop_t4 = std.time.microTimestamp();
+            const total = loop_t4 - loop_t0;
+            if (total > 2000) { // only log if > 2ms
+                log.info("loop: total={d}us queue={d}us surface={d}us render={d}us", .{
+                    total,
+                    loop_t1 - loop_t0,
+                    loop_t2 - loop_t1,
+                    loop_t4 - loop_t3,
+                });
+            }
+        } else if (anim_active) {
+            // Only animations changed — only dynamic surfaces use animations
+            markDynamicDirty();
         }
     }
 }
@@ -434,6 +461,7 @@ fn frameListener(_: *wl.Callback, event: wl.Callback.Event, surf: *Surface) void
 
 /// Mark a single surface dirty and kick off a render via frame callback.
 fn markSurfaceDirty(surf: *Surface) void {
+    if (surf.is_hot) return;
     if (!surf.configured or surf.egl_surface == c.EGL_NO_SURFACE) return;
     surf.needs_render = true;
     if (!surf.frame_pending) {
@@ -450,6 +478,13 @@ fn markSurfaceDirty(surf: *Surface) void {
 /// Mark all surfaces dirty and kick off a render via frame callbacks.
 fn markAllDirty() void {
     for (surfaces[0..surface_count]) |*surf| {
+        markSurfaceDirty(surf);
+    }
+}
+
+/// Mark only dynamic surfaces dirty (for animation-only frames).
+fn markDynamicDirty() void {
+    for (surfaces[static_surface_count..surface_count]) |*surf| {
         markSurfaceDirty(surf);
     }
 }
@@ -492,6 +527,58 @@ fn processSingleSurfaceRequest(req: janet.Janet) void {
     log.warn("surface fx: expected :create or :destroy key", .{});
 }
 
+fn findHotSurface() ?*Surface {
+    for (surfaces[static_surface_count..surface_count]) |*surf| {
+        if (surf.is_hot) return surf;
+    }
+    return null;
+}
+
+fn createHotSurface() void {
+    if (surface_count >= MAX_SURFACES) return;
+    if (findHotSurface() != null) return; // already have one
+
+    const comp = compositor orelse return;
+    const ls = layer_shell orelse return;
+
+    const wl_surface = comp.createSurface() catch return;
+    const layer_surface = ls.getLayerSurface(
+        wl_surface,
+        null,
+        .overlay,
+        cfg.namespace,
+    ) catch {
+        wl_surface.destroy();
+        return;
+    };
+
+    // Pre-sized at typical launcher dimensions for instant reconfigure
+    layer_surface.setSize(600, 460);
+    layer_surface.setAnchor(.{ .top = true });
+    layer_surface.setExclusiveZone(0);
+    layer_surface.setMargin(200, 0, 0, 0);
+    layer_surface.setKeyboardInteractivity(.none);
+
+    // Empty input region so the hot surface doesn't steal pointer events
+    if (comp.createRegion()) |region| {
+        wl_surface.setInputRegion(region);
+        region.destroy();
+    } else |_| {}
+
+    const surf = &surfaces[surface_count];
+    surf.* = .{
+        .wl_surface = wl_surface,
+        .layer_surface = layer_surface,
+        .is_dynamic = true,
+        .is_hot = true,
+    };
+    layer_surface.setListener(*Surface, layerSurfaceListener, surf);
+    wl_surface.commit();
+
+    surface_count += 1;
+    log.info("created hot surface", .{});
+}
+
 fn createDynamicSurface(spec: janet.Janet) void {
     const jc = janet.c;
     if (jc.janet_checktype(spec, jc.JANET_TABLE) == 0 and
@@ -501,14 +588,6 @@ fn createDynamicSurface(spec: janet.Janet) void {
         return;
     }
 
-    if (surface_count >= MAX_SURFACES) {
-        log.warn("surface create: no free surface slots", .{});
-        return;
-    }
-
-    const comp = compositor orelse return;
-    const ls = layer_shell orelse return;
-
     // Parse spec fields
     const name_val = janet.janetGet(spec, janet.kw("name"));
     if (jc.janet_checktype(name_val, jc.JANET_KEYWORD) == 0) {
@@ -516,10 +595,10 @@ fn createDynamicSurface(spec: janet.Janet) void {
         return;
     }
 
-    // Check for duplicate name
+    // Check for duplicate name (skip hot surfaces — they have no name)
     const name_str = std.mem.span(jc.janet_unwrap_keyword(name_val));
     for (surfaces[static_surface_count..surface_count]) |*existing| {
-        if (existing.is_dynamic and existing.view_name_str != null) {
+        if (existing.is_dynamic and !existing.is_hot and existing.view_name_str != null) {
             const existing_name: []const u8 = existing.view_name_str.?;
             if (std.mem.eql(u8, existing_name, name_str)) {
                 log.warn("surface create: '{s}' already exists", .{name_str});
@@ -537,7 +616,47 @@ fn createDynamicSurface(spec: janet.Janet) void {
     const anchor = parseJanetAnchor(spec);
     const margin = parseJanetMargin(spec);
 
-    // Create the surface
+    // Try to claim a hot surface (overlay layer only — layer is fixed at creation)
+    if (layer == .overlay) {
+        if (findHotSurface()) |surf| {
+            const ls_surf = surf.layer_surface.?;
+            ls_surf.setSize(width, height);
+            ls_surf.setAnchor(wlAnchor(anchor));
+            ls_surf.setExclusiveZone(exclusive_zone);
+            ls_surf.setMargin(margin.top, margin.right, margin.bottom, margin.left);
+            ls_surf.setKeyboardInteractivity(wlKeyboardInteractivity(ki));
+
+            // Restore full input region now that the surface is active
+            surf.wl_surface.?.setInputRegion(null);
+
+            surf.view_name_str = std.mem.span(jc.janet_unwrap_keyword(name_val));
+            surf.is_hot = false;
+
+            // If dimensions match, we can render immediately without waiting
+            // for a configure round-trip — EGL window is already the right size.
+            const dims_match = (surf.width == width and surf.height == height);
+            if (dims_match and surf.egl_surface != c.EGL_NO_SURFACE) {
+                // Keep configured = true, render this frame
+                surf.needs_render = true;
+            } else {
+                surf.configured = false;
+            }
+            surf.wl_surface.?.commit();
+
+            log.info("claimed hot surface for '{s}' (immediate={})", .{ name_str, dims_match });
+            return;
+        }
+    }
+
+    // Fallback: create from scratch
+    if (surface_count >= MAX_SURFACES) {
+        log.warn("surface create: no free surface slots", .{});
+        return;
+    }
+
+    const comp = compositor orelse return;
+    const ls = layer_shell orelse return;
+
     const wl_surface = comp.createSurface() catch {
         log.warn("surface create: wl_compositor.create_surface failed", .{});
         return;
@@ -584,12 +703,38 @@ fn destroyDynamicSurface(name_val: janet.Janet) void {
     const name_str = std.mem.span(jc.janet_unwrap_keyword(name_val));
 
     for (surfaces[static_surface_count..surface_count], static_surface_count..surface_count) |*surf, idx| {
-        if (surf.is_dynamic and surf.view_name_str != null) {
+        if (surf.is_dynamic and !surf.is_hot and surf.view_name_str != null) {
             const surf_name: []const u8 = surf.view_name_str.?;
             if (std.mem.eql(u8, surf_name, name_str)) {
-                // Tear down
+                // Reclaim as hot surface if no hot surface exists
+                if (findHotSurface() == null) {
+                    const ls_surf = surf.layer_surface.?;
+                    ls_surf.setSize(600, 460);
+                    ls_surf.setAnchor(.{ .top = true });
+                    ls_surf.setExclusiveZone(0);
+                    ls_surf.setMargin(200, 0, 0, 0);
+                    ls_surf.setKeyboardInteractivity(.none);
+
+                    // Empty input region so hot surface doesn't steal pointer events
+                    const comp = compositor orelse unreachable;
+                    if (comp.createRegion()) |region| {
+                        surf.wl_surface.?.setInputRegion(region);
+                        region.destroy();
+                    } else |_| {}
+
+                    surf.view_name_str = null;
+                    surf.is_hot = true;
+                    surf.configured = false;
+                    surf.needs_render = false;
+                    surf.wl_surface.?.commit();
+
+                    log.info("reclaimed '{s}' as hot surface", .{name_str});
+                    return;
+                }
+
+                // Already have a hot surface — fully destroy this one
                 surf.deinitEgl();
-                if (surf.layer_surface) |ls_surf| ls_surf.destroy();
+                if (surf.layer_surface) |ls_surf2| ls_surf2.destroy();
                 if (surf.wl_surface) |ws| ws.destroy();
 
                 // Swap with last and shrink
@@ -682,6 +827,8 @@ fn janetIntField(collection: janet.Janet, key: [:0]const u8) i32 {
 /// Render a frame for a surface. Returns true on success, false on failure.
 fn renderSurface(surf: *Surface) bool {
     if (!surf.configured or surf.egl_surface == c.EGL_NO_SURFACE) return false;
+
+    const t0 = std.time.microTimestamp();
     if (!surf.makeCurrent()) return false;
 
     const w: f32 = @floatFromInt(surf.width);
@@ -702,13 +849,17 @@ fn renderSurface(surf: *Surface) bool {
     renderer.begin(w, h);
     layout.setDimensions(w, h);
 
+    const t2 = std.time.microTimestamp();
     layout.beginLayout();
     dispatch.prepareRender();
     hiccup_mod.beginPass();
     const view_name = if (surf.view_name_str) |name| janet.kw(name) else janet.c.janet_wrap_nil();
     _ = dispatch.renderView(view_name);
+    const t2a = std.time.microTimestamp();
     layout.endLayout();
+    const t2b = std.time.microTimestamp();
     hiccup_mod.endPass();
+    const t3 = std.time.microTimestamp();
 
     // After layout: track hover changes and check for clicks on pointer surface
     if (is_pointer_surface) {
@@ -771,8 +922,24 @@ fn renderSurface(surf: *Surface) bool {
         _ = dispatch.processQueue();
     }
 
+    const t4 = std.time.microTimestamp();
     renderer.end();
     _ = c.eglSwapBuffers(egl_display, surf.egl_surface);
+    const t5 = std.time.microTimestamp();
+
+    const name = if (surf.view_name_str) |n| n else "bar";
+    const total = t5 - t0;
+    if (total > 1000) { // only log if > 1ms
+        log.info("render {s}: total={d}us view={d}us clay={d}us pass={d}us draw={d}us swap={d}us", .{
+            name,
+            total,
+            t2a - t2,
+            t2b - t2a,
+            t3 - t2b,
+            t4 - t3,
+            t5 - t4,
+        });
+    }
     return true;
 }
 
@@ -863,6 +1030,17 @@ fn layerSurfaceListener(_: *zwlr.LayerSurfaceV1, event: zwlr.LayerSurfaceV1.Even
                     log.warn("dynamic surface EGL init failed: {}", .{err});
                     return;
                 };
+            }
+
+            if (surf.is_hot) {
+                // Commit a transparent buffer so the compositor maps the surface
+                if (surf.makeCurrent()) {
+                    c.glViewport(0, 0, @intCast(surf.width), @intCast(surf.height));
+                    c.glClearColor(0, 0, 0, 0);
+                    c.glClear(c.GL_COLOR_BUFFER_BIT);
+                    _ = c.eglSwapBuffers(egl_display, surf.egl_surface);
+                }
+                return;
             }
 
             surf.needs_render = true;
