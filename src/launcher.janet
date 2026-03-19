@@ -135,7 +135,7 @@
                     :window accent
                     :tag muted
                     subtle))
-  [:row {:w :grow :h 32
+  [:row {:id (string "result-" idx) :w :grow :h 32
          :bg (if active overlay-color bg)
          :radius 4 :pad [4 12] :align-y :center :gap 8}
     [:row {:w 4 :h 16 :bg (if active kind-color [0 0 0 0]) :radius 2}]
@@ -397,6 +397,19 @@
                      (put :launcher/items new-items)
                      (put :launcher/selected (clamp selected 0
                                               (max 0 (- (length new-results) 1)))))}))))))
+
+# --- Pointer handling (launcher results) ---
+
+(reg-event-handler :click
+  (fn [cofx event]
+    (def db (cofx :db))
+    (when (get db :launcher/open?)
+      (def id (get event 1 ""))
+      (when (string/has-prefix? "result-" id)
+        (def idx (scan-number (string/slice id 7)))
+        (when idx
+          {:db (put db :launcher/selected idx)
+           :dispatch [:launcher/select]})))))
 
 # --- Signal integration: tidepool signals can trigger the launcher ---
 
