@@ -108,17 +108,34 @@
     (string/trim (slurp path))
     ([_] nil)))
 
+(defn- find-battery-path []
+  "Discover battery sysfs path. Handles BAT0, BAT1, macsmc-battery, etc."
+  (try
+    (each entry (os/dir "/sys/class/power_supply")
+      (def type-path (string "/sys/class/power_supply/" entry "/type"))
+      (when (= (slurp-trim type-path) "Battery")
+        (def cap-path (string "/sys/class/power_supply/" entry "/capacity"))
+        (when (slurp-trim cap-path)
+          (break (string "/sys/class/power_supply/" entry)))))
+    ([_] nil)))
+
+(var- bat-path nil)
+
 (reg-event-handler :bat/tick
   (fn [cofx event]
-    (def cap-str (slurp-trim "/sys/class/power_supply/BAT0/capacity"))
-    (if cap-str
-      (let [cap (or (scan-number cap-str) 0)
-            status (or (slurp-trim "/sys/class/power_supply/BAT0/status") "Unknown")
-            charging (= status "Charging")]
-        {:db (put (cofx :db) :bat {:percent cap
-                                    :charging charging
-                                    :status status
-                                    :present true})})
+    (when (nil? bat-path)
+      (set bat-path (or (find-battery-path) false)))
+    (if bat-path
+      (let [cap-str (slurp-trim (string bat-path "/capacity"))]
+        (if cap-str
+          (let [cap (or (scan-number cap-str) 0)
+                status (or (slurp-trim (string bat-path "/status")) "Unknown")
+                charging (= status "Charging")]
+            {:db (put (cofx :db) :bat {:percent cap
+                                        :charging charging
+                                        :status status
+                                        :present true})})
+          {:db (put (cofx :db) :bat {:present false})}))
       {:db (put (cofx :db) :bat {:present false})})))
 
 (reg-event-handler :init
