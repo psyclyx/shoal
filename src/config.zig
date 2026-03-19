@@ -311,6 +311,10 @@ fn printUsage() void {
         \\Config is loaded in order: defaults → XDG config file → --config file → CLI overrides
         \\XDG config path: $XDG_CONFIG_HOME/shoal/config.json (or ~/.config/shoal/config.json)
         \\
+        \\User Janet files (loaded from ~/.config/shoal/):
+        \\  init.janet  Custom handlers, subscriptions, and data sources (loaded after stdlib)
+        \\  bar.janet   Custom bar view (overrides the built-in default)
+        \\
     ;
     std.fs.File.stderr().writeAll(usage) catch {};
 }

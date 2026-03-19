@@ -202,18 +202,13 @@ pub const Dispatch = struct {
         );
         if (sysinfo_status != 0) return error.SysinfoBootFailed;
 
-        // Inject theme colors into the environment (before bar.janet which reads them)
+        // Inject theme colors into the environment (before view files which read them)
         self.injectTheme(theme);
 
-        // Load bar view (registers the root view function)
-        var bar_out: Janet = undefined;
-        const bar_status = c.janet_dostring(
-            self.env,
-            bar_source.ptr,
-            "bar.janet",
-            &bar_out,
-        );
-        if (bar_status != 0) return error.BarBootFailed;
+        // Load user files from ~/.config/shoal/ (init.janet, then view files)
+        // User init.janet runs after stdlib, can register custom handlers/subs
+        // User bar.janet overrides the embedded default bar view
+        self.loadUserFiles();
 
         // Cache lookup functions from the environment
         self.fn_get_handler = envLookup(self.env, "get-handler") orelse return error.BootMissingGetHandler;
@@ -936,6 +931,91 @@ pub const Dispatch = struct {
         c.janet_table_put(t, kw("base0F"), colorToJanet(theme.base0F));
 
         c.janet_def(self.env, "theme", c.janet_wrap_table(t), "Base16 theme colors from config");
+    }
+
+    /// Resolve the user config directory (~/.config/shoal/).
+    fn resolveConfigDir() ?[*:0]const u8 {
+        // Try XDG_CONFIG_HOME first, then HOME/.config
+        if (std.posix.getenv("XDG_CONFIG_HOME")) |config_home| {
+            var buf: [4096]u8 = undefined;
+            const path = std.fmt.bufPrint(&buf, "{s}/shoal", .{config_home}) catch return null;
+            if (path.len >= buf.len) return null;
+            buf[path.len] = 0;
+            // Check if directory exists
+            std.fs.accessAbsolute(buf[0..path.len :0], .{}) catch return null;
+            return @ptrCast(buf[0..path.len :0]);
+        }
+        if (std.posix.getenv("HOME")) |home| {
+            var buf: [4096]u8 = undefined;
+            const path = std.fmt.bufPrint(&buf, "{s}/.config/shoal", .{home}) catch return null;
+            if (path.len >= buf.len) return null;
+            buf[path.len] = 0;
+            std.fs.accessAbsolute(buf[0..path.len :0], .{}) catch return null;
+            return @ptrCast(buf[0..path.len :0]);
+        }
+        return null;
+    }
+
+    /// Try to load a Janet file from disk. Returns true if loaded successfully.
+    fn loadFileFromDisk(self: *Dispatch, dir: [*:0]const u8, filename: [:0]const u8, display_name: [:0]const u8) bool {
+        var path_buf: [4096]u8 = undefined;
+        const path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ std.mem.span(dir), filename }) catch return false;
+        if (path.len >= path_buf.len) return false;
+        path_buf[path.len] = 0;
+
+        const file = std.fs.openFileAbsolute(path_buf[0..path.len :0], .{}) catch return false;
+        defer file.close();
+
+        // Read up to 1MB
+        var content_buf: [1 << 20]u8 = undefined;
+        const n = file.readAll(&content_buf) catch return false;
+        if (n == 0) return false;
+        if (n >= content_buf.len) {
+            log.warn("user file {s} too large, skipping", .{display_name});
+            return false;
+        }
+        content_buf[n] = 0;
+
+        var out: Janet = undefined;
+        const status = c.janet_dostring(self.env, @ptrCast(content_buf[0..n :0]), display_name.ptr, &out);
+        if (status != 0) {
+            log.warn("user file {s} failed to evaluate", .{display_name});
+            return false;
+        }
+        log.info("loaded user file: {s}", .{display_name});
+        return true;
+    }
+
+    /// Load user Janet files from ~/.config/shoal/.
+    /// - init.janet: runs after stdlib, registers custom handlers/subs/data sources
+    /// - bar.janet: overrides the embedded default bar view
+    /// Falls back to embedded defaults when user files are not present.
+    fn loadUserFiles(self: *Dispatch) void {
+        const config_dir = resolveConfigDir();
+
+        // Load user init.janet if present (custom handlers, subs, data sources)
+        if (config_dir) |dir| {
+            _ = self.loadFileFromDisk(dir, "init.janet", "~/.config/shoal/init.janet");
+        }
+
+        // Load bar view: try user file first, fall back to embedded default
+        const loaded_user_bar = if (config_dir) |dir|
+            self.loadFileFromDisk(dir, "bar.janet", "~/.config/shoal/bar.janet")
+        else
+            false;
+
+        if (!loaded_user_bar) {
+            var bar_out: Janet = undefined;
+            const bar_status = c.janet_dostring(
+                self.env,
+                bar_source.ptr,
+                "bar.janet",
+                &bar_out,
+            );
+            if (bar_status != 0) {
+                log.err("embedded bar.janet failed to evaluate", .{});
+            }
+        }
     }
 
     pub fn deinitDispatch(self: *Dispatch) void {
