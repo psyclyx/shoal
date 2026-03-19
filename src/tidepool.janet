@@ -157,16 +157,23 @@
       :output
       (do
         (var db (cofx :db))
+        (var dispatches @[])
         (each line (string/split "\n" payload)
           (when (> (length line) 0)
             (try
               (do
                 (def data (json/decode line true))
                 (when data
-                  (set db (tp/apply-event db data))))
+                  (set db (tp/apply-event db data))
+                  # Signals become Janet events for other modules to handle
+                  (when (= (get data :event) "signal")
+                    (array/push dispatches
+                      [:tp/signal (get data :name "")]))))
               ([err]
                 (eprintf "tidepool: recv error: %s (line: %.80s)" (string err) line)))))
-        {:db db})
+        (if (> (length dispatches) 0)
+          {:db db :dispatch-n dispatches}
+          {:db db}))
 
       :return
       # watch-json exited (write error or unexpected return) — the connection
