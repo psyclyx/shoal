@@ -768,20 +768,6 @@ fn renderSurface(surf: *Surface) bool {
         }
         prev_hover_count = curr_count;
 
-        // Click handling: dispatch :click on button release
-        if (pointer_button_just_released) {
-            pointer_button_just_released = false;
-            for (over_ids) |eid| {
-                const str_len: usize = @intCast(@max(0, eid.string_id.length));
-                if (str_len > 0) {
-                    const str_val = janet.c.janet_stringv(eid.string_id.chars, @as(i32, @intCast(str_len)));
-                    janet.c.janet_gcroot(str_val);
-                    defer _ = janet.c.janet_gcunroot(str_val);
-                    dispatch.enqueue(janet.makeEventArgs("click", &.{str_val}));
-                }
-            }
-        }
-
         _ = dispatch.processQueue();
     }
 
@@ -982,6 +968,17 @@ fn pointerListener(_: *wl.Pointer, event: wl.Pointer.Event, _: *const void) void
             }
         },
         .frame => {
+            // Dispatch click events from button release using cached hover state
+            if (pointer_button_just_released) {
+                pointer_button_just_released = false;
+                for (prev_hover_strs[0..prev_hover_count], prev_hover_lens[0..prev_hover_count]) |hover_str, hover_len| {
+                    const str_val = janet.c.janet_stringv(&hover_str, @as(i32, @intCast(hover_len)));
+                    janet.c.janet_gcroot(str_val);
+                    defer _ = janet.c.janet_gcunroot(str_val);
+                    dispatch.enqueue(janet.makeEventArgs("click", &.{str_val}));
+                }
+            }
+
             // Dispatch scroll events accumulated during this frame
             if (pointer_scroll_y != 0) {
                 const dir_str: [:0]const u8 = if (pointer_scroll_y > 0) "down" else "up";
