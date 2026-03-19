@@ -258,10 +258,10 @@
   (def pct (get audio :percent 0))
   (def muted (get audio :muted false))
   (def color (cond muted red (>= pct 100) yellow accent))
-  (pill
+  [:row {:id "audio" :pad [4 8] :bg surface :radius 6 :gap 6 :align-y :center}
     [:text {:color color :size 14}
-      (string (if muted "婢" "") (math/floor pct) "%")]
-    [:text {:color subtle :size 11} "vol"]))
+      (string (if muted "M " "") (math/floor pct) "%")]
+    [:text {:color subtle :size 11} "vol"]])
 
 (defn- clock-view []
   (pill [:text {:color text-color :size 17} (sub :clock/time)]))
@@ -319,7 +319,10 @@
       {:dispatch [:launcher/open]}
 
       (= id "layout")
-      {:dispatch [:tp/cycle-layout "next"]})))
+      {:dispatch [:tp/cycle-layout "next"]}
+
+      (= id "audio")
+      {:dispatch [:osd/volume-mute]})))
 
 (reg-event-handler :scroll
   (fn [cofx event]
@@ -344,6 +347,10 @@
 
       # Scroll on layout glyph: cycle layout
       (= id "layout")
-      {:dispatch [:tp/cycle-layout (if (= dir "up") "prev" "next")]})))
+      {:dispatch [:tp/cycle-layout (if (= dir "up") "prev" "next")]}
+
+      # Scroll on audio: adjust volume
+      (= id "audio")
+      {:dispatch [(if (= dir "up") :osd/volume-up :osd/volume-down)]})))
 
 (reg-view bar-view)
