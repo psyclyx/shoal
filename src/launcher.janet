@@ -69,31 +69,10 @@
     (string/has-prefix? "=" query) [:eval (string/slice query 1)]
     [:all query]))
 
-(defn- build-items [db mode]
-  "Build the item list based on the current mode."
+(defn- build-live-items [db mode]
+  "Build only the live (non-cached) items: windows + tags."
   (def tp (get db :tp {}))
   (def items @[])
-
-  # Actions (from tidepool action registry)
-  (when (= mode :action)
-    (each act (get db :launcher/actions [])
-      (def key (get act :key ""))
-      (def label (string (act :name)
-                         (when (> (length key) 0) (string "  [" key "]"))
-                         (when (get act :desc)
-                           (string " — " (act :desc)))))
-      (array/push items {:label label
-                         :kind :action
-                         :action-name (act :name)})))
-
-  # Apps (from desktop files, cached in db)
-  (when (or (= mode :all) (= mode :app))
-    (each app (get db :launcher/apps [])
-      (array/push items {:label (app :name)
-                         :kind :app
-                         :exec (app :exec)})))
-
-  # Windows
   (when (or (= mode :all) (= mode :window))
     (each w (get tp :windows [])
       (def title (get w :title ""))
@@ -107,8 +86,6 @@
                            :wid (get w :wid 0)
                            :tag (get w :tag 0)
                            :focused (get w :focused false)}))))
-
-  # Tags
   (when (or (= mode :all) (= mode :tag))
     (def tags (get tp :tags []))
     (for i 1 10
@@ -119,14 +96,93 @@
                                         "Tag " i)
                          :kind :tag
                          :tag-num i})))
-
   items)
 
-(defn- launcher/tp-socket-path []
-  (let [runtime (os/getenv "XDG_RUNTIME_DIR")
-        display (os/getenv "WAYLAND_DISPLAY")]
-    (when (and runtime display)
-      (string runtime "/tidepool-" display))))
+(defn- build-items [db mode]
+  "Build complete item list: pre-built cached items + live items."
+  (def items @[])
+  (when (= mode :action)
+    (array/concat items (get db :launcher/action-items [])))
+  (when (or (= mode :all) (= mode :app))
+    (array/concat items (get db :launcher/app-items [])))
+  (array/concat items (build-live-items db mode))
+  items)
+
+(defn- launcher/update-results [db]
+  "Filter items by current query and store results in db."
+  (def items (get db :launcher/items []))
+  (def query (get db :launcher/query ""))
+  (def [_ stripped] (parse-mode query))
+  (put db :launcher/results (filter-items items stripped)))
+
+# --- Caching: scan apps and query actions on startup + timer + close ---
+
+(defn- launcher/build-app-items [apps]
+  "Pre-build app item structs from raw desktop app data."
+  (map |(do {:label ($ :name) :kind :app :exec ($ :exec)}) apps))
+
+(defn- launcher/build-action-items [actions]
+  "Pre-build action item structs from raw action data."
+  (map |(do
+    (def key (get $ :key ""))
+    (def label (string ($ :name)
+                       (when (> (length key) 0) (string "  [" key "]"))
+                       (when (get $ :desc)
+                         (string " — " ($ :desc)))))
+    {:label label :kind :action :action-name ($ :name)}) actions))
+
+(defn- launcher/cache-apps [db]
+  "Scan desktop apps and store deduplicated sorted list + pre-built items in db."
+  (def apps (desktop-apps))
+  (def seen @{})
+  (def unique-apps @[])
+  (each app apps
+    (def n (get app :name ""))
+    (when (and (> (length n) 0) (not (get seen n)))
+      (put seen n true)
+      (array/push unique-apps app)))
+  (sort unique-apps |(< (get $0 :name "") (get $1 :name "")))
+  (-> db
+      (put :launcher/apps unique-apps)
+      (put :launcher/app-items (launcher/build-app-items unique-apps))))
+
+(reg-event-handler :init
+  (fn [cofx event]
+    {:db (launcher/cache-apps (cofx :db))
+     :timer {:delay 60 :event [:launcher/refresh] :repeat true :id :launcher-refresh}}))
+
+(reg-event-handler :launcher/refresh
+  (fn [cofx event]
+    {:db (launcher/cache-apps (cofx :db))
+     :dispatch [:launcher/query-actions]}))
+
+(reg-event-handler :launcher/query-actions
+  (fn [cofx event]
+    (when (get-in (cofx :db) [:tp :connected])
+      {:ipc {:send {:name :tp-cmd
+                     :data "(ipc/list-actions)\n"}}})))
+
+# When tp-cmd connects, query actions immediately
+(reg-event-handler :tp-cmd/connected
+  (fn [cofx event]
+    {:dispatch [:launcher/query-actions]}))
+
+# Handle tp-cmd responses — detect action list by shape
+(reg-event-handler :tp-cmd/recv
+  (fn [cofx event]
+    (def msg-type (get event 1))
+    (def payload (get event 2))
+    (when (= msg-type :return)
+      (try
+        (do
+          (def data (json/decode payload true))
+          (when (and data (indexed? data)
+                     (> (length data) 0)
+                     (get (first data) :name))
+            {:db (-> (cofx :db)
+                     (put :launcher/actions data)
+                     (put :launcher/action-items (launcher/build-action-items data)))}))
+        ([err] nil)))))
 
 # --- Subscriptions ---
 
@@ -140,11 +196,7 @@
   (fn [db] (get db :launcher/selected 0)))
 
 (reg-sub :launcher/results
-  (fn [db]
-    (def items (get db :launcher/items []))
-    (def query (get db :launcher/query ""))
-    (def [mode stripped] (parse-mode query))
-    (filter-items items stripped)))
+  (fn [db] (get db :launcher/results [])))
 
 # --- View ---
 
@@ -221,25 +273,13 @@
     (def db (cofx :db))
     (def initial-query (or (get event 1) ""))
     (def [init-mode _] (parse-mode initial-query))
-    # Scan desktop apps (cached per open so we pick up new installs)
-    (def apps (desktop-apps))
-    # Deduplicate by name, keep first occurrence
-    (def seen @{})
-    (def unique-apps @[])
-    (each app apps
-      (def n (get app :name ""))
-      (when (and (> (length n) 0) (not (get seen n)))
-        (put seen n true)
-        (array/push unique-apps app)))
-    # Sort alphabetically
-    (sort unique-apps |(< (get $0 :name "") (get $1 :name "")))
-    (def db2 (put db :launcher/apps unique-apps))
-    (def items (build-items db2 init-mode))
-    {:db (-> db2
+    (def items (build-items db init-mode))
+    {:db (-> db
              (put :launcher/open? true)
              (put :launcher/query initial-query)
              (put :launcher/selected 0)
-             (put :launcher/items items))
+             (put :launcher/items items)
+             (launcher/update-results))
      :surface {:create {:name :launcher
                         :layer :overlay
                         :width 600
@@ -247,14 +287,7 @@
                         :anchor {:top true}
                         :margin {:top 200}
                         :keyboard-interactivity :exclusive}}
-     :anim {:id :launcher/reveal :to 1 :duration 0.15 :easing :ease-out-cubic}
-     # Request action list from tidepool via a separate query connection
-     :ipc {:connect {:path (launcher/tp-socket-path)
-                     :name :tp-query
-                     :framing :netrepl
-                     :handshake "\xFF{:name \"shoal-query\"}"
-                     :event :tp-query/recv
-                     :connected :tp-query/connected}}}))
+     :anim {:id :launcher/reveal :to 1 :duration 0.15 :easing :ease-out-cubic}}))
 
 (reg-event-handler :launcher/close
   (fn [cofx event]
@@ -265,51 +298,17 @@
              (put :launcher/selected 0))
      :anim {:id :launcher/reveal :to 0 :duration 0.12 :easing :ease-in-out-quad
             :on-complete [:launcher/destroy]}
-     :ipc {:disconnect {:name :tp-query}}}))
+     :dispatch [:launcher/refresh]}))
 
 (reg-event-handler :launcher/destroy
   (fn [cofx event]
     {:surface {:destroy :launcher}}))
 
-# -- Tidepool query connection (for action introspection) --
-
-(reg-event-handler :tp-query/connected
-  (fn [cofx event]
-    {:ipc {:send {:name :tp-query
-                  :data "(ipc/list-actions)\n"}}}))
-
-(reg-event-handler :tp-query/recv
-  (fn [cofx event]
-    (def msg-type (get event 1))
-    (def payload (get event 2))
-    (when (= msg-type :return)
-      (var result {:ipc {:disconnect {:name :tp-query}}})
-      (try
-        (do
-          (def actions (json/decode payload true))
-          (when (and actions (indexed? actions))
-            (set result
-              {:db (-> (cofx :db)
-                       (put :launcher/actions actions)
-                       (|(let [q (get $ :launcher/query "")
-                               [mode stripped] (parse-mode q)]
-                           (if (= mode :action)
-                             (-> $
-                                 (put :launcher/items (build-items $ :action))
-                                 (put :launcher/selected 0))
-                             $))))
-               :ipc {:disconnect {:name :tp-query}}})))
-        ([err]
-          (eprintf "launcher: action list parse error: %s" (string err))))
-      result)))
 
 (reg-event-handler :launcher/select
   (fn [cofx event]
     (def db (cofx :db))
-    (def items (get db :launcher/items []))
-    (def query (get db :launcher/query ""))
-    (def [mode stripped] (parse-mode query))
-    (def results (filter-items items stripped))
+    (def results (get db :launcher/results []))
     (def selected (get db :launcher/selected 0))
     (def query (get db :launcher/query ""))
     (def [mode stripped] (parse-mode query))
@@ -345,6 +344,21 @@
 
 # --- Keyboard handling (only when launcher is open) ---
 
+(defn- launcher/set-query [db new-query]
+  "Update query, rebuild items if mode changed, re-filter, clamp selection."
+  (def old-query (get db :launcher/query ""))
+  (def [old-mode _] (parse-mode old-query))
+  (def [new-mode new-stripped] (parse-mode new-query))
+  (def db2 (put db :launcher/query new-query))
+  # Rebuild items only when mode changes
+  (def db3 (if (not= old-mode new-mode)
+             (put db2 :launcher/items (build-items db2 new-mode))
+             db2))
+  (def db4 (launcher/update-results db3))
+  (def result-count (length (get db4 :launcher/results [])))
+  (def selected (get db4 :launcher/selected 0))
+  (put db4 :launcher/selected (clamp selected 0 (max 0 (- result-count 1)))))
+
 (reg-event-handler :key
   (fn [cofx event]
     (def db (cofx :db))
@@ -354,11 +368,8 @@
         (def sym (info :sym))
         (def text (info :text))
         (def query (get db :launcher/query ""))
-        (def items (get db :launcher/items []))
         (def selected (get db :launcher/selected 0))
-        (def [mode stripped] (parse-mode query))
-        (def results (filter-items items stripped))
-        (def result-count (length results))
+        (def result-count (length (get db :launcher/results [])))
 
         (cond
           (= sym "Escape")
@@ -368,46 +379,25 @@
           {:dispatch [:launcher/select]}
 
           (= sym "BackSpace")
-          (let [new-query (if (> (length query) 0)
-                            (string/slice query 0 (- (length query) 1))
-                            "")
-                [new-mode new-stripped] (parse-mode new-query)
-                new-items (build-items db new-mode)
-                new-results (filter-items new-items new-stripped)]
-            {:db (-> db
-                     (put :launcher/query new-query)
-                     (put :launcher/items new-items)
-                     (put :launcher/selected (clamp selected 0
-                                              (max 0 (- (length new-results) 1)))))})
+          {:db (launcher/set-query db
+                 (if (> (length query) 0)
+                   (string/slice query 0 (- (length query) 1))
+                   ""))}
 
           # Ctrl+W: delete word
           (and (= sym "w") (info :ctrl))
-          (let [# Find last space or mode prefix boundary
-                new-query (do
-                            (var end (length query))
-                            # Skip trailing spaces
-                            (while (and (> end 0) (= (get query (- end 1)) (chr " ")))
-                              (-- end))
-                            # Skip word chars
-                            (while (and (> end 0) (not= (get query (- end 1)) (chr " ")))
-                              (-- end))
-                            (string/slice query 0 end))
-                [new-mode new-stripped] (parse-mode new-query)
-                new-items (build-items db new-mode)
-                new-results (filter-items new-items new-stripped)]
-            {:db (-> db
-                     (put :launcher/query new-query)
-                     (put :launcher/items new-items)
-                     (put :launcher/selected (clamp selected 0
-                                              (max 0 (- (length new-results) 1)))))})
+          {:db (launcher/set-query db
+                 (do
+                   (var end (length query))
+                   (while (and (> end 0) (= (get query (- end 1)) (chr " ")))
+                     (-- end))
+                   (while (and (> end 0) (not= (get query (- end 1)) (chr " ")))
+                     (-- end))
+                   (string/slice query 0 end)))}
 
           # Ctrl+U: clear line
           (and (= sym "u") (info :ctrl))
-          (let [new-items (build-items db :all)]
-            {:db (-> db
-                     (put :launcher/query "")
-                     (put :launcher/items new-items)
-                     (put :launcher/selected 0))})
+          {:db (launcher/set-query db "")}
 
           (or (= sym "Up") (and (= sym "p") (info :ctrl)) (and (= sym "k") (info :ctrl)))
           {:db (put db :launcher/selected (max 0 (- selected 1)))}
@@ -417,25 +407,14 @@
                                                (+ selected 1)))}
 
           (= sym "Tab")
-          (let [next-mode (case mode :all :app :app :window :window :tag :tag :action :action :command :command :eval :eval :all)
-                prefix (case next-mode :app "!" :window "@" :tag "#" :action ">" :command ":" :eval "=" "")
-                new-items (build-items db next-mode)]
-            {:db (-> db
-                     (put :launcher/query prefix)
-                     (put :launcher/items new-items)
-                     (put :launcher/selected 0))})
+          (let [[mode _] (parse-mode query)
+                next-mode (case mode :all :app :app :window :window :tag :tag :action :action :command :command :eval :eval :all)
+                prefix (case next-mode :app "!" :window "@" :tag "#" :action ">" :command ":" :eval "=" "")]
+            {:db (launcher/set-query db prefix)})
 
           # Regular text input
           (and (> (length text) 0) (not (info :ctrl)) (not (info :alt)) (not (info :super)))
-          (let [new-query (string query text)
-                [new-mode new-stripped] (parse-mode new-query)
-                new-items (build-items db new-mode)
-                new-results (filter-items new-items new-stripped)]
-            {:db (-> db
-                     (put :launcher/query new-query)
-                     (put :launcher/items new-items)
-                     (put :launcher/selected (clamp selected 0
-                                              (max 0 (- (length new-results) 1)))))}))))))
+          {:db (launcher/set-query db (string query text))})))))
 
 # --- Pointer handling (launcher results) ---
 
@@ -456,11 +435,7 @@
     (when (get db :launcher/open?)
       (def dir (get event 1 ""))
       (def selected (get db :launcher/selected 0))
-      (def items (get db :launcher/items []))
-      (def query (get db :launcher/query ""))
-      (def [mode stripped] (parse-mode query))
-      (def results (filter-items items stripped))
-      (def result-count (length results))
+      (def result-count (length (get db :launcher/results [])))
       (cond
         (= dir "up")
         {:db (put db :launcher/selected (max 0 (- selected 1)))}
