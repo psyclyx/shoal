@@ -125,6 +125,7 @@ Janet modules can call Zig-provided functions:
 |----------|-------------|
 | `(anim :id)` | Get current interpolated animation value |
 | `(disk-usage "/")` | Get filesystem usage via statfs syscall |
+| `(desktop-apps)` | Scan XDG data dirs for .desktop files |
 | `(theme :key)` | Read theme colors (injected at boot) |
 
 ---
@@ -182,6 +183,22 @@ Modules can create and destroy layer-shell surfaces at runtime via the `:surface
 Available surface properties: `:layer`, `:width`, `:height`, `:anchor`,
 `:exclusive-zone`, `:margin`, `:keyboard-interactivity`. The `:name` field
 is required and determines which named view renders on the surface.
+
+---
+
+## Process Launching
+
+The `:exec` effect launches a process fully detached from shoal (double-fork + setsid):
+
+```janet
+# Launch by command string (runs via sh -c)
+{:exec {:cmd "firefox"}}
+
+# Launch by argv array
+{:exec {:cmd ["alacritty" "--title" "scratch"]}}
+```
+
+For commands that produce output piped back to shoal, use `:spawn` instead.
 
 ---
 
