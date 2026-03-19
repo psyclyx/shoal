@@ -42,7 +42,7 @@ var kw_none: jc.Janet = undefined;
 
 // GC roots for strings coerced via janet_to_string during a render pass.
 // These must survive until Clay's endLayout reads them.
-const MAX_COERCED_STRINGS = 32;
+const MAX_COERCED_STRINGS = 256;
 var coerced_roots: [MAX_COERCED_STRINGS]jc.Janet = undefined;
 var coerced_count: usize = 0;
 
