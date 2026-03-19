@@ -146,12 +146,17 @@
   (def query (sub :launcher/query))
   (def results (sub :launcher/results))
   (def selected (sub :launcher/selected))
+  (def reveal (anim :launcher/reveal))
   (def max-visible 12)
   (def n (min max-visible (length results)))
 
-  [:col {:w :grow :h :grow :bg bg :radius 8 :pad 12}
+  (def alpha (math/floor (* reveal 255)))
+  (def bg-a [(bg 0) (bg 1) (bg 2) alpha])
+
+  [:col {:w :grow :h :grow :bg bg-a :radius 8 :pad 12}
     # Input field
-    [:row {:h 40 :w :grow :bg surface-color :radius 6 :pad [8 12] :align-y :center}
+    [:row {:h 40 :w :grow :bg [(surface-color 0) (surface-color 1) (surface-color 2) alpha]
+           :radius 6 :pad [8 12] :align-y :center}
       [:text {:color text-color :size 16}
         (string query "│")]]
     # Results list
@@ -203,6 +208,7 @@
                         :anchor {:top true}
                         :margin {:top 200}
                         :keyboard-interactivity :exclusive}}
+     :anim {:id :launcher/reveal :to 1 :duration 0.15 :easing :ease-out-cubic}
      # Request action list from tidepool via a separate query connection
      :ipc {:connect {:path (launcher/tp-socket-path)
                      :name :tp-query
