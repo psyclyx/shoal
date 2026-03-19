@@ -15,6 +15,9 @@
 (def- subtle     (theme :subtle))
 (def- text-color (theme :text))
 (def- accent     (theme :accent))
+(def- green      (theme :base0B))
+(def- yellow     (theme :base0A))
+(def- red        (theme :base08))
 
 # -- Derived subscriptions --
 
@@ -34,10 +37,10 @@
   (def hover (anim (keyword id "-hover")))
   (if (tag :focused)
     [:row {:id id :w 22 :h 22 :bg accent :radius 5 :align-x :center :align-y :center}
-      [:text {:color bg :size 13} (string idx)]]
+      [:text {:color bg :size 14} (string idx)]]
     [:row {:id id :w 22 :h 22 :bg [(muted 0) (muted 1) (muted 2) (math/floor (* hover 255))]
            :radius 5 :align-x :center :align-y :center}
-      [:text {:color text-color :size 13} (string idx)]]))
+      [:text {:color text-color :size 14} (string idx)]]))
 
 (defn- workspaces-view []
   (def tags (sub :tp/tags))
@@ -143,25 +146,67 @@
   (if (and title (> (length title) 0))
     [:row {:gap 6 :align-y :center}
       (when (and app-id (> (length app-id) 0) (not= app-id title))
-        [:text {:color muted :size 12} app-id])
-      [:text {:color text-color :size 14} title]]
-    [:text {:color subtle :size 14} ""]))
+        [:text {:color muted :size 13} app-id])
+      [:text {:color text-color :size 15} title]]
+    [:text {:color subtle :size 15} ""]))
 
 # -- Right-side modules --
 
-(defn- clock-view []
-  (pill [:text {:color text-color :size 14} (sub :clock/time)]))
+(defn- pct-color [pct]
+  (cond (>= pct 80) red (>= pct 50) yellow green))
+
+(defn- fill-bar [pct color &opt w]
+  (default w 32)
+  [:row {:w w :h 4 :bg [(muted 0) (muted 1) (muted 2) 80] :radius 2}
+    [:row {:w (max 1 (math/floor (* w (/ (min pct 100) 100)))) :h 4 :bg color :radius 2}]])
 
 (defn- cpu-view []
-  (pill [:text {:color text-color :size 14} (sub :cpu/text)]))
+  (def pct (sub :cpu/percent))
+  [:row {:pad [4 8] :bg surface :radius 6 :gap 6 :align-y :center}
+    [:col {:gap 3 :align-y :center}
+      [:text {:color text-color :size 13} (string (math/floor pct) "%")]
+      (fill-bar pct (pct-color pct) 28)]
+    [:text {:color subtle :size 11} "cpu"]])
 
 (defn- mem-view []
-  (pill [:text {:color text-color :size 14} (sub :mem/text)]))
+  (def mem (sub :mem))
+  (def pct (get mem :percent 0))
+  (def used (get mem :used-mb 0))
+  (def total (get mem :total-mb 0))
+  [:row {:pad [4 8] :bg surface :radius 6 :gap 6 :align-y :center}
+    [:col {:gap 3 :align-y :center}
+      [:text {:color text-color :size 13}
+        (string (if (>= used 1024)
+                  (let [g (/ used 1024)
+                        w (math/floor g)
+                        f (math/floor (* 10 (- g w)))]
+                    (string w "." f))
+                  (string (math/floor used)))
+                "/"
+                (if (>= total 1024)
+                  (let [g (/ total 1024)
+                        w (math/floor g)
+                        f (math/floor (* 10 (- g w)))]
+                    (string w "." f "G"))
+                  (string (math/floor total) "M")))]
+      (fill-bar pct (pct-color pct) 36)]
+    [:text {:color subtle :size 11} "mem"]])
 
 (defn- bat-view []
-  (def bat-text (sub :bat/text))
-  (when bat-text
-    (pill [:text {:color text-color :size 14} bat-text])))
+  (def bat (sub :bat))
+  (when (bat :present)
+    (def pct (get bat :percent 0))
+    (def charging (bat :charging))
+    (def color (cond charging accent (< pct 20) red (< pct 50) yellow green))
+    [:row {:pad [4 8] :bg surface :radius 6 :gap 6 :align-y :center}
+      [:col {:gap 3 :align-y :center}
+        [:text {:color text-color :size 13}
+          (string (if charging "+" "") (math/floor pct) "%")]
+        (fill-bar pct color 24)]
+      [:text {:color subtle :size 11} "bat"]]))
+
+(defn- clock-view []
+  (pill [:text {:color text-color :size 15} (sub :clock/time)]))
 
 # -- Root bar view --
 
