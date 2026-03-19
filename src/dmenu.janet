@@ -6,15 +6,37 @@
 
 # --- Helpers ---
 
-(defn- fuzzy-match [query label]
-  (when (and query label)
-    (string/find (string/ascii-lower query)
-                 (string/ascii-lower label))))
+(defn- fuzzy-score [query label]
+  "Fuzzy match with scoring. Returns score or nil."
+  (when (and query label (> (length query) 0) (> (length label) 0))
+    (def q (string/ascii-lower query))
+    (def l (string/ascii-lower label))
+    (def qlen (length q))
+    (var qi 0)
+    (var score 0)
+    (var prev-match -2)
+    (for li 0 (length l)
+      (when (and (< qi qlen) (= (get q qi) (get l li)))
+        (if (= (- li 1) prev-match) (+= score 4) (+= score 1))
+        (when (or (= li 0)
+                  (let [prev-ch (get l (- li 1))]
+                    (or (= prev-ch (chr " ")) (= prev-ch (chr "-"))
+                        (= prev-ch (chr "_")) (= prev-ch (chr "/")))))
+          (+= score 3))
+        (when (= qi li) (+= score 2))
+        (set prev-match li)
+        (++ qi)))
+    (when (= qi qlen) score)))
 
 (defn- filter-items [items query]
   (if (or (nil? query) (= query ""))
     items
-    (filter |(fuzzy-match query $) items)))
+    (let [scored (seq [item :in items
+                       :let [s (fuzzy-score query item)]
+                       :when s]
+                   {:item item :score s})]
+      (sort scored |(> ($0 :score) ($1 :score)))
+      (map |($ :item) scored))))
 
 (defn- clamp [v lo hi]
   (min hi (max lo v)))
