@@ -57,6 +57,7 @@
   (when (and name (> (length name) 0))
     (def c muted)
     (def hi accent)
+    (def glyph
     (match name
       "master-stack"
       [:row {:gap 1 :h 16 :align-y :center}
@@ -100,7 +101,8 @@
         [:row {:w 8 :h 16 :bg hi :radius 1}]
         [:row {:w 4 :h 12 :bg c :radius 1}]]
       # fallback: text
-      [:text {:color subtle :size 11} name])))
+      [:text {:color subtle :size 11} name]))
+    [:row {:id "layout" :align-y :center :pad [2 4]} glyph]))
 
 # -- Scroll minimap --
 
@@ -303,6 +305,9 @@
         (when tag {:dispatch [:tp/focus-tag tag]}))
 
       (= id "launcher")
-      {:dispatch [:launcher/open]})))
+      {:dispatch [:launcher/open]}
+
+      (= id "layout")
+      {:dispatch [:tp/cycle-layout "next"]})))
 
 (reg-view bar-view)
