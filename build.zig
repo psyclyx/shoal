@@ -60,6 +60,7 @@ pub fn build(b: *Build) void {
     root_mod.linkSystemLibrary("freetype2", .{});
     root_mod.linkSystemLibrary("harfbuzz", .{});
     root_mod.linkSystemLibrary("fontconfig", .{});
+    root_mod.linkSystemLibrary("xkbcommon", .{});
     root_mod.linkSystemLibrary("janet", .{});
 
     b.installArtifact(exe);

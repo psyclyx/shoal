@@ -17,11 +17,16 @@ const c = @cImport({
     @cInclude("GLES3/gl3.h");
 });
 
+const xkb = @cImport({
+    @cInclude("xkbcommon/xkbcommon.h");
+});
+
 const BTN_LEFT: u32 = 0x110;
 
 const log = std.log.scoped(.shoal);
 
 const MAX_OUTPUTS = 8;
+const MAX_SURFACES = 16; // MAX_OUTPUTS static + dynamic
 
 // ---------------------------------------------------------------------------
 // Surface — per-output layer shell surface with its own EGL window
@@ -44,6 +49,10 @@ const Surface = struct {
     output_y: i32 = 0,
     output_name: [64]u8 = undefined,
     output_name_len: usize = 0,
+    // View dispatch — null means default view, keyword string selects a named view
+    view_name_str: ?[:0]const u8 = null,
+    // Dynamic surfaces are created/destroyed from Janet via :surface fx
+    is_dynamic: bool = false,
 
     const frame_watchdog_ms: i64 = 500;
 
@@ -96,6 +105,13 @@ var compositor: ?*wl.Compositor = null;
 var layer_shell: ?*zwlr.LayerShellV1 = null;
 var seat: ?*wl.Seat = null;
 var pointer: ?*wl.Pointer = null;
+var keyboard: ?*wl.Keyboard = null;
+
+// XKB state
+var xkb_ctx: ?*xkb.struct_xkb_context = null;
+var xkb_km: ?*xkb.struct_xkb_keymap = null;
+var xkb_st: ?*xkb.struct_xkb_state = null;
+var keyboard_focus_surface: ?*wl.Surface = null;
 
 // Pointer state
 var pointer_x: f32 = -1;
@@ -112,9 +128,10 @@ var prev_hover_strs: [MAX_HOVER_IDS][MAX_HOVER_ID_LEN]u8 = [_][MAX_HOVER_ID_LEN]
 var prev_hover_lens: [MAX_HOVER_IDS]usize = [_]usize{0} ** MAX_HOVER_IDS;
 var prev_hover_count: usize = 0;
 
-// Per-output surfaces
-var surfaces: [MAX_OUTPUTS]Surface = [_]Surface{.{}} ** MAX_OUTPUTS;
+// Per-output surfaces (static) + dynamic surfaces
+var surfaces: [MAX_SURFACES]Surface = [_]Surface{.{}} ** MAX_SURFACES;
 var surface_count: usize = 0;
+var static_surface_count: usize = 0;
 
 // Shared EGL
 var egl_display: c.EGLDisplay = c.EGL_NO_DISPLAY;
@@ -152,6 +169,11 @@ pub fn main() !void {
 
     const display = try wl.Display.connect(null);
     defer display.disconnect();
+    defer {
+        if (xkb_st) |s| xkb.xkb_state_unref(s);
+        if (xkb_km) |m| xkb.xkb_keymap_unref(m);
+        if (xkb_ctx) |ctx| xkb.xkb_context_unref(ctx);
+    }
 
     const registry = try display.getRegistry();
     registry.setListener(*const void, registryListener, &{});
@@ -235,7 +257,15 @@ pub fn main() !void {
         any_configured = true;
     }
     if (!any_configured) return error.NoConfigure;
-    defer for (surfaces[0..surface_count]) |*surf| surf.deinitEgl();
+    defer {
+        for (surfaces[0..surface_count]) |*surf| {
+            surf.deinitEgl();
+            if (surf.is_dynamic) {
+                if (surf.layer_surface) |ls_surf| ls_surf.destroy();
+                if (surf.wl_surface) |ws| ws.destroy();
+            }
+        }
+    }
 
     // Make first surface current for subsystem init
     if (!surfaces[0].makeCurrent()) return error.EGLMakeCurrentFailed;
@@ -255,6 +285,7 @@ pub fn main() !void {
     layout = try Layout.init(allocator, &text_renderer, &renderer);
     defer layout.deinit(allocator);
 
+    static_surface_count = surface_count;
     log.info("shoal running on {d} output(s)", .{surface_count});
 
     // Force initial render — request frame callback BEFORE render so the
@@ -331,6 +362,10 @@ pub fn main() !void {
         dispatch.checkTimers();
         var changed = false;
         _ = dispatch.processQueue();
+
+        // Process surface lifecycle requests from Janet
+        processSurfaceRequests();
+
         if (dispatch.render_dirty) {
             dispatch.render_dirty = false;
             changed = true;
@@ -397,6 +432,231 @@ fn markAllDirty() void {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Dynamic surface lifecycle
+// ---------------------------------------------------------------------------
+
+fn processSurfaceRequests() void {
+    const requests = dispatch.drainSurfaceRequests();
+    for (requests) |req| {
+        defer _ = janet.c.janet_gcunroot(req);
+        processSingleSurfaceRequest(req);
+    }
+}
+
+fn processSingleSurfaceRequest(req: janet.Janet) void {
+    const jc = janet.c;
+    if (jc.janet_checktype(req, jc.JANET_TABLE) == 0 and
+        jc.janet_checktype(req, jc.JANET_STRUCT) == 0)
+    {
+        log.warn("surface fx: expected table", .{});
+        return;
+    }
+
+    // {:create {:name :launcher :layer :overlay ...}}
+    const create_val = janet.janetGet(req, janet.kw("create"));
+    if (jc.janet_checktype(create_val, jc.JANET_NIL) == 0) {
+        createDynamicSurface(create_val);
+        return;
+    }
+
+    // {:destroy :launcher}
+    const destroy_val = janet.janetGet(req, janet.kw("destroy"));
+    if (jc.janet_checktype(destroy_val, jc.JANET_NIL) == 0) {
+        destroyDynamicSurface(destroy_val);
+        return;
+    }
+
+    log.warn("surface fx: expected :create or :destroy key", .{});
+}
+
+fn createDynamicSurface(spec: janet.Janet) void {
+    const jc = janet.c;
+    if (jc.janet_checktype(spec, jc.JANET_TABLE) == 0 and
+        jc.janet_checktype(spec, jc.JANET_STRUCT) == 0)
+    {
+        log.warn("surface create: expected table spec", .{});
+        return;
+    }
+
+    if (surface_count >= MAX_SURFACES) {
+        log.warn("surface create: no free surface slots", .{});
+        return;
+    }
+
+    const comp = compositor orelse return;
+    const ls = layer_shell orelse return;
+
+    // Parse spec fields
+    const name_val = janet.janetGet(spec, janet.kw("name"));
+    if (jc.janet_checktype(name_val, jc.JANET_KEYWORD) == 0) {
+        log.warn("surface create: missing :name keyword", .{});
+        return;
+    }
+
+    // Check for duplicate name
+    const name_str = std.mem.span(jc.janet_unwrap_keyword(name_val));
+    for (surfaces[static_surface_count..surface_count]) |*existing| {
+        if (existing.is_dynamic and existing.view_name_str != null) {
+            const existing_name: []const u8 = existing.view_name_str.?;
+            if (std.mem.eql(u8, existing_name, name_str)) {
+                log.warn("surface create: '{s}' already exists", .{name_str});
+                return;
+            }
+        }
+    }
+
+    // Parse optional fields with defaults for overlay/popup use
+    const layer = parseJanetLayer(spec) orelse .overlay;
+    const width = parseJanetUint(spec, "width") orelse 0;
+    const height = parseJanetUint(spec, "height") orelse 0;
+    const exclusive_zone = parseJanetInt(spec, "exclusive-zone") orelse 0;
+    const ki = parseJanetKI(spec) orelse .none;
+    const anchor = parseJanetAnchor(spec);
+    const margin = parseJanetMargin(spec);
+
+    // Create the surface
+    const wl_surface = comp.createSurface() catch {
+        log.warn("surface create: wl_compositor.create_surface failed", .{});
+        return;
+    };
+
+    const layer_surface = ls.getLayerSurface(
+        wl_surface,
+        null, // compositor chooses output
+        wlLayer(layer),
+        cfg.namespace,
+    ) catch {
+        log.warn("surface create: get_layer_surface failed", .{});
+        wl_surface.destroy();
+        return;
+    };
+
+    layer_surface.setSize(width, height);
+    layer_surface.setAnchor(wlAnchor(anchor));
+    layer_surface.setExclusiveZone(exclusive_zone);
+    layer_surface.setMargin(margin.top, margin.right, margin.bottom, margin.left);
+    layer_surface.setKeyboardInteractivity(wlKeyboardInteractivity(ki));
+
+    const surf = &surfaces[surface_count];
+    surf.* = .{
+        .wl_surface = wl_surface,
+        .layer_surface = layer_surface,
+        .is_dynamic = true,
+        .view_name_str = std.mem.span(jc.janet_unwrap_keyword(name_val)),
+    };
+    layer_surface.setListener(*Surface, layerSurfaceListener, surf);
+    wl_surface.commit();
+
+    surface_count += 1;
+    log.info("created dynamic surface '{s}'", .{name_str});
+}
+
+fn destroyDynamicSurface(name_val: janet.Janet) void {
+    const jc = janet.c;
+    if (jc.janet_checktype(name_val, jc.JANET_KEYWORD) == 0) {
+        log.warn("surface destroy: expected keyword name", .{});
+        return;
+    }
+
+    const name_str = std.mem.span(jc.janet_unwrap_keyword(name_val));
+
+    for (surfaces[static_surface_count..surface_count], static_surface_count..surface_count) |*surf, idx| {
+        if (surf.is_dynamic and surf.view_name_str != null) {
+            const surf_name: []const u8 = surf.view_name_str.?;
+            if (std.mem.eql(u8, surf_name, name_str)) {
+                // Tear down
+                surf.deinitEgl();
+                if (surf.layer_surface) |ls_surf| ls_surf.destroy();
+                if (surf.wl_surface) |ws| ws.destroy();
+
+                // Swap with last and shrink
+                surface_count -= 1;
+                if (idx < surface_count) {
+                    surfaces[idx] = surfaces[surface_count];
+                }
+                surfaces[surface_count] = .{};
+
+                log.info("destroyed dynamic surface '{s}'", .{name_str});
+                return;
+            }
+        }
+    }
+
+    log.warn("surface destroy: '{s}' not found", .{name_str});
+}
+
+// --- Janet spec parsers for surface creation ---
+
+fn parseJanetLayer(spec: janet.Janet) ?Config.Layer {
+    const val = janet.janetGet(spec, janet.kw("layer"));
+    if (janet.c.janet_checktype(val, janet.c.JANET_KEYWORD) == 0) return null;
+    const name = std.mem.span(janet.c.janet_unwrap_keyword(val));
+    return std.meta.stringToEnum(Config.Layer, name);
+}
+
+fn parseJanetUint(spec: janet.Janet, key: [:0]const u8) ?u32 {
+    const val = janet.janetGet(spec, janet.kw(key));
+    if (janet.c.janet_checktype(val, janet.c.JANET_NUMBER) == 0) return null;
+    const n = janet.c.janet_unwrap_number(val);
+    if (n < 0) return null;
+    return @intFromFloat(n);
+}
+
+fn parseJanetInt(spec: janet.Janet, key: [:0]const u8) ?i32 {
+    const val = janet.janetGet(spec, janet.kw(key));
+    if (janet.c.janet_checktype(val, janet.c.JANET_NUMBER) == 0) return null;
+    return @intFromFloat(janet.c.janet_unwrap_number(val));
+}
+
+fn parseJanetKI(spec: janet.Janet) ?Config.KeyboardInteractivity {
+    const val = janet.janetGet(spec, janet.kw("keyboard-interactivity"));
+    if (janet.c.janet_checktype(val, janet.c.JANET_KEYWORD) == 0) return null;
+    const name = std.mem.span(janet.c.janet_unwrap_keyword(val));
+    if (std.mem.eql(u8, name, "exclusive")) return .exclusive;
+    if (std.mem.eql(u8, name, "on-demand")) return .on_demand;
+    if (std.mem.eql(u8, name, "none")) return .none;
+    return null;
+}
+
+fn parseJanetAnchor(spec: janet.Janet) Config.Anchor {
+    const val = janet.janetGet(spec, janet.kw("anchor"));
+    if (janet.c.janet_checktype(val, janet.c.JANET_TABLE) == 0 and
+        janet.c.janet_checktype(val, janet.c.JANET_STRUCT) == 0)
+        return .{};
+    return .{
+        .top = janetBoolField(val, "top"),
+        .bottom = janetBoolField(val, "bottom"),
+        .left = janetBoolField(val, "left"),
+        .right = janetBoolField(val, "right"),
+    };
+}
+
+fn parseJanetMargin(spec: janet.Janet) Config.Margin {
+    const val = janet.janetGet(spec, janet.kw("margin"));
+    if (janet.c.janet_checktype(val, janet.c.JANET_TABLE) == 0 and
+        janet.c.janet_checktype(val, janet.c.JANET_STRUCT) == 0)
+        return .{};
+    return .{
+        .top = janetIntField(val, "top"),
+        .right = janetIntField(val, "right"),
+        .bottom = janetIntField(val, "bottom"),
+        .left = janetIntField(val, "left"),
+    };
+}
+
+fn janetBoolField(collection: janet.Janet, key: [:0]const u8) bool {
+    const val = janet.janetGet(collection, janet.kw(key));
+    return janet.c.janet_checktype(val, janet.c.JANET_BOOLEAN) != 0 and
+        janet.c.janet_unwrap_boolean(val) != 0;
+}
+
+fn janetIntField(collection: janet.Janet, key: [:0]const u8) i32 {
+    const val = janet.janetGet(collection, janet.kw(key));
+    if (janet.c.janet_checktype(val, janet.c.JANET_NUMBER) == 0) return 0;
+    return @intFromFloat(janet.c.janet_unwrap_number(val));
+}
+
 /// Render a frame for a surface. Returns true on success, false on failure.
 fn renderSurface(surf: *Surface) bool {
     if (!surf.configured or surf.egl_surface == c.EGL_NO_SURFACE) return false;
@@ -423,7 +683,8 @@ fn renderSurface(surf: *Surface) bool {
     layout.beginLayout();
     dispatch.prepareRender();
     hiccup_mod.beginPass();
-    _ = dispatch.renderView();
+    const view_name = if (surf.view_name_str) |name| janet.kw(name) else janet.c.janet_wrap_nil();
+    _ = dispatch.renderView(view_name);
     layout.endLayout();
     hiccup_mod.endPass();
 
@@ -588,13 +849,26 @@ fn layerSurfaceListener(_: *zwlr.LayerSurfaceV1, event: zwlr.LayerSurfaceV1.Even
 
             if (surf.egl_window) |win| {
                 c.wl_egl_window_resize(win, @intCast(lscfg.width), @intCast(lscfg.height), 0, 0);
+            } else if (surf.is_dynamic) {
+                // Dynamic surfaces need EGL init on first configure
+                surf.initEgl() catch |err| {
+                    log.warn("dynamic surface EGL init failed: {}", .{err});
+                    return;
+                };
             }
 
             surf.needs_render = true;
             requestFrame(surf);
         },
         .closed => {
-            running = false;
+            if (surf.is_dynamic) {
+                // Dynamic surface closed by compositor — clean up
+                surf.deinitEgl();
+                surf.configured = false;
+                log.info("dynamic surface closed by compositor", .{});
+            } else {
+                running = false;
+            }
         },
     }
 }
@@ -616,6 +890,19 @@ fn seatListener(_: *wl.Seat, event: wl.Seat.Event, _: *const void) void {
                     pointer_y = -1;
                     pointer_button_pressed = false;
                     pointer_button_just_released = false;
+                }
+            }
+
+            if (caps.capabilities.keyboard) {
+                if (keyboard == null) {
+                    keyboard = seat.?.getKeyboard() catch return;
+                    keyboard.?.setListener(*const void, keyboardListener, &{});
+                }
+            } else {
+                if (keyboard) |k| {
+                    k.release();
+                    keyboard = null;
+                    keyboard_focus_surface = null;
                 }
             }
         },
@@ -684,4 +971,119 @@ fn pointerListener(_: *wl.Pointer, event: wl.Pointer.Event, _: *const void) void
         },
         else => {},
     }
+}
+
+fn keyboardListener(_: *wl.Keyboard, event: wl.Keyboard.Event, _: *const void) void {
+    switch (event) {
+        .keymap => |km| {
+            defer std.posix.close(km.fd);
+            if (km.format != .xkb_v1) return;
+
+            const map_data = std.posix.mmap(
+                null,
+                km.size,
+                std.posix.PROT.READ,
+                .{ .TYPE = .SHARED },
+                km.fd,
+                0,
+            ) catch return;
+            defer std.posix.munmap(map_data);
+
+            if (xkb_ctx == null) {
+                xkb_ctx = xkb.xkb_context_new(xkb.XKB_CONTEXT_NO_FLAGS);
+                if (xkb_ctx == null) return;
+            }
+
+            if (xkb_st) |s| xkb.xkb_state_unref(s);
+            if (xkb_km) |m| xkb.xkb_keymap_unref(m);
+            xkb_st = null;
+            xkb_km = null;
+
+            xkb_km = xkb.xkb_keymap_new_from_string(
+                xkb_ctx,
+                @ptrCast(map_data.ptr),
+                xkb.XKB_KEYMAP_FORMAT_TEXT_V1,
+                xkb.XKB_KEYMAP_COMPILE_NO_FLAGS,
+            );
+            if (xkb_km) |m| {
+                xkb_st = xkb.xkb_state_new(m);
+            }
+        },
+        .enter => |ev| {
+            keyboard_focus_surface = ev.surface;
+            dispatch.enqueue(janet.makeEvent("keyboard-enter"));
+        },
+        .leave => |_| {
+            keyboard_focus_surface = null;
+            dispatch.enqueue(janet.makeEvent("keyboard-leave"));
+        },
+        .key => |ev| {
+            const state = xkb_st orelse return;
+            const keycode: xkb.xkb_keycode_t = ev.key + 8;
+            const pressed = ev.state == .pressed;
+
+            const sym = xkb.xkb_state_key_get_one_sym(state, keycode);
+            var sym_name: [64]u8 = undefined;
+            const sym_len = xkb.xkb_keysym_get_name(sym, &sym_name, sym_name.len);
+            if (sym_len < 1) return;
+            const sym_ulen: usize = @intCast(sym_len);
+
+            var utf8_buf: [8]u8 = undefined;
+            const utf8_len = xkb.xkb_state_key_get_utf8(state, keycode, &utf8_buf, utf8_buf.len);
+            const utf8_ulen: usize = if (utf8_len > 0) @intCast(utf8_len) else 0;
+
+            const ctrl = xkb.xkb_state_mod_name_is_active(state, "Control", xkb.XKB_STATE_MODS_EFFECTIVE) == 1;
+            const alt = xkb.xkb_state_mod_name_is_active(state, "Mod1", xkb.XKB_STATE_MODS_EFFECTIVE) == 1;
+            const shift = xkb.xkb_state_mod_name_is_active(state, "Shift", xkb.XKB_STATE_MODS_EFFECTIVE) == 1;
+            const super = xkb.xkb_state_mod_name_is_active(state, "Mod4", xkb.XKB_STATE_MODS_EFFECTIVE) == 1;
+
+            dispatchKeyEvent(
+                sym_name[0..sym_ulen],
+                utf8_buf[0..utf8_ulen],
+                pressed,
+                ctrl,
+                alt,
+                shift,
+                super,
+            );
+        },
+        .modifiers => |ev| {
+            if (xkb_st) |state| {
+                _ = xkb.xkb_state_update_mask(
+                    state,
+                    ev.mods_depressed,
+                    ev.mods_latched,
+                    ev.mods_locked,
+                    0,
+                    0,
+                    ev.group,
+                );
+            }
+        },
+        .repeat_info => {},
+    }
+}
+
+fn dispatchKeyEvent(
+    sym_name: []const u8,
+    utf8: []const u8,
+    pressed: bool,
+    ctrl: bool,
+    alt: bool,
+    shift: bool,
+    super: bool,
+) void {
+    const jc = janet.c;
+
+    const st = jc.janet_struct_begin(7);
+    jc.janet_struct_put(st, janet.kw("sym"), jc.janet_stringv(sym_name.ptr, @as(i32, @intCast(sym_name.len))));
+    jc.janet_struct_put(st, janet.kw("text"), jc.janet_stringv(utf8.ptr, @as(i32, @intCast(utf8.len))));
+    jc.janet_struct_put(st, janet.kw("pressed"), jc.janet_wrap_boolean(@intFromBool(pressed)));
+    jc.janet_struct_put(st, janet.kw("ctrl"), jc.janet_wrap_boolean(@intFromBool(ctrl)));
+    jc.janet_struct_put(st, janet.kw("alt"), jc.janet_wrap_boolean(@intFromBool(alt)));
+    jc.janet_struct_put(st, janet.kw("shift"), jc.janet_wrap_boolean(@intFromBool(shift)));
+    jc.janet_struct_put(st, janet.kw("super"), jc.janet_wrap_boolean(@intFromBool(super)));
+    const key_info = jc.janet_wrap_struct(jc.janet_struct_end(st));
+
+    dispatch.enqueue(janet.makeEventArgs("key", &.{key_info}));
 }

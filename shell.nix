@@ -14,6 +14,7 @@ pkgs.mkShell {
     freetype
     harfbuzz
     fontconfig
+    libxkbcommon
     janet
   ];
 }

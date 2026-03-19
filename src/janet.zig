@@ -87,6 +87,7 @@ const fx_order = [_][:0]const u8{
 const MAX_QUEUED_EVENTS = 256;
 const MAX_TIMERS = 64;
 const MAX_ANIMS = 64;
+const MAX_SURFACE_REQUESTS = 8;
 
 const AnimSlot = struct {
     active: bool = false,
@@ -131,6 +132,10 @@ pub const Dispatch = struct {
 
     // IPC connection pool (Unix sockets)
     ipcs: ipc_mod.IpcPool = .{},
+
+    // Surface lifecycle requests (processed by main.zig)
+    surface_requests: [MAX_SURFACE_REQUESTS]Janet = undefined,
+    surface_request_count: usize = 0,
 
     // Cached function references (set by initBoot)
     fn_get_handler: Janet = undefined,
@@ -336,6 +341,8 @@ pub const Dispatch = struct {
                 self.spawns.handleFx(fx_val, self.eventSink());
             } else if (std.mem.eql(u8, fx_name, "ipc")) {
                 self.ipcs.handleFx(fx_val, self.eventSink());
+            } else if (std.mem.eql(u8, fx_name, "surface")) {
+                self.enqueueSurfaceRequest(fx_val);
             } else {
                 // Look up registered fx executor
                 const executor = self.pcall(self.fn_get_fx_executor, &.{fx_key}) orelse continue;
@@ -778,6 +785,29 @@ pub const Dispatch = struct {
         return self.spawns.fillPollFds(buf);
     }
 
+    // -------------------------------------------------------------------
+    // Surface lifecycle requests
+    // -------------------------------------------------------------------
+
+    fn enqueueSurfaceRequest(self: *Dispatch, val: Janet) void {
+        if (self.surface_request_count >= MAX_SURFACE_REQUESTS) {
+            log.warn("surface request queue full", .{});
+            return;
+        }
+        c.janet_gcroot(val);
+        self.surface_requests[self.surface_request_count] = val;
+        self.surface_request_count += 1;
+    }
+
+    /// Drain surface requests. Returns a slice of GC-rooted Janet values.
+    /// Caller must call janet_gcunroot on each after processing.
+    pub fn drainSurfaceRequests(self: *Dispatch) []const Janet {
+        const count = self.surface_request_count;
+        if (count == 0) return &.{};
+        self.surface_request_count = 0;
+        return self.surface_requests[0..count];
+    }
+
     pub fn onIpcReadable(self: *Dispatch, fd: std.posix.fd_t) void {
         self.ipcs.onReadable(fd, self.eventSink());
     }
@@ -819,10 +849,14 @@ pub const Dispatch = struct {
 
     /// Call the registered view function and walk the resulting hiccup tree.
     /// Call prepareRender() first to set up the db for subscriptions.
+    /// Pass a keyword Janet value to render a named view, or nil for the default.
     /// Returns true if a view was rendered, false if no view fn registered.
-    pub fn renderView(self: *Dispatch) bool {
-        // Get the view function
-        const view_fn_val = self.pcall(self.fn_get_view_fn, &.{}) orelse return false;
+    pub fn renderView(self: *Dispatch, view_name: Janet) bool {
+        // Get the view function (named or default)
+        const view_fn_val = if (c.janet_checktype(view_name, c.JANET_NIL) != 0)
+            self.pcall(self.fn_get_view_fn, &.{}) orelse return false
+        else
+            self.pcall(self.fn_get_view_fn, &.{view_name}) orelse return false;
         if (c.janet_checktype(view_fn_val, c.JANET_NIL) != 0) return false;
 
         // Call the view function (no args) → hiccup tree

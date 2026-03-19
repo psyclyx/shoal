@@ -10,6 +10,7 @@
   freetype,
   harfbuzz,
   fontconfig,
+  libxkbcommon,
   janet,
   zig_0_15,
 }:
@@ -35,6 +36,7 @@ stdenv.mkDerivation (finalAttrs: {
     freetype
     harfbuzz
     fontconfig
+    libxkbcommon
     janet
   ];
 
