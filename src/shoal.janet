@@ -175,19 +175,33 @@
   [db]
   (set *current-db* db))
 
-# --- View ---
+# --- Views ---
 
 (var- *view-fn* nil)
+(def- named-views
+  "Registry: keyword → view-fn for named surfaces."
+  @{})
 
 (defn reg-view
-  "Register the root view function. Called with no args, returns hiccup tree."
-  [view-fn]
-  (set *view-fn* view-fn))
+  "Register a view function.
+
+  One arity (default view, used by the primary surface):
+    (reg-view view-fn)
+
+  Two arities (named view, for additional surfaces):
+    (reg-view :name view-fn)"
+  [name-or-fn &opt view-fn]
+  (if view-fn
+    (put named-views name-or-fn view-fn)
+    (set *view-fn* name-or-fn)))
 
 (defn get-view-fn
-  "Return the registered root view function, or nil."
-  []
-  *view-fn*)
+  "Return a view function. With no args, returns the default view.
+  With a keyword, returns the named view or nil."
+  [&opt name]
+  (if name
+    (get named-views name)
+    *view-fn*))
 
 # --- Internal handlers ---
 
