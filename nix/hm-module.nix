@@ -104,7 +104,7 @@ in {
       systemd.user.services.shoal = {
         Unit = {
           Description = "Shoal wayland shell";
-          PartOf = [ "graphical-session.target" "tidepool.service" ];
+          PartOf = [ "graphical-session.target" ];
           After = [ "graphical-session.target" "tidepool.service" ];
         };
         Service = {
