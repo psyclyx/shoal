@@ -136,6 +136,20 @@
         (and (= sym "u") (info :ctrl))
         {:db (-> db (put :dmenu/query "") (put :dmenu/selected 0))}
 
+        (and (= sym "w") (info :ctrl))
+        (let [new-query (do
+                          (var end (length query))
+                          (while (and (> end 0) (= (get query (- end 1)) (chr " ")))
+                            (-- end))
+                          (while (and (> end 0) (not= (get query (- end 1)) (chr " ")))
+                            (-- end))
+                          (string/slice query 0 end))
+              new-results (filter-items items new-query)]
+          {:db (-> db
+                   (put :dmenu/query new-query)
+                   (put :dmenu/selected (clamp selected 0
+                                          (max 0 (- (length new-results) 1)))))})
+
         (or (= sym "Up") (and (= sym "p") (info :ctrl)))
         {:db (put db :dmenu/selected (max 0 (- selected 1)))}
 

@@ -341,6 +341,35 @@
                      (put :launcher/selected (clamp selected 0
                                               (max 0 (- (length new-results) 1)))))})
 
+          # Ctrl+W: delete word
+          (and (= sym "w") (info :ctrl))
+          (let [# Find last space or mode prefix boundary
+                new-query (do
+                            (var end (length query))
+                            # Skip trailing spaces
+                            (while (and (> end 0) (= (get query (- end 1)) (chr " ")))
+                              (-- end))
+                            # Skip word chars
+                            (while (and (> end 0) (not= (get query (- end 1)) (chr " ")))
+                              (-- end))
+                            (string/slice query 0 end))
+                [new-mode new-stripped] (parse-mode new-query)
+                new-items (build-items db new-mode)
+                new-results (filter-items new-items new-stripped)]
+            {:db (-> db
+                     (put :launcher/query new-query)
+                     (put :launcher/items new-items)
+                     (put :launcher/selected (clamp selected 0
+                                              (max 0 (- (length new-results) 1)))))})
+
+          # Ctrl+U: clear line
+          (and (= sym "u") (info :ctrl))
+          (let [new-items (build-items db :all)]
+            {:db (-> db
+                     (put :launcher/query "")
+                     (put :launcher/items new-items)
+                     (put :launcher/selected 0))})
+
           (or (= sym "Up") (and (= sym "p") (info :ctrl)))
           {:db (put db :launcher/selected (max 0 (- selected 1)))}
 
