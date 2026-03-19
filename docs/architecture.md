@@ -47,7 +47,8 @@ otherwise from embedded defaults.
 | `clock.janet` | Clock data source (1s timer, os/date) |
 | `sysinfo.janet` | CPU, memory, battery, disk, network data sources |
 | `bar.janet` | Status bar view (workspaces, title, system info modules) |
-| `launcher.janet` | Universal seam: launcher/command palette (windows, tags) |
+| `launcher.janet` | Universal seam: launcher/command palette (apps, windows, tags, actions) |
+| `dmenu.janet` | dmenu compatibility: stdin/stdout item picker (loaded in `--dmenu` mode) |
 
 ---
 
