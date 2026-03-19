@@ -95,6 +95,18 @@ in {
       default = {};
       description = "Base16 theme colors and font config.";
     };
+
+    initExtra = lib.mkOption {
+      type = lib.types.lines;
+      default = "";
+      description = "Extra Janet code for ~/.config/shoal/init.janet. Loaded after stdlib modules, before views. Use for custom handlers, subscriptions, and data sources.";
+    };
+
+    barConfig = lib.mkOption {
+      type = lib.types.nullOr lib.types.lines;
+      default = null;
+      description = "Custom bar view Janet code for ~/.config/shoal/bar.janet. Overrides the built-in default bar.";
+    };
   };
 
   config = lib.mkIf cfg.enable (lib.mkMerge [
@@ -119,6 +131,15 @@ in {
     # Generate config file when surfaces or theme are configured
     (lib.mkIf (cfg.surfaces != {} || cfg.theme != {}) {
       xdg.configFile."shoal/config.json".text = configJson;
+    })
+
+    # Generate user Janet files
+    (lib.mkIf (cfg.initExtra != "") {
+      xdg.configFile."shoal/init.janet".text = cfg.initExtra;
+    })
+
+    (lib.mkIf (cfg.barConfig != null) {
+      xdg.configFile."shoal/bar.janet".text = cfg.barConfig;
     })
 
     # Stylix integration
