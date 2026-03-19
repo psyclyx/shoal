@@ -416,6 +416,24 @@
           {:db (put db :launcher/selected idx)
            :dispatch [:launcher/select]})))))
 
+(reg-event-handler :scroll
+  (fn [cofx event]
+    (def db (cofx :db))
+    (when (get db :launcher/open?)
+      (def dir (get event 1 ""))
+      (def selected (get db :launcher/selected 0))
+      (def items (get db :launcher/items []))
+      (def query (get db :launcher/query ""))
+      (def [mode stripped] (parse-mode query))
+      (def results (filter-items items stripped))
+      (def result-count (length results))
+      (cond
+        (= dir "up")
+        {:db (put db :launcher/selected (max 0 (- selected 1)))}
+        (= dir "down")
+        {:db (put db :launcher/selected (min (max 0 (- result-count 1))
+                                              (+ selected 1)))}))))
+
 # --- Signal integration: tidepool signals can trigger the launcher ---
 
 (reg-event-handler :tp/signal
