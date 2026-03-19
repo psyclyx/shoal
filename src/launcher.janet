@@ -8,6 +8,7 @@
 #   @      — windows only
 #   #      — tags only
 #   !      — apps only
+#   >      — tidepool actions
 
 # --- Helpers ---
 
@@ -31,12 +32,25 @@
     (string/has-prefix? "@" query) [:window (string/slice query 1)]
     (string/has-prefix? "#" query) [:tag (string/slice query 1)]
     (string/has-prefix? "!" query) [:app (string/slice query 1)]
+    (string/has-prefix? ">" query) [:action (string/slice query 1)]
     [:all query]))
 
 (defn- build-items [db mode]
   "Build the item list based on the current mode."
   (def tp (get db :tp {}))
   (def items @[])
+
+  # Actions (from tidepool action registry)
+  (when (= mode :action)
+    (each act (get db :launcher/actions [])
+      (def key (get act :key ""))
+      (def label (string (act :name)
+                         (when (> (length key) 0) (string "  [" key "]"))
+                         (when (get act :desc)
+                           (string " — " (act :desc)))))
+      (array/push items {:label label
+                         :kind :action
+                         :action-name (act :name)})))
 
   # Apps (from desktop files, cached in db)
   (when (or (= mode :all) (= mode :app))
@@ -74,6 +88,12 @@
 
   items)
 
+(defn- launcher/tp-socket-path []
+  (let [runtime (os/getenv "XDG_RUNTIME_DIR")
+        display (os/getenv "WAYLAND_DISPLAY")]
+    (when (and runtime display)
+      (string runtime "/tidepool-" display))))
+
 # --- Subscriptions ---
 
 (reg-sub :launcher/open?
@@ -107,6 +127,7 @@
   (def active (= idx selected))
   (def kind-color (case (item :kind)
                     :app (theme :base0B)
+                    :action (theme :base0E)
                     :window accent
                     :tag muted
                     subtle))
@@ -139,7 +160,7 @@
       [:text {:color subtle :size 11}
         (string (length results) " result"
                 (if (not= (length results) 1) "s" "")
-                " · !apps @windows #tags")]]])
+                " · !apps @windows #tags >actions")]]])
 
 (reg-view :launcher launcher-view)
 
@@ -173,7 +194,14 @@
                         :height 460
                         :anchor {:top true}
                         :margin {:top 200}
-                        :keyboard-interactivity :exclusive}}}))
+                        :keyboard-interactivity :exclusive}}
+     # Request action list from tidepool via a separate query connection
+     :ipc {:connect {:path (launcher/tp-socket-path)
+                     :name :tp-query
+                     :framing :netrepl
+                     :handshake "\xFF{:name \"shoal-query\"}"
+                     :event :tp-query/recv
+                     :connected :tp-query/connected}}}))
 
 (reg-event-handler :launcher/close
   (fn [cofx event]
@@ -182,7 +210,40 @@
              (put :launcher/query "")
              (put :launcher/items [])
              (put :launcher/selected 0))
-     :surface {:destroy :launcher}}))
+     :surface {:destroy :launcher}
+     :ipc {:disconnect {:name :tp-query}}}))
+
+# -- Tidepool query connection (for action introspection) --
+
+(reg-event-handler :tp-query/connected
+  (fn [cofx event]
+    {:ipc {:send {:name :tp-query
+                  :data "(ipc/list-actions)\n"}}}))
+
+(reg-event-handler :tp-query/recv
+  (fn [cofx event]
+    (def msg-type (get event 1))
+    (def payload (get event 2))
+    (when (= msg-type :return)
+      (var result {:ipc {:disconnect {:name :tp-query}}})
+      (try
+        (do
+          (def actions (json/decode payload true))
+          (when (and actions (indexed? actions))
+            (set result
+              {:db (-> (cofx :db)
+                       (put :launcher/actions actions)
+                       (|(let [q (get $ :launcher/query "")
+                               [mode stripped] (parse-mode q)]
+                           (if (= mode :action)
+                             (-> $
+                                 (put :launcher/items (build-items $ :action))
+                                 (put :launcher/selected 0))
+                             $))))
+               :ipc {:disconnect {:name :tp-query}}})))
+        ([err]
+          (eprintf "launcher: action list parse error: %s" (string err))))
+      result)))
 
 (reg-event-handler :launcher/select
   (fn [cofx event]
@@ -196,6 +257,7 @@
       (def item (results selected))
       (case (item :kind)
         :app    {:exec {:cmd (item :exec)} :dispatch [:launcher/close]}
+        :action {:dispatch-n [[:tp/dispatch-action (item :action-name)] [:launcher/close]]}
         :window {:dispatch-n [[:tp/focus-window (item :wid)] [:launcher/close]]}
         :tag    {:dispatch-n [[:tp/focus-tag (item :tag-num)] [:launcher/close]]}
         {:dispatch [:launcher/close]}))))
@@ -252,8 +314,8 @@
                                                (+ selected 1)))}
 
           (= sym "Tab")
-          (let [next-mode (case mode :all :app :app :window :window :tag :tag :all)
-                prefix (case next-mode :app "!" :window "@" :tag "#" "")
+          (let [next-mode (case mode :all :app :app :window :window :tag :tag :action :action :all)
+                prefix (case next-mode :app "!" :window "@" :tag "#" :action ">" "")
                 new-items (build-items db next-mode)]
             {:db (-> db
                      (put :launcher/query prefix)

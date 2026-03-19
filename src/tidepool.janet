@@ -237,6 +237,11 @@
   (fn [cofx event]
     (tp/dispatch-cmd "float")))
 
+(reg-event-handler :tp/dispatch-action
+  (fn [cofx event]
+    (def name (get event 1 ""))
+    (tp/dispatch-cmd name)))
+
 # -- Subscriptions --
 
 (reg-sub :tp (fn [db] (get db :tp {})))
