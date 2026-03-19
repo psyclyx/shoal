@@ -166,7 +166,7 @@
                     :tag muted
                     subtle))
   [:row {:id (string "result-" idx) :w :grow :h 32
-         :bg (if active overlay-color bg)
+         :bg (if active (theme :base02) surface-color)
          :radius 4 :pad [4 12] :align-y :center :gap 8}
     [:row {:w 4 :h 16 :bg (if active kind-color [0 0 0 0]) :radius 2}]
     [:text {:color (if active bright text-color) :size 14}
@@ -177,7 +177,7 @@
   (def results (sub :launcher/results))
   (def selected (sub :launcher/selected))
   (def reveal (anim :launcher/reveal))
-  (def max-visible 12)
+  (def max-visible 10)
   (def total (length results))
 
   # Scroll offset: keep selected item visible
@@ -186,16 +186,18 @@
   (def visible-end (min total (+ scroll-off max-visible)))
 
   (def alpha (math/floor (* reveal 255)))
-  (def bg-a [(bg 0) (bg 1) (bg 2) alpha])
+  (def launcher-bg surface-color)
+  (def input-bg overlay-color)
 
-  [:col {:w :grow :h :grow :bg bg-a :radius 8 :pad 12}
+  [:col {:w :grow :h :grow :bg [(launcher-bg 0) (launcher-bg 1) (launcher-bg 2) alpha]
+         :radius 8 :pad 12}
     # Input field
-    [:row {:h 40 :w :grow :bg [(surface-color 0) (surface-color 1) (surface-color 2) alpha]
+    [:row {:h 40 :w :grow :bg [(input-bg 0) (input-bg 1) (input-bg 2) alpha]
            :radius 6 :pad [8 12] :align-y :center}
-      [:text {:color text-color :size 16}
+      [:text {:color bright :size 16}
         (string query "│")]]
     # Results list
-    [:col {:w :grow :h :grow :gap 2 :pad [8 0 0 0]}
+    [:col {:w :grow :gap 2 :pad [8 0 0 0]}
       ;(seq [i :range [scroll-off visible-end]
              :let [item (results i)]]
          (result-item i item selected))]
@@ -321,7 +323,7 @@
       # Eval: send arbitrary Janet to tidepool REPL
       :eval
       (when (> (length stripped) 0)
-        {:ipc {:send {:name :tidepool :data (string stripped "\n")}}
+        {:ipc {:send {:name :tp-cmd :data (string stripped "\n")}}
          :dispatch [:launcher/close]})
 
       # Normal item selection
@@ -338,7 +340,7 @@
 (reg-event-handler :tp/focus-window
   (fn [cofx event]
     (def wid (get event 1 0))
-    {:ipc {:send {:name :tidepool
+    {:ipc {:send {:name :tp-cmd
                   :data (string "(ipc/dispatch \"focus-window\" " wid ")\n")}}}))
 
 # --- Keyboard handling (only when launcher is open) ---

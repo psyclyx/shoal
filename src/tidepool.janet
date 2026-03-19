@@ -135,8 +135,34 @@
                        :event :tp/recv
                        :connected :tp/connected
                        :disconnected :tp/disconnected
-                       :reconnect 1.0}}}
+                       :reconnect 1.0}}
+       :dispatch [:tp-cmd/init]}
       {:db (put (cofx :db) :tp {:connected false})})))
+
+# Command connection — separate from the watch stream
+(reg-event-handler :tp-cmd/init
+  (fn [cofx event]
+    (def path (tidepool-socket-path))
+    (when path
+      {:ipc {:connect {:path path
+                       :name :tp-cmd
+                       :framing :netrepl
+                       :handshake "\xFF{:name \"shoal-cmd\"}"
+                       :event :tp-cmd/recv
+                       :connected :tp-cmd/connected
+                       :disconnected :tp-cmd/disconnected
+                       :reconnect 1.0}}})))
+
+(reg-event-handler :tp-cmd/connected
+  (fn [cofx event]
+    (eprintf "tp-cmd: command channel connected")))
+
+(reg-event-handler :tp-cmd/disconnected
+  (fn [cofx event]
+    (eprintf "tp-cmd: command channel disconnected")))
+
+(reg-event-handler :tp-cmd/recv
+  (fn [cofx event] nil))
 
 (reg-event-handler :tp/connected
   (fn [cofx event]
@@ -190,11 +216,12 @@
 
 (defn- tp/dispatch-cmd [& args]
   "Build an :ipc send fx that dispatches an action to tidepool.
-  Args are stringified and passed to (ipc/dispatch ...)."
-  {:ipc {:send {:name :tidepool
-                :data (string "(ipc/dispatch "
-                              (string/join (map |(string/format "%q" $) args) " ")
-                              ")\n")}}})
+  Args are stringified and passed to (ipc/dispatch ...) on the command channel."
+  (def cmd (string "(ipc/dispatch "
+                   (string/join (map |(string/format "%q" $) args) " ")
+                   ")\n"))
+  {:ipc {:send {:name :tp-cmd
+                :data cmd}}})
 
 # Common action event handlers
 (reg-event-handler :tp/focus-tag

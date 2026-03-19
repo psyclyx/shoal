@@ -245,7 +245,12 @@ pub const Dispatch = struct {
         // Look up handler
         const handler_entry = self.pcall(self.fn_get_handler, &.{event_id}) orelse return;
         if (c.janet_checktype(handler_entry, c.JANET_NIL) != 0) {
-            log.debug("dispatch: no handler for event", .{});
+            if (c.janet_checktype(event_id, c.JANET_KEYWORD) != 0) {
+                const kw_str = std.mem.span(c.janet_unwrap_keyword(event_id));
+                log.debug("dispatch: no handler for :{s}", .{kw_str});
+            } else {
+                log.debug("dispatch: no handler for event", .{});
+            }
             return;
         }
         // Root handler_entry — for composed multi-handlers, get-handler returns
