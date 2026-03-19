@@ -392,13 +392,10 @@ pub fn main() !void {
         // Check timers, process event queue
         dispatch.checkTimers();
         var db_changed = false;
-        const loop_t0 = std.time.microTimestamp();
         _ = dispatch.processQueue();
-        const loop_t1 = std.time.microTimestamp();
 
         // Process surface lifecycle requests from Janet
         processSurfaceRequests();
-        const loop_t2 = std.time.microTimestamp();
 
         if (dispatch.render_dirty) {
             dispatch.render_dirty = false;
@@ -417,19 +414,7 @@ pub fn main() !void {
         }
 
         if (db_changed) {
-            // DB or explicit render change — all surfaces need re-render
-            const loop_t3 = std.time.microTimestamp();
             markAllDirty();
-            const loop_t4 = std.time.microTimestamp();
-            const total = loop_t4 - loop_t0;
-            if (total > 2000) { // only log if > 2ms
-                log.info("loop: total={d}us queue={d}us surface={d}us render={d}us", .{
-                    total,
-                    loop_t1 - loop_t0,
-                    loop_t2 - loop_t1,
-                    loop_t4 - loop_t3,
-                });
-            }
         } else if (anim_active) {
             // Only animations changed — only dynamic surfaces use animations
             markDynamicDirty();
@@ -828,7 +813,6 @@ fn janetIntField(collection: janet.Janet, key: [:0]const u8) i32 {
 fn renderSurface(surf: *Surface) bool {
     if (!surf.configured or surf.egl_surface == c.EGL_NO_SURFACE) return false;
 
-    const t0 = std.time.microTimestamp();
     if (!surf.makeCurrent()) return false;
 
     const w: f32 = @floatFromInt(surf.width);
@@ -849,17 +833,13 @@ fn renderSurface(surf: *Surface) bool {
     renderer.begin(w, h);
     layout.setDimensions(w, h);
 
-    const t2 = std.time.microTimestamp();
     layout.beginLayout();
     dispatch.prepareRender();
     hiccup_mod.beginPass();
     const view_name = if (surf.view_name_str) |name| janet.kw(name) else janet.c.janet_wrap_nil();
     _ = dispatch.renderView(view_name);
-    const t2a = std.time.microTimestamp();
     layout.endLayout();
-    const t2b = std.time.microTimestamp();
     hiccup_mod.endPass();
-    const t3 = std.time.microTimestamp();
 
     // After layout: track hover changes and check for clicks on pointer surface
     if (is_pointer_surface) {
@@ -922,24 +902,8 @@ fn renderSurface(surf: *Surface) bool {
         _ = dispatch.processQueue();
     }
 
-    const t4 = std.time.microTimestamp();
     renderer.end();
     _ = c.eglSwapBuffers(egl_display, surf.egl_surface);
-    const t5 = std.time.microTimestamp();
-
-    const name = if (surf.view_name_str) |n| n else "bar";
-    const total = t5 - t0;
-    if (total > 1000) { // only log if > 1ms
-        log.info("render {s}: total={d}us view={d}us clay={d}us pass={d}us draw={d}us swap={d}us", .{
-            name,
-            total,
-            t2a - t2,
-            t2b - t2a,
-            t3 - t2b,
-            t4 - t3,
-            t5 - t4,
-        });
-    }
     return true;
 }
 
