@@ -78,7 +78,7 @@
         (def total-mb (math/floor (/ total-kb 1024)))
         {:db (put (cofx :db) :mem {:used-mb used-mb
                                     :total-mb total-mb
-                                    :percent (math/floor (* 100 (/ (- total-kb avail-kb) total-kb)))})}))))
+                                    :percent (math/round (* 100.0 (/ (- total-kb avail-kb) total-kb)))})}))))
 
 (reg-event-handler :init
   (fn [cofx event]
