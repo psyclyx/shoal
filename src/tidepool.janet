@@ -158,9 +158,13 @@
       (var db (cofx :db))
       (each line (string/split "\n" payload)
         (when (> (length line) 0)
-          (def data (json/decode line true))
-          (when data
-            (set db (tp/apply-event db data)))))
+          (try
+            (do
+              (def data (json/decode line true))
+              (when data
+                (set db (tp/apply-event db data))))
+            ([err]
+              (eprintf "tidepool: recv error: %s (line: %.80s)" (string err) line)))))
       {:db db})))
 
 # -- Action helpers: send commands to tidepool --
