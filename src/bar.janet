@@ -161,7 +161,7 @@
                             rw (get rows r)
                             row-focused (and rw (rw :focused))
                             color (if row-focused accent base-color)]]
-                  [:row {:w scaled-w :h row-h :bg color :radius 1}])]))]))))
+                  [:row {:w scaled-w :h row-h :bg color :radius 1}])])]))))
 
 # -- Title --
 

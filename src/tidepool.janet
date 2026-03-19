@@ -147,8 +147,7 @@
 
 (reg-event-handler :tp/disconnected
   (fn [cofx event]
-    {:db (put (cofx :db) :tp
-              (merge (get (cofx :db) :tp {}) {:connected false}))}))
+    {:db (put (cofx :db) :tp {:connected false})}))
 
 (reg-event-handler :tp/recv
   (fn [cofx event]
