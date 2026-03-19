@@ -9,6 +9,8 @@
 #   #      — tags only
 #   !      — apps only
 #   >      — tidepool actions
+#   :      — tidepool command (dispatched directly)
+#   =      — eval Janet on tidepool REPL
 
 # --- Helpers ---
 
@@ -33,6 +35,8 @@
     (string/has-prefix? "#" query) [:tag (string/slice query 1)]
     (string/has-prefix? "!" query) [:app (string/slice query 1)]
     (string/has-prefix? ">" query) [:action (string/slice query 1)]
+    (string/has-prefix? ":" query) [:command (string/slice query 1)]
+    (string/has-prefix? "=" query) [:eval (string/slice query 1)]
     [:all query]))
 
 (defn- build-items [db mode]
@@ -156,11 +160,15 @@
              :let [item (results i)]]
          (result-item i item selected))]
     # Footer hint
+    (def [mode _] (parse-mode query))
     [:row {:h 20 :w :grow :align-x :center :align-y :center}
       [:text {:color subtle :size 11}
-        (string (length results) " result"
-                (if (not= (length results) 1) "s" "")
-                " · !apps @windows #tags >actions")]]])
+        (case mode
+          :command "Enter to dispatch action · Esc to cancel"
+          :eval "Enter to evaluate · Esc to cancel"
+          (string (length results) " result"
+                  (if (not= (length results) 1) "s" "")
+                  " · !apps @windows #tags >actions :cmd =eval"))]]])
 
 (reg-view :launcher launcher-view)
 
@@ -253,14 +261,30 @@
     (def [mode stripped] (parse-mode query))
     (def results (filter-items items stripped))
     (def selected (get db :launcher/selected 0))
-    (when (and (> (length results) 0) (<= selected (- (length results) 1)))
-      (def item (results selected))
-      (case (item :kind)
-        :app    {:exec {:cmd (item :exec)} :dispatch [:launcher/close]}
-        :action {:dispatch-n [[:tp/dispatch-action (item :action-name)] [:launcher/close]]}
-        :window {:dispatch-n [[:tp/focus-window (item :wid)] [:launcher/close]]}
-        :tag    {:dispatch-n [[:tp/focus-tag (item :tag-num)] [:launcher/close]]}
-        {:dispatch [:launcher/close]}))))
+    (def query (get db :launcher/query ""))
+    (def [mode stripped] (parse-mode query))
+
+    (case mode
+      # Direct command: dispatch action by name
+      :command
+      (when (> (length stripped) 0)
+        {:dispatch-n [[:tp/dispatch-action stripped] [:launcher/close]]})
+
+      # Eval: send arbitrary Janet to tidepool REPL
+      :eval
+      (when (> (length stripped) 0)
+        {:ipc {:send {:name :tidepool :data (string stripped "\n")}}
+         :dispatch [:launcher/close]})
+
+      # Normal item selection
+      (when (and (> (length results) 0) (<= selected (- (length results) 1)))
+        (def item (results selected))
+        (case (item :kind)
+          :app    {:exec {:cmd (item :exec)} :dispatch [:launcher/close]}
+          :action {:dispatch-n [[:tp/dispatch-action (item :action-name)] [:launcher/close]]}
+          :window {:dispatch-n [[:tp/focus-window (item :wid)] [:launcher/close]]}
+          :tag    {:dispatch-n [[:tp/focus-tag (item :tag-num)] [:launcher/close]]}
+          {:dispatch [:launcher/close]})))))
 
 # Focus a window by wid — send to tidepool
 (reg-event-handler :tp/focus-window
@@ -314,8 +338,8 @@
                                                (+ selected 1)))}
 
           (= sym "Tab")
-          (let [next-mode (case mode :all :app :app :window :window :tag :tag :action :action :all)
-                prefix (case next-mode :app "!" :window "@" :tag "#" :action ">" "")
+          (let [next-mode (case mode :all :app :app :window :window :tag :tag :action :action :command :command :eval :eval :all)
+                prefix (case next-mode :app "!" :window "@" :tag "#" :action ">" :command ":" :eval "=" "")
                 new-items (build-items db next-mode)]
             {:db (-> db
                      (put :launcher/query prefix)
