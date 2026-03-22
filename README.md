@@ -3,8 +3,6 @@
 Wayland layer-shell toolkit for building desktop shell surfaces — status bars,
 launchers, OSD overlays, and more.
 
-Part of the [privclyx](https://github.com/privclyx) desktop environment.
-
 ## Architecture
 
 Shoal separates concerns into five layers:
@@ -38,7 +36,7 @@ the compositor integration and everything keeps working.
 | `sway.janet` | swaymsg + JSON events | Base implementation |
 
 **Presets** are Zig files that select a compositor + module set at compile time.
-`privclyx.zig` bundles tidepool + all modules. `sway.zig` bundles sway + all
+`tidepool.zig` bundles tidepool + all modules. `sway.zig` bundles sway + all
 modules.
 
 See [docs/architecture.md](docs/architecture.md) for the full design.

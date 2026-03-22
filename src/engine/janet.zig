@@ -22,7 +22,7 @@ pub const IndexedView = jutil.IndexedView;
 
 const boot_source = @embedFile("../framework/shoal.janet");
 const json_source = @embedFile("../framework/json.janet");
-const preset = @import("../presets/privclyx.zig");
+const preset = @import("../presets/tidepool.zig");
 
 /// Initialize the Janet VM. Must be called before any other Janet operations.
 pub fn init() !void {

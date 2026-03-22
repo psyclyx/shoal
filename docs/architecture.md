@@ -88,7 +88,7 @@ The active preset is imported by the engine at compile time.
 
 | File | Compositor | Modules |
 |------|-----------|---------|
-| `privclyx.zig` | tidepool | clock, sysinfo, bar, launcher, osd |
+| `tidepool.zig` | tidepool | clock, sysinfo, bar, launcher, osd |
 | `sway.zig` | sway | clock, sysinfo, bar, launcher, osd |
 
 To switch presets, change the import in `src/engine/janet.zig`.

@@ -1,4 +1,4 @@
-pub const name = "privclyx";
+pub const name = "tidepool";
 
 pub const modules = .{
     .{ .name = "tidepool.janet", .source = @embedFile("../compositors/tidepool.janet") },
