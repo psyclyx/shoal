@@ -109,15 +109,17 @@
     ([_] nil)))
 
 (defn- find-battery-path []
-  "Discover battery sysfs path. Handles BAT0, BAT1, macsmc-battery, etc."
+  "Discover battery sysfs path. Handles BAT0, BAT1, macsmc-battery, etc.
+   Skips peripheral batteries (scope=Device) like mice/keyboards."
   (var result nil)
   (try
     (each entry (os/dir "/sys/class/power_supply")
-      (def type-path (string "/sys/class/power_supply/" entry "/type"))
-      (when (= (slurp-trim type-path) "Battery")
-        (def cap-path (string "/sys/class/power_supply/" entry "/capacity"))
-        (when (slurp-trim cap-path)
-          (set result (string "/sys/class/power_supply/" entry))
+      (def base (string "/sys/class/power_supply/" entry))
+      (when (= (slurp-trim (string base "/type")) "Battery")
+        (def scope (slurp-trim (string base "/scope")))
+        (when (and (not= scope "Device")
+                   (slurp-trim (string base "/capacity")))
+          (set result base)
           (break))))
     ([_] nil))
   result)

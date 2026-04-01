@@ -1,7 +1,7 @@
 # bar — status bar view
 #
 # Pure Janet view functions producing hiccup for a status bar.
-# Layout: left (workspaces, layout glyph, scroll minimap) | center (title) | right (clock, cpu, mem, bat)
+# Layout: left (workspaces, scroll minimap) | center (title) | right (clock, cpu, mem, bat)
 #
 # Uses wm/* subscriptions (compositor-agnostic), clock.janet, sysinfo.janet.
 # Theme colors from config (Base16) in 0-255 RGBA.
@@ -22,7 +22,7 @@
 # -- Derived subscriptions --
 
 (reg-sub :wm/focused-output [:wm/outputs]
-  (fn [outputs] (find |($ :focused) outputs)))
+  (fn [outputs] (find |(get $ "focused") outputs)))
 
 # -- Helper: pill wrapper --
 
@@ -50,119 +50,32 @@
            :when (or (tag :focused) (tag :occupied))]
        (tag-view i tag))])
 
-# -- Layout glyph --
-
-(defn- layout-glyph []
-  (def name (sub :wm/layout))
-  (when (and name (> (length name) 0))
-    (def c muted)
-    (def hi accent)
-    (def glyph
-    (match name
-      "master-stack"
-      [:row {:gap 1 :h 16 :align-y :center}
-        [:row {:w 10 :h 16 :bg hi :radius 1}]
-        [:col {:gap 1}
-          [:row {:w 5 :h 7 :bg c :radius 1}]
-          [:row {:w 5 :h 7 :bg c :radius 1}]]]
-      "grid"
-      [:col {:gap 1}
-        [:row {:gap 1}
-          [:row {:w 7 :h 7 :bg c :radius 1}]
-          [:row {:w 7 :h 7 :bg c :radius 1}]]
-        [:row {:gap 1}
-          [:row {:w 7 :h 7 :bg c :radius 1}]
-          [:row {:w 7 :h 7 :bg c :radius 1}]]]
-      "monocle"
-      [:row {:w 16 :h 16 :bg hi :radius 2 :border-color c :border-width 1}]
-      "scroll"
-      [:row {:gap 1 :h 16 :align-y :center}
-        [:row {:w 4 :h 12 :bg c :radius 1}]
-        [:row {:w 5 :h 16 :bg hi :radius 1}]
-        [:row {:w 4 :h 12 :bg c :radius 1}]]
-      "dwindle"
-      [:col {:gap 1 :w 16}
-        [:row {:w 16 :h 8 :bg hi :radius 1}]
-        [:row {:gap 1 :h 7}
-          [:row {:w 8 :h 7 :bg c :radius 1}]
-          [:col {:gap 1}
-            [:row {:w 7 :h 3 :bg c :radius 1}]
-            [:row {:w 7 :h 3 :bg c :radius 1}]]]]
-      "tabbed"
-      [:col {:gap 0 :h 16}
-        [:row {:gap 1 :h 4 :align-y :center}
-          [:row {:w 5 :h 4 :bg hi :radius [1 1 0 0]}]
-          [:row {:w 4 :h 3 :bg c :radius [1 1 0 0]}]
-          [:row {:w 4 :h 3 :bg c :radius [1 1 0 0]}]]
-        [:row {:w 15 :h 11 :bg [(hi 0) (hi 1) (hi 2) 80] :radius [0 0 1 1]}]]
-      "centered-master"
-      [:row {:gap 1 :h 16 :align-y :center}
-        [:row {:w 4 :h 12 :bg c :radius 1}]
-        [:row {:w 8 :h 16 :bg hi :radius 1}]
-        [:row {:w 4 :h 12 :bg c :radius 1}]]
-      # fallback: text
-      [:text {:color subtle :size 11} name]))
-    [:row {:id "layout" :align-y :center :pad [2 4]} glyph]))
-
 # -- Scroll minimap --
 
 (defn- scroll-minimap []
   (def focused-out (sub :wm/focused-output))
-  (when (and focused-out (= (focused-out :layout) "scroll"))
-    (def vp (get focused-out :viewport))
-    (when (and vp (get vp :column-widths) (> (get vp :total-content-w 0) 0))
-      (def col-widths (vp :column-widths))
-      (def total-w (vp :total-content-w))
-      (def vp-w (get vp :w 0))
-      (def scroll-off (get vp :scroll-offset 0))
+  (when focused-out
+    (def columns (get focused-out "columns" []))
+    (when (> (length columns) 0)
       (def minimap-h 18)
-      (def minimap-w (min 180 (max 60 (* minimap-h (/ total-w (max 1 (get vp :h 1)))))))
-      (def scale (/ minimap-w (max 1 total-w)))
-
-      (def windows (sub :wm/windows))
-      (def focused-win (find |($ :focused) windows))
-      (def focused-col (when focused-win (get focused-win :column)))
-
-      # Group visible windows by column index
-      (def col-rows @{})
-      (each w windows
-        (when (w :visible)
-          (def ci (w :column))
-          (def existing (get col-rows ci @[]))
-          (array/push existing w)
-          (put col-rows ci existing)))
-
-      # Build column position table
-      (var cx 0)
-      (def columns
-        (seq [i :range [0 (length col-widths)]
-              :let [cw (get col-widths i 0)
-                    x cx]]
-          (do (set cx (+ cx cw))
-              {:x x :w cw :i i})))
-
-      (def vp-end (+ scroll-off vp-w))
+      # Sum widths, scale proportionally
+      (def total-w (sum (map |(get $ "width" 1) columns)))
+      (def minimap-w (min 180 (max 60 (* minimap-h (max 1 (* total-w 1.5))))))
+      (def scale (/ minimap-w (max 0.01 total-w)))
 
       [:row {:gap 1 :align-y :center :pad [2 4] :bg surface :radius 6}
         ;(seq [col :in columns
-               :let [in-vp (and (< (col :x) vp-end)
-                                (> (+ (col :x) (col :w)) scroll-off))
-                     is-focused (= (col :i) focused-col)
-                     scaled-w (max 3 (math/floor (* (col :w) scale)))
-                     rows (get col-rows (col :i))
-                     n-rows (if rows (length rows) 1)
-                     base-color (cond
-                                  is-focused accent
-                                  in-vp overlay
-                                  [(muted 0) (muted 1) (muted 2) 100])]]
-           (if (<= n-rows 1)
+               :let [is-focused (get col "focused" false)
+                     n-leaves (get col "leaves" 1)
+                     col-w (get col "width" 1)
+                     scaled-w (max 3 (math/floor (* col-w scale)))
+                     base-color (if is-focused accent overlay)]]
+           (if (<= n-leaves 1)
              [:row {:w scaled-w :h minimap-h :bg base-color :radius 2}]
              [:col {:gap 1 :w scaled-w :h minimap-h :radius 2}
-               ;(seq [r :range [0 n-rows]
-                      :let [row-h (max 2 (math/floor (/ (- minimap-h (- n-rows 1)) n-rows)))
-                            rw (get rows r)
-                            row-focused (and rw (rw :focused))
-                            color (if row-focused accent base-color)]]
+               ;(seq [r :range [0 n-leaves]
+                      :let [row-h (max 2 (math/floor (/ (- minimap-h (- n-leaves 1)) n-leaves)))
+                            color base-color]]
                   [:row {:w scaled-w :h row-h :bg color :radius 1}])]))])))
 
 # -- Title --
@@ -274,10 +187,9 @@
 
 (defn- bar-view []
   [:row {:w :grow :h :grow :pad [0 8] :bg bg :radius 8 :align-y :center}
-    # Left: workspaces + layout + minimap + launcher
+    # Left: workspaces + minimap + launcher
     [:row {:w :grow :gap 6 :align-y :center}
       (workspaces-view)
-      (layout-glyph)
       (scroll-minimap)
       (launcher-trigger)]
     # Center: title
@@ -318,9 +230,6 @@
       (= id "launcher")
       {:dispatch [:launcher/open]}
 
-      (= id "layout")
-      {:dispatch [:wm/cycle-layout "next"]}
-
       (= id "audio")
       {:dispatch [:osd/volume-mute]}
 
@@ -347,10 +256,6 @@
                    (min 9 (+ current 1)))]
         (when (not= next current)
           {:dispatch [:wm/focus-tag next]}))
-
-      # Scroll on layout glyph: cycle layout
-      (= id "layout")
-      {:dispatch [:wm/cycle-layout (if (= dir "up") "prev" "next")]}
 
       # Scroll on audio: adjust volume
       (= id "audio")
