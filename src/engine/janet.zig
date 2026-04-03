@@ -143,6 +143,7 @@ pub const Dispatch = struct {
     fn_get_fx_executor: Janet = undefined,
     fn_bump_generation: Janet = undefined,
     fn_set_current_db: Janet = undefined,
+    fn_set_current_output: Janet = undefined,
     fn_get_view_fn: Janet = undefined,
 
     /// Load the shoal boot file into a fresh environment. Sets up registries.
@@ -193,6 +194,7 @@ pub const Dispatch = struct {
         self.fn_get_fx_executor = envLookup(self.env, "get-fx-executor") orelse return error.BootMissingGetFxExecutor;
         self.fn_bump_generation = envLookup(self.env, "bump-generation") orelse return error.BootMissingBumpGeneration;
         self.fn_set_current_db = envLookup(self.env, "set-current-db") orelse return error.BootMissingSetCurrentDb;
+        self.fn_set_current_output = envLookup(self.env, "set-current-output") orelse return error.BootMissingSetCurrentOutput;
         self.fn_get_view_fn = envLookup(self.env, "get-view-fn") orelse return error.BootMissingGetViewFn;
 
         // Initialize the hiccup walker (pre-intern keywords)
@@ -852,8 +854,14 @@ pub const Dispatch = struct {
     }
 
     /// Set the current db for subscription evaluation. Call before view fn.
-    pub fn prepareRender(self: *Dispatch) void {
+    pub fn prepareRender(self: *Dispatch, output_name: []const u8) void {
         _ = self.pcall(self.fn_set_current_db, &.{self.db});
+        if (output_name.len > 0) {
+            const name_str = c.janet_wrap_string(c.janet_string(output_name.ptr, @intCast(output_name.len)));
+            _ = self.pcall(self.fn_set_current_output, &.{name_str});
+        } else {
+            _ = self.pcall(self.fn_set_current_output, &.{c.janet_wrap_nil()});
+        }
     }
 
     /// Call the registered view function and walk the resulting hiccup tree.

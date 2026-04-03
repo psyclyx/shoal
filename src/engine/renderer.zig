@@ -93,7 +93,9 @@ const frag_src: [*c]const u8 =
     \\void main() {
     \\    if (v_mode > 0.5) {
     \\        // Texture (glyph atlas) mode -- single-channel alpha
-    \\        float a = texture(u_atlas, v_uv).r;
+    \\        // Gamma-correct the coverage: FreeType produces linear coverage
+    \\        // but we blend in sRGB space, so boost midtones (approx sRGB transfer).
+    \\        float a = pow(texture(u_atlas, v_uv).r, 1.0 / 2.2);
     \\        frag_color = vec4(v_color.rgb, v_color.a * a);
     \\    } else {
     \\        // Solid colour with rounded-rect SDF antialiasing

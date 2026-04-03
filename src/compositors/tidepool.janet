@@ -144,5 +144,6 @@
 (reg-sub :wm/connected [:wm] (fn [wm] (get wm :connected false)))
 (reg-sub :wm/tags [:wm] (fn [wm] (get wm :tags [])))
 (reg-sub :wm/outputs [:wm] (fn [wm] (get wm :outputs [])))
+(reg-sub :wm/occupied-tags [:wm] (fn [wm] (get wm :occupied-tags [])))
 (reg-sub :wm/title [:wm] (fn [wm] (get wm :title "")))
 (reg-sub :wm/app-id [:wm] (fn [wm] (get wm :app-id "")))

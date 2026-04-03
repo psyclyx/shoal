@@ -834,7 +834,7 @@ fn renderSurface(surf: *Surface) bool {
     layout.setDimensions(w, h);
 
     layout.beginLayout();
-    dispatch.prepareRender();
+    dispatch.prepareRender(surf.output_name[0..surf.output_name_len]);
     hiccup_mod.beginPass();
     const view_name = if (surf.view_name_str) |name| janet.kw(name) else janet.c.janet_wrap_nil();
     _ = dispatch.renderView(view_name);

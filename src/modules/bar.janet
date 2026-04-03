@@ -24,6 +24,13 @@
 (reg-sub :wm/focused-output [:wm/outputs]
   (fn [outputs] (find |(get $ "focused") outputs)))
 
+(defn- this-output []
+  "Return the wm output entry matching the surface being rendered."
+  (def name (current-output))
+  (def outputs (sub :wm/outputs))
+  (when (and name outputs)
+    (find |(= (get $ "name") name) outputs)))
+
 # -- Helper: pill wrapper --
 
 (defn- pill [& children]
@@ -43,19 +50,22 @@
       [:text {:color text-color :size 14} (string idx)]]))
 
 (defn- workspaces-view []
-  (def tags (sub :wm/tags))
+  (def out (this-output))
+  (def active-tag (when out (get out "tag" 0)))
+  (def occupied (sub :wm/occupied-tags))
   [:row {:gap 4 :align-y :center :pad [2 4] :bg surface :radius 6}
     ;(seq [i :range [1 10]
-           :let [tag (get tags i {:focused false :occupied false})]
-           :when (or (tag :focused) (tag :occupied))]
-       (tag-view i tag))])
+           :let [focused (= i active-tag)
+                 occ (or focused (truthy? (some |(= $ i) (or occupied []))))]
+           :when occ]
+       (tag-view i {:focused focused :occupied occ}))])
 
 # -- Scroll minimap --
 
 (defn- scroll-minimap []
-  (def focused-out (sub :wm/focused-output))
-  (when focused-out
-    (def columns (get focused-out "columns" []))
+  (def out (this-output))
+  (when out
+    (def columns (get out "columns" []))
     (when (> (length columns) 0)
       (def minimap-h 18)
       # Sum widths, scale proportionally
@@ -81,13 +91,18 @@
 # -- Title --
 
 (defn- title-view []
-  (def title (sub :wm/title))
-  (def app-id (sub :wm/app-id))
-  (if (and title (> (length title) 0))
-    [:row {:id "title" :gap 6 :align-y :center}
-      (when (and app-id (> (length app-id) 0) (not= app-id title))
-        [:text {:color muted :size 13} app-id])
-      [:text {:color text-color :size 17} title]]
+  (def out (this-output))
+  (def is-focused (and out (get out "focused" false)))
+  (if is-focused
+    (do
+      (def title (sub :wm/title))
+      (def app-id (sub :wm/app-id))
+      (if (and title (> (length title) 0))
+        [:row {:id "title" :gap 6 :align-y :center}
+          (when (and app-id (> (length app-id) 0) (not= app-id title))
+            [:text {:color muted :size 13} app-id])
+          [:text {:color text-color :size 17} title]]
+        [:text {:id "title" :color subtle :size 17} ""]))
     [:text {:id "title" :color subtle :size 17} ""]))
 
 # -- Right-side modules --

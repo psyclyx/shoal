@@ -121,6 +121,7 @@
 
 (var- db-generation 0)
 (var- *current-db* nil)
+(var- *current-output* nil)
 
 (defn reg-sub
   "Register a subscription.
@@ -174,6 +175,16 @@
   "Called by Zig before view evaluation to make db visible to subs."
   [db]
   (set *current-db* db))
+
+(defn set-current-output
+  "Called by Zig before view evaluation to set which output is being rendered."
+  [name]
+  (set *current-output* name))
+
+(defn current-output
+  "Returns the name of the output currently being rendered."
+  []
+  *current-output*)
 
 # --- Views ---
 
