@@ -9,6 +9,8 @@ const log = std.log.scoped(.hiccup);
 var kw_row: jc.Janet = undefined;
 var kw_col: jc.Janet = undefined;
 var kw_text: jc.Janet = undefined;
+var kw_area: jc.Janet = undefined;
+var kw_line: jc.Janet = undefined;
 var kw_w: jc.Janet = undefined;
 var kw_h: jc.Janet = undefined;
 var kw_pad: jc.Janet = undefined;
@@ -21,10 +23,15 @@ var kw_border_color: jc.Janet = undefined;
 var kw_border_width: jc.Janet = undefined;
 var kw_id: jc.Janet = undefined;
 var kw_color: jc.Janet = undefined;
+var kw_color2: jc.Janet = undefined;
 var kw_font: jc.Janet = undefined;
 var kw_size: jc.Janet = undefined;
 var kw_wrap: jc.Janet = undefined;
 var kw_text_align: jc.Janet = undefined;
+var kw_values: jc.Janet = undefined;
+var kw_fill: jc.Janet = undefined;
+var kw_thickness: jc.Janet = undefined;
+var kw_smooth: jc.Janet = undefined;
 // Sizing keywords
 var kw_grow: jc.Janet = undefined;
 var kw_fit: jc.Janet = undefined;
@@ -46,9 +53,31 @@ const MAX_COERCED_STRINGS = 256;
 var coerced_roots: [MAX_COERCED_STRINGS]jc.Janet = undefined;
 var coerced_count: usize = 0;
 
+// ---------------------------------------------------------------------------
+// Per-frame curve data storage
+// ---------------------------------------------------------------------------
+
+pub const MAX_CURVES = 16;
+pub const MAX_CURVE_VALUES = 64;
+
+pub const CurveData = struct {
+    values: [MAX_CURVE_VALUES]f32 = [_]f32{0} ** MAX_CURVE_VALUES,
+    value_count: u32 = 0,
+    color: [4]f32 = .{ 1, 1, 1, 1 },
+    color2: [4]f32 = .{ 1, 1, 1, 0.3 },
+    fill: f32 = 1.0,
+    thickness: f32 = 1.5,
+    smooth: bool = true,
+    is_line: bool = false,
+};
+
+var curve_storage: [MAX_CURVES]CurveData = undefined;
+var curve_count: usize = 0;
+
 /// Call before walkHiccup to begin tracking coerced string roots.
 pub fn beginPass() void {
     coerced_count = 0;
+    curve_count = 0;
 }
 
 /// Call after Clay endLayout to unroot coerced strings.
@@ -65,6 +94,8 @@ pub fn init() void {
     kw_row = janet.kw("row");
     kw_col = janet.kw("col");
     kw_text = janet.kw("text");
+    kw_area = janet.kw("area");
+    kw_line = janet.kw("line");
     kw_w = janet.kw("w");
     kw_h = janet.kw("h");
     kw_pad = janet.kw("pad");
@@ -77,10 +108,15 @@ pub fn init() void {
     kw_border_width = janet.kw("border-width");
     kw_id = janet.kw("id");
     kw_color = janet.kw("color");
+    kw_color2 = janet.kw("color2");
     kw_font = janet.kw("font");
     kw_size = janet.kw("size");
     kw_wrap = janet.kw("wrap");
     kw_text_align = janet.kw("text-align");
+    kw_values = janet.kw("values");
+    kw_fill = janet.kw("fill");
+    kw_thickness = janet.kw("thickness");
+    kw_smooth = janet.kw("smooth");
     kw_grow = janet.kw("grow");
     kw_fit = janet.kw("fit");
     kw_percent = janet.kw("percent");
@@ -149,6 +185,10 @@ pub fn walkHiccup(node: jc.Janet) void {
         walkContainer(.left_to_right, attrs, view[children_start..]);
     } else if (janetKeywordEql(tag, kw_col)) {
         walkContainer(.top_to_bottom, attrs, view[children_start..]);
+    } else if (janetKeywordEql(tag, kw_area)) {
+        walkCurve(false, attrs);
+    } else if (janetKeywordEql(tag, kw_line)) {
+        walkCurve(true, attrs);
     } else {
         log.warn("unknown hiccup tag, skipping", .{});
     }
@@ -192,6 +232,76 @@ fn walkText(attrs: jc.Janet, children: []const jc.Janet) void {
         clay.String.fromSlice(text_slice),
         clay.cdefs.Clay__StoreTextElementConfig(text_config),
     );
+}
+
+fn walkCurve(is_line: bool, attrs: jc.Janet) void {
+    if (curve_count >= MAX_CURVES) {
+        log.warn("too many curve elements ({d}), skipping", .{MAX_CURVES});
+        return;
+    }
+
+    var data = CurveData{ .is_line = is_line };
+
+    if (jc.janet_checktype(attrs, jc.JANET_NIL) == 0) {
+        // :values — array of 0-1 floats
+        const values_val = janet.janetGet(attrs, kw_values);
+        if (jc.janet_checktype(values_val, jc.JANET_NIL) == 0) {
+            const items = janetIndexedSlice(values_val) orelse &[0]jc.Janet{};
+            const n: usize = @min(items.len, MAX_CURVE_VALUES);
+            for (items[0..n], 0..) |item, i| {
+                data.values[i] = janetToF32(item) orelse 0;
+            }
+            data.value_count = @intCast(n);
+        }
+
+        // :color — primary color (0-255 RGBA)
+        const color_val = janet.janetGet(attrs, kw_color);
+        if (jc.janet_checktype(color_val, jc.JANET_NIL) == 0) {
+            const col = parseColor(color_val);
+            data.color = .{ col[0] / 255.0, col[1] / 255.0, col[2] / 255.0, col[3] / 255.0 };
+        }
+
+        // :color2 — speculative/secondary color (0-255 RGBA)
+        const color2_val = janet.janetGet(attrs, kw_color2);
+        if (jc.janet_checktype(color2_val, jc.JANET_NIL) == 0) {
+            const col = parseColor(color2_val);
+            data.color2 = .{ col[0] / 255.0, col[1] / 255.0, col[2] / 255.0, col[3] / 255.0 };
+        }
+
+        // :fill — boundary between real and speculative data (0-1)
+        const fill_val = janet.janetGet(attrs, kw_fill);
+        if (jc.janet_checktype(fill_val, jc.JANET_NIL) == 0) {
+            data.fill = janetToF32(fill_val) orelse 1.0;
+        }
+
+        // :thickness — line stroke width in pixels
+        const thick_val = janet.janetGet(attrs, kw_thickness);
+        if (jc.janet_checktype(thick_val, jc.JANET_NIL) == 0) {
+            data.thickness = janetToF32(thick_val) orelse 1.5;
+        }
+
+        // :smooth — enable Catmull-Rom interpolation (boolean)
+        const smooth_val = janet.janetGet(attrs, kw_smooth);
+        if (jc.janet_checktype(smooth_val, jc.JANET_NIL) == 0) {
+            data.smooth = jc.janet_truthy(smooth_val) != 0;
+        }
+    }
+
+    curve_storage[curve_count] = data;
+    const data_ptr: *anyopaque = @ptrCast(&curve_storage[curve_count]);
+    curve_count += 1;
+
+    // Emit a Clay custom element so it participates in layout and produces
+    // a .custom render command with our CurveData pointer.
+    var config = clay.ElementDeclaration{
+        .custom = .{ .custom_data = data_ptr },
+    };
+
+    applyContainerAttrs(&config, attrs);
+
+    clay.cdefs.Clay__OpenElement();
+    clay.cdefs.Clay__ConfigureOpenElement(config);
+    clay.cdefs.Clay__CloseElement();
 }
 
 // ---------------------------------------------------------------------------

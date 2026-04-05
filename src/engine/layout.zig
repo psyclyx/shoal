@@ -2,6 +2,7 @@ const std = @import("std");
 const clay = @import("clay");
 const Renderer = @import("renderer.zig").Renderer;
 const TextRenderer = @import("text.zig").TextRenderer;
+const hiccup = @import("hiccup.zig");
 
 const log = std.log.scoped(.layout);
 
@@ -131,7 +132,24 @@ pub const Layout = struct {
                     // TODO: image rendering
                 },
                 .custom => {
-                    // TODO: custom render commands
+                    const cd = cmd.render_data.custom;
+                    if (cd.custom_data) |ptr| {
+                        const curve: *const hiccup.CurveData = @ptrCast(@alignCast(ptr));
+                        self.renderer.drawCurve(
+                            bb.x,
+                            bb.y,
+                            bb.width,
+                            bb.height,
+                            curve.values[0..curve.value_count],
+                            curve.value_count,
+                            curve.color,
+                            curve.color2,
+                            curve.fill,
+                            curve.thickness,
+                            curve.smooth,
+                            curve.is_line,
+                        );
+                    }
                 },
                 .none => {},
             }
