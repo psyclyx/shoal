@@ -196,14 +196,17 @@
   (def net (sub :net))
   (def rx (get net :rx-rate 0))
   (def tx (get net :tx-rate 0))
-  (def rx-hist (normalize-history (sub :net/rx-history)))
-  (def tx-hist (normalize-history (sub :net/tx-history)))
+  (def rx-raw (sub :net/rx-history))
+  (def tx-raw (sub :net/tx-history))
+  # Normalize both series to the same scale (max of either)
+  (def all-vals (array/concat @[] (or rx-raw @[]) (or tx-raw @[])))
+  (def mx (max 1 (if (> (length all-vals) 0) (apply max all-vals) 1)))
+  (def rx-norm (map |(/ $ mx) (or rx-raw @[])))
+  (def tx-norm (map |(/ $ mx) (or tx-raw @[])))
   [:row {:gap 6 :align-y :center}
-    [:col {:gap 1}
-      [:area {:w 48 :h 10 :values rx-hist
-              :color (dim-color green) :smooth true}]
-      [:area {:w 48 :h 10 :values tx-hist
-              :color (dim-color accent) :smooth true}]]
+    [:area {:w 64 :h 20 :values rx-norm :values2 tx-norm
+            :color (dim-color green) :color2 (dim-color accent)
+            :smooth true}]
     [:col {:gap 1}
       [:text {:color green :size 11} (string "↓" (fmt-rate rx))]
       [:text {:color accent :size 11} (string "↑" (fmt-rate tx))]]])

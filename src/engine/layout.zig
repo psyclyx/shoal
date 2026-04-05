@@ -146,6 +146,8 @@ pub const Layout = struct {
                             bb.height,
                             curve.values[0..curve.value_count],
                             curve.value_count,
+                            curve.values2[0..curve.value_count2],
+                            curve.value_count2,
                             curve.color,
                             curve.color2,
                             curve.fill,

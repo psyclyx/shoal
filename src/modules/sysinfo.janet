@@ -317,6 +317,6 @@
 (reg-event-handler :init
   (fn [cofx event]
     {:dispatch [:audio/query]
-     :timer {:delay 2.0 :event [:audio/query] :repeat true :id :audio}}))
+     :timer {:delay 0.5 :event [:audio/query] :repeat true :id :audio}}))
 
 (reg-sub :audio (fn [db] (get db :audio {})))

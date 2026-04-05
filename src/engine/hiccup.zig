@@ -29,6 +29,7 @@ var kw_size: jc.Janet = undefined;
 var kw_wrap: jc.Janet = undefined;
 var kw_text_align: jc.Janet = undefined;
 var kw_values: jc.Janet = undefined;
+var kw_values2: jc.Janet = undefined;
 var kw_fill: jc.Janet = undefined;
 var kw_thickness: jc.Janet = undefined;
 var kw_smooth: jc.Janet = undefined;
@@ -63,6 +64,8 @@ pub const MAX_CURVE_VALUES = 64;
 pub const CurveData = struct {
     values: [MAX_CURVE_VALUES]f32 = [_]f32{0} ** MAX_CURVE_VALUES,
     value_count: u32 = 0,
+    values2: [MAX_CURVE_VALUES]f32 = [_]f32{0} ** MAX_CURVE_VALUES,
+    value_count2: u32 = 0,
     color: [4]f32 = .{ 1, 1, 1, 1 },
     color2: [4]f32 = .{ 1, 1, 1, 0.3 },
     fill: f32 = 1.0,
@@ -114,6 +117,7 @@ pub fn init() void {
     kw_wrap = janet.kw("wrap");
     kw_text_align = janet.kw("text-align");
     kw_values = janet.kw("values");
+    kw_values2 = janet.kw("values2");
     kw_fill = janet.kw("fill");
     kw_thickness = janet.kw("thickness");
     kw_smooth = janet.kw("smooth");
@@ -252,6 +256,17 @@ fn walkCurve(is_line: bool, attrs: jc.Janet) void {
                 data.values[i] = janetToF32(item) orelse 0;
             }
             data.value_count = @intCast(n);
+        }
+
+        // :values2 — secondary data series (0-1 floats, rendered as line overlay)
+        const values2_val = janet.janetGet(attrs, kw_values2);
+        if (jc.janet_checktype(values2_val, jc.JANET_NIL) == 0) {
+            const items2 = janetIndexedSlice(values2_val) orelse &[0]jc.Janet{};
+            const n2: usize = @min(items2.len, MAX_CURVE_VALUES);
+            for (items2[0..n2], 0..) |item, i| {
+                data.values2[i] = janetToF32(item) orelse 0;
+            }
+            data.value_count2 = @intCast(n2);
         }
 
         // :color — primary color (0-255 RGBA)

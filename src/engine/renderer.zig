@@ -87,6 +87,8 @@ const frag_src: [*c]const u8 =
     \\// Curve uniforms
     \\uniform float u_values[64];
     \\uniform int u_value_count;
+    \\uniform float u_values2[64];
+    \\uniform int u_value_count2;
     \\uniform vec4 u_color2;
     \\uniform float u_fill;
     \\uniform float u_thickness;
@@ -108,22 +110,24 @@ const frag_src: [*c]const u8 =
     \\                   (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3);
     \\}
     \\
-    \\float sampleCurve(float x) {
-    \\    if (u_value_count < 2) return u_value_count > 0 ? u_values[0] : 0.0;
-    \\    float pos = x * float(u_value_count - 1);
+    \\float sampleArray(float x, int count, float vals[64]) {
+    \\    if (count < 2) return count > 0 ? vals[0] : 0.0;
+    \\    float pos = x * float(count - 1);
     \\    int idx = int(floor(pos));
     \\    float t = fract(pos);
-    \\    int i0 = clamp(idx - 1, 0, u_value_count - 1);
-    \\    int i1 = clamp(idx,     0, u_value_count - 1);
-    \\    int i2 = clamp(idx + 1, 0, u_value_count - 1);
-    \\    int i3 = clamp(idx + 2, 0, u_value_count - 1);
+    \\    int i0 = clamp(idx - 1, 0, count - 1);
+    \\    int i1 = clamp(idx,     0, count - 1);
+    \\    int i2 = clamp(idx + 1, 0, count - 1);
+    \\    int i3 = clamp(idx + 2, 0, count - 1);
     \\    if (u_smooth > 0) {
-    \\        return clamp(catmullRom(u_values[i0], u_values[i1],
-    \\                                u_values[i2], u_values[i3], t), 0.0, 1.0);
+    \\        return clamp(catmullRom(vals[i0], vals[i1],
+    \\                                vals[i2], vals[i3], t), 0.0, 1.0);
     \\    } else {
-    \\        return mix(u_values[i1], u_values[i2], t);
+    \\        return mix(vals[i1], vals[i2], t);
     \\    }
     \\}
+    \\float sampleCurve(float x) { return sampleArray(x, u_value_count, u_values); }
+    \\float sampleCurve2(float x) { return sampleArray(x, u_value_count2, u_values2); }
     \\
     \\void main() {
     \\    if (v_mode > 2.5) {
@@ -138,7 +142,7 @@ const frag_src: [*c]const u8 =
     \\        float a = aa * color.a;
     \\        frag_color = vec4(color.rgb * a, a);
     \\    } else if (v_mode > 1.5) {
-    \\        // Mode 2: area fill curve
+    \\        // Mode 2: area fill curve + optional line overlay from values2
     \\        float curve_val = sampleCurve(v_uv.x);
     \\        float curve_y = 1.0 - curve_val;
     \\        float pixel_size = 1.0 / v_rect_size.y;
@@ -146,6 +150,19 @@ const frag_src: [*c]const u8 =
     \\        float speculative = smoothstep(u_fill - 0.02, u_fill, v_uv.x);
     \\        vec4 color = mix(v_color, u_color2, speculative);
     \\        float a = aa * color.a;
+    \\        // Overlay second series as a line stroke
+    \\        if (u_value_count2 > 0) {
+    \\            float c2_val = sampleCurve2(v_uv.x);
+    \\            float c2_y = 1.0 - c2_val;
+    \\            float dist2 = abs(v_uv.y - c2_y) * v_rect_size.y;
+    \\            float line_aa = 1.0 - smoothstep(0.5, 1.5, dist2);
+    \\            float line_a = line_aa * u_color2.a;
+    \\            // Composite line over area: premultiplied alpha blend
+    \\            a = line_a + a * (1.0 - line_a);
+    \\            vec3 blended = (u_color2.rgb * line_a + color.rgb * aa * color.a * (1.0 - line_a));
+    \\            if (a > 0.0) blended /= a;
+    \\            color = vec4(blended, 1.0);
+    \\        }
     \\        frag_color = vec4(color.rgb * a, a);
     \\    } else if (v_mode > 0.5) {
     \\        // Mode 1: texture (glyph atlas) -- single-channel alpha
@@ -189,6 +206,8 @@ pub const Renderer = struct {
     // Curve uniforms
     u_values: c.GLint,
     u_value_count: c.GLint,
+    u_values2: c.GLint,
+    u_value_count2: c.GLint,
     u_color2: c.GLint,
     u_fill: c.GLint,
     u_thickness: c.GLint,
@@ -214,6 +233,8 @@ pub const Renderer = struct {
         const u_atlas = c.glGetUniformLocation(program, "u_atlas");
         const u_values = c.glGetUniformLocation(program, "u_values");
         const u_value_count = c.glGetUniformLocation(program, "u_value_count");
+        const u_values2 = c.glGetUniformLocation(program, "u_values2");
+        const u_value_count2 = c.glGetUniformLocation(program, "u_value_count2");
         const u_color2 = c.glGetUniformLocation(program, "u_color2");
         const u_fill = c.glGetUniformLocation(program, "u_fill");
         const u_thickness = c.glGetUniformLocation(program, "u_thickness");
@@ -264,6 +285,8 @@ pub const Renderer = struct {
             .u_atlas = u_atlas,
             .u_values = u_values,
             .u_value_count = u_value_count,
+            .u_values2 = u_values2,
+            .u_value_count2 = u_value_count2,
             .u_color2 = u_color2,
             .u_fill = u_fill,
             .u_thickness = u_thickness,
@@ -396,6 +419,8 @@ pub const Renderer = struct {
         h: f32,
         values: []const f32,
         value_count: u32,
+        values2: []const f32,
+        value_count2: u32,
         color: [4]f32,
         color2: [4]f32,
         fill: f32,
@@ -408,6 +433,10 @@ pub const Renderer = struct {
         // Set curve uniforms
         c.glUniform1fv(self.u_values, @intCast(value_count), values.ptr);
         c.glUniform1i(self.u_value_count, @intCast(value_count));
+        if (value_count2 > 0) {
+            c.glUniform1fv(self.u_values2, @intCast(value_count2), values2.ptr);
+        }
+        c.glUniform1i(self.u_value_count2, @intCast(value_count2));
         c.glUniform4f(self.u_color2, color2[0], color2[1], color2[2], color2[3]);
         c.glUniform1f(self.u_fill, fill);
         c.glUniform1f(self.u_thickness, thickness);
