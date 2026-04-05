@@ -3,6 +3,12 @@
 # Uses :timer + slurp to read /proc and /sys. Pure Janet.
 # CPU polls every 2s, memory every 5s, battery every 10s.
 
+(defn- push-history [prev value n]
+  "Append value to history array, keeping at most n entries."
+  (def h (array/slice (or prev @[])))
+  (when (>= (length h) n) (array/remove h 0))
+  (array/push h value))
+
 # -- CPU --
 
 (reg-event-handler :cpu/tick
@@ -35,7 +41,8 @@
                    0))
         {:db (put (cofx :db) :cpu {:percent pct
                                     :prev-idle idle
-                                    :prev-total total})}))))
+                                    :prev-total total
+                                    :history (push-history (get prev :history) (/ pct 100) 30)})}))))
 
 (reg-event-handler :init
   (fn [cofx event]
@@ -44,6 +51,7 @@
 
 (reg-sub :cpu (fn [db] (get db :cpu {})))
 (reg-sub :cpu/percent [:cpu] (fn [cpu] (get cpu :percent 0)))
+(reg-sub :cpu/history [:cpu] (fn [cpu] (get cpu :history [])))
 (reg-sub :cpu/text [:cpu]
   (fn [cpu] (string "cpu " (math/floor (get cpu :percent 0)) "%")))
 
@@ -76,9 +84,12 @@
       (when (> total-kb 0)
         (def used-mb (math/floor (/ (- total-kb avail-kb) 1024)))
         (def total-mb (math/floor (/ total-kb 1024)))
+        (def pct (math/round (* 100.0 (/ (- total-kb avail-kb) total-kb))))
+        (def prev-mem (get (cofx :db) :mem {}))
         {:db (put (cofx :db) :mem {:used-mb used-mb
                                     :total-mb total-mb
-                                    :percent (math/round (* 100.0 (/ (- total-kb avail-kb) total-kb)))})}))))
+                                    :percent pct
+                                    :history (push-history (get prev-mem :history) (/ pct 100) 30)})}))))
 
 (reg-event-handler :init
   (fn [cofx event]
@@ -86,6 +97,7 @@
      :timer {:delay 5.0 :event [:mem/tick] :repeat true :id :mem}}))
 
 (reg-sub :mem (fn [db] (get db :mem {})))
+(reg-sub :mem/history [:mem] (fn [mem] (get mem :history [])))
 (defn- fmt-mem [mb]
   "Format MB as GiB with 1 decimal when >= 1024, otherwise as integer MB."
   (if (>= mb 1024)
