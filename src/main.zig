@@ -220,17 +220,9 @@ pub fn main() !void {
         );
 
         const ls_surf = surf.layer_surface.?;
-        // height=0 means auto-size; use a generous initial height so the
-        // first frame isn't clipped. renderSurface will resize once it
-        // knows the actual content height.
-        const initial_height: u32 = if (cfg.height == 0) 200 else cfg.height;
-        ls_surf.setSize(cfg.width, initial_height);
+        ls_surf.setSize(cfg.width, cfg.height);
         ls_surf.setAnchor(wlAnchor(cfg.anchor));
-        const initial_exclusive: i32 = if (cfg.height == 0)
-            @intCast(@as(u32, 200) + @as(u32, @intCast(@max(0, cfg.margin.top))) + @as(u32, @intCast(@max(0, cfg.margin.bottom))))
-        else
-            cfg.exclusive_zone;
-        ls_surf.setExclusiveZone(initial_exclusive);
+        ls_surf.setExclusiveZone(cfg.exclusive_zone);
         ls_surf.setMargin(cfg.margin.top, cfg.margin.right, cfg.margin.bottom, cfg.margin.left);
         ls_surf.setKeyboardInteractivity(wlKeyboardInteractivity(cfg.keyboard_interactivity));
         ls_surf.setListener(*Surface, layerSurfaceListener, surf);
@@ -913,14 +905,15 @@ fn renderSurface(surf: *Surface) bool {
     renderer.end();
     _ = c.eglSwapBuffers(egl_display, surf.egl_surface);
 
-    // Auto-height: resize surface to fit content
-    if (cfg.height == 0 and !surf.is_dynamic) {
+    // Auto-size: ensure surface fits content. Config height acts as a minimum.
+    if (!surf.is_dynamic) {
         const content_h = @as(u32, @intFromFloat(@ceil(layout.content_height)));
-        if (content_h > 0 and content_h != surf.height) {
+        const target_h = @max(content_h, cfg.height);
+        if (target_h > 0 and target_h != surf.height) {
             if (surf.layer_surface) |ls_surf| {
-                ls_surf.setSize(surf.width, content_h);
+                ls_surf.setSize(surf.width, target_h);
                 const margin_v: u32 = @intCast(@max(0, cfg.margin.top) + @max(0, cfg.margin.bottom));
-                ls_surf.setExclusiveZone(@intCast(content_h + margin_v));
+                ls_surf.setExclusiveZone(@intCast(target_h + margin_v));
                 surf.wl_surface.?.commit();
             }
         }
