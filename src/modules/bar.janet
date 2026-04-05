@@ -283,9 +283,6 @@
       (= id "launcher")
       {:dispatch [:launcher/open]}
 
-      (= id "audio")
-      {:dispatch [:osd/volume-mute]}
-
       (= id "title")
       {:dispatch [:launcher/open "@"]})))
 
@@ -309,10 +306,6 @@
                    (min 9 (+ current 1)))]
         (when (not= next current)
           {:dispatch [:wm/focus-tag next]}))
-
-      # Scroll on audio: adjust volume
-      (= id "audio")
-      {:dispatch [(if (= dir "up") :osd/volume-up :osd/volume-down)]}
 
       # Scroll on title: cycle focus
       (= id "title")
