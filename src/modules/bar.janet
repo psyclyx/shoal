@@ -1,7 +1,7 @@
 # bar — status bar view
 #
 # Pure Janet view functions producing hiccup for a status bar.
-# Layout: left (workspaces, scroll minimap) | center (title) | right (clock, cpu, mem, bat)
+# Layout: left (workspaces, minimap) | center (title) | right (system info)
 #
 # Uses wm/* subscriptions (compositor-agnostic), clock.janet, sysinfo.janet.
 # Theme colors from config (Base16) in 0-255 RGBA.
@@ -18,6 +18,7 @@
 (def- green      (theme :base0B))
 (def- yellow     (theme :base0A))
 (def- red        (theme :base08))
+(def- cyan       (theme :base0C))
 
 # -- Derived subscriptions --
 
@@ -33,15 +34,10 @@
 
 # -- Helpers --
 
-(defn- pill [& children]
-  [:row {:pad [6 10] :bg surface :radius 6 :gap 6 :align-y :center}
-    ;children])
-
 (defn- pct-color [pct]
   (cond (>= pct 80) red (>= pct 50) yellow green))
 
 (defn- dim-color [color &opt alpha]
-  "Return color with overridden alpha (default 120)."
   [(color 0) (color 1) (color 2) (or alpha 120)])
 
 (defn- fmt-gb [g]
@@ -50,7 +46,6 @@
     (string w "." f)))
 
 (defn- fmt-rate [bps]
-  "Format bytes/sec as human-readable rate."
   (cond
     (>= bps 1073741824) (string/format "%.1fG" (/ bps 1073741824))
     (>= bps 104857600)  (string/format "%.0fM" (/ bps 1048576))
@@ -60,23 +55,33 @@
     (> bps 0)           (string/format "%.1fK" (/ bps 1024))
     "0K"))
 
+(defn- normalize-history [history]
+  "Normalize raw byte/s history to 0-1 range based on the max value."
+  (if (or (nil? history) (= 0 (length history)))
+    []
+    (let [mx (max 1 (apply max history))]
+      (map |(/ $ mx) history))))
+
+(defn- separator []
+  [:row {:w 1 :h 16 :bg overlay}])
+
 # -- Workspace tags --
 
 (defn- tag-view [idx tag]
   (def id (string "tag-" idx))
   (def hover (anim (keyword id "-hover")))
   (if (tag :focused)
-    [:row {:id id :w 26 :h 26 :bg accent :radius 6 :align-x :center :align-y :center}
-      [:text {:color bg} (string idx)]]
-    [:row {:id id :w 26 :h 26 :bg [(muted 0) (muted 1) (muted 2) (math/floor (* hover 255))]
-           :radius 6 :align-x :center :align-y :center}
-      [:text {:color text-color} (string idx)]]))
+    [:row {:id id :w 24 :h 24 :bg accent :radius 5 :align-x :center :align-y :center}
+      [:text {:color bg :size 14} (string idx)]]
+    [:row {:id id :w 24 :h 24 :bg [(muted 0) (muted 1) (muted 2) (math/floor (* hover 255))]
+           :radius 5 :align-x :center :align-y :center}
+      [:text {:color text-color :size 14} (string idx)]]))
 
 (defn- workspaces-view []
   (def out (this-output))
   (def active-tag (when out (get out "tag" 0)))
   (def occupied (sub :wm/occupied-tags))
-  [:row {:gap 4 :align-y :center :pad [4 6] :bg surface :radius 6}
+  [:row {:gap 3 :align-y :center}
     ;(seq [i :range [1 10]
            :let [focused (= i active-tag)
                  occ (or focused (truthy? (some |(= $ i) (or occupied []))))]
@@ -85,15 +90,12 @@
 
 # -- Scroll minimap --
 
-(defn- minimap-tree
-  "Recursively render a column tree node into hiccup."
-  [node w h]
+(defn- minimap-tree [node w h]
   (def node-type (get node "type" "leaf"))
   (def focused (get node "focused" false))
   (def color (if focused accent overlay))
   (if (= node-type "leaf")
     [:row {:w w :h h :bg color :radius 1}]
-    # Container: split children along the orientation axis
     (let [children (get node "children" [])
           n (length children)
           orient (get node "orientation" "vertical")
@@ -113,19 +115,17 @@
   (when out
     (def columns (get out "columns" []))
     (when (> (length columns) 0)
-      (def minimap-h 24)
+      (def minimap-h 20)
       (def total-w (sum (map |(get $ "width" 1) columns)))
-      (def minimap-w (min 200 (max 60 (* minimap-h (max 1 (* total-w 1.5))))))
+      (def minimap-w (min 180 (max 50 (* minimap-h (max 1 (* total-w 1.5))))))
       (def scale (/ minimap-w (max 0.01 total-w)))
-
-      [:row {:gap 1 :align-y :center :pad [4 6] :bg surface :radius 6}
+      [:row {:gap 1 :align-y :center}
         ;(seq [col :in columns
                :let [col-w (get col "width" 1)
                      scaled-w (max 3 (math/floor (* col-w scale)))
                      tree (get col "tree")]]
            (if tree
              (minimap-tree tree scaled-w minimap-h)
-             # Fallback for compositors that don't send tree data
              (let [n-leaves (get col "leaves" 1)
                    is-focused (get col "focused" false)
                    color (if is-focused accent overlay)]
@@ -148,7 +148,7 @@
       (if (and title (> (length title) 0))
         [:row {:id "title" :gap 8 :align-y :center}
           (when (and app-id (> (length app-id) 0) (not= app-id title))
-            [:text {:color muted} app-id])
+            [:text {:color muted :size 13} app-id])
           [:text {:color text-color} title]]
         [:text {:id "title" :color subtle} ""]))
     [:text {:id "title" :color subtle} ""]))
@@ -159,26 +159,64 @@
   (def pct (sub :cpu/percent))
   (def history (sub :cpu/history))
   (def color (pct-color pct))
-  (pill
-    [:area {:w 60 :h 24 :values history
+  [:row {:gap 6 :align-y :center}
+    [:area {:w 64 :h 20 :values history
             :color (dim-color color) :smooth true}]
-    [:col {:gap 1}
-      [:text {:color color :size 16} (string (math/floor pct) "%")]
-      [:text {:color subtle :size 11} "cpu"]]))
+    [:col {:gap 0}
+      [:text {:color color :size 15} (string (math/floor pct) "%")]
+      [:text {:color subtle :size 10} "cpu"]]])
 
 (defn- mem-view []
   (def mem (sub :mem))
-  (def history (sub :mem/history))
   (def pct (get mem :percent 0))
   (def used (get mem :used-mb 0))
+  (def total (get mem :total-mb 0))
   (def color (pct-color pct))
-  (pill
-    [:area {:w 60 :h 24 :values history
-            :color (dim-color color) :smooth true}]
+  [:col {:gap 2 :align-x :right}
+    [:row {:gap 4 :align-y :center}
+      [:text {:color color :size 13}
+        (string (fmt-gb (/ used 1024)) "/" (fmt-gb (/ total 1024)) "G")]
+      [:text {:color subtle :size 10} "mem"]]
+    [:row {:w 80 :h 4 :bg overlay :radius 2}
+      [:row {:w [:percent (/ pct 100)] :h :grow :bg color :radius 2}]]])
+
+(defn- disk-view []
+  (def disk (sub :disk))
+  (def pct (get disk :percent 0))
+  (def color (pct-color pct))
+  [:col {:gap 2 :align-x :right}
+    [:row {:gap 4 :align-y :center}
+      [:text {:color color :size 13}
+        (string (fmt-gb (get disk :used-gb 0)) "/" (fmt-gb (get disk :total-gb 0)) "G")]
+      [:text {:color subtle :size 10} "disk"]]
+    [:row {:w 80 :h 4 :bg overlay :radius 2}
+      [:row {:w [:percent (/ pct 100)] :h :grow :bg color :radius 2}]]])
+
+(defn- net-view []
+  (def net (sub :net))
+  (def rx (get net :rx-rate 0))
+  (def tx (get net :tx-rate 0))
+  (def rx-hist (normalize-history (sub :net/rx-history)))
+  (def tx-hist (normalize-history (sub :net/tx-history)))
+  [:row {:gap 6 :align-y :center}
     [:col {:gap 1}
-      [:text {:color color :size 14}
-        (string (fmt-gb (/ used 1024)) "G")]
-      [:text {:color subtle :size 11} "mem"]]))
+      [:area {:w 48 :h 10 :values rx-hist
+              :color (dim-color green) :smooth true}]
+      [:area {:w 48 :h 10 :values tx-hist
+              :color (dim-color accent) :smooth true}]]
+    [:col {:gap 1}
+      [:text {:color green :size 11} (string "↓" (fmt-rate rx))]
+      [:text {:color accent :size 11} (string "↑" (fmt-rate tx))]]])
+
+(defn- audio-view []
+  (def audio (sub :audio))
+  (def pct (get audio :percent 0))
+  (def muted-flag (get audio :muted false))
+  (def color (cond muted-flag red (>= pct 100) yellow accent))
+  [:row {:id "audio" :align-y :center}
+    [:text {:color color :size 15}
+      (string (if muted-flag "M " "") (math/floor pct) "%")]
+    [:text {:color subtle :size 10} " vol"]])
 
 (defn- bat-view []
   (def bat (sub :bat))
@@ -186,76 +224,46 @@
     (def pct (get bat :percent 0))
     (def charging (bat :charging))
     (def color (cond charging accent (< pct 20) red (< pct 50) yellow green))
-    (pill
-      [:text {:color color}
+    [:row {:align-y :center}
+      [:text {:color color :size 15}
         (string (if charging "⚡" "") (math/floor pct) "%")]
-      [:text {:color subtle :size 11} "bat"])))
-
-(defn- disk-view []
-  (def disk (sub :disk))
-  (def pct (get disk :percent 0))
-  (def color (pct-color pct))
-  (pill
-    [:row {:w 50 :h 8 :bg overlay :radius 4}
-      [:row {:w [:percent (/ pct 100)] :h :grow :bg color :radius 4}]]
-    [:col {:gap 1}
-      [:text {:color color :size 13}
-        (string (fmt-gb (get disk :used-gb 0)) "/" (fmt-gb (get disk :total-gb 0)) "G")]
-      [:text {:color subtle :size 11} "disk"]]))
-
-(defn- net-view []
-  (def net (sub :net))
-  (def rx (get net :rx-rate 0))
-  (def tx (get net :tx-rate 0))
-  (def iface (get net :iface ""))
-  (def ipv4 (get net :ipv4 ""))
-  [:row {:pad [6 10] :bg surface :radius 6 :gap 6 :align-y :center}
-    [:col {:gap 2}
-      [:text {:color green :size 12} (string "↓" (fmt-rate rx))]
-      [:text {:color accent :size 12} (string "↑" (fmt-rate tx))]]
-    (when (> (length ipv4) 0)
-      [:text {:color muted :size 11} ipv4])])
-
-(defn- audio-view []
-  (def audio (sub :audio))
-  (def pct (get audio :percent 0))
-  (def muted-flag (get audio :muted false))
-  (def color (cond muted-flag red (>= pct 100) yellow accent))
-  [:row {:id "audio" :pad [6 10] :bg surface :radius 6 :gap 6 :align-y :center}
-    [:text {:color color}
-      (string (if muted-flag "M " "") (math/floor pct) "%")]
-    [:text {:color subtle :size 11} "vol"]])
+      [:text {:color subtle :size 10} " bat"]]))
 
 (defn- clock-view []
-  (pill
-    [:col {:gap 1 :align-x :right}
-      [:text {:color text-color} (sub :clock/time)]
-      [:text {:color subtle :size 12} (sub :clock/date)]]))
+  [:col {:gap 0 :align-x :right}
+    [:text {:color text-color :size 15} (sub :clock/time)]
+    [:text {:color subtle :size 11} (sub :clock/date)]])
 
 # -- Root bar view --
 
 (defn- launcher-trigger []
-  [:row {:id "launcher" :pad [6 10] :bg surface :radius 6 :align-y :center}
-    [:text {:color subtle} "⌕"]])
+  [:row {:id "launcher" :align-y :center}
+    [:text {:color subtle :size 15} "⌕"]])
 
 (defn- bar-view []
-  [:row {:w :grow :h :fit :pad [0 8] :bg bg :radius 8 :align-y :center}
-    # Left: workspaces + minimap + launcher
-    [:row {:w :grow :gap 6 :align-y :center}
+  [:row {:w :grow :h :fit :pad [6 12] :bg bg :radius 8 :align-y :center :gap 10}
+    # Left
+    [:row {:w :grow :gap 8 :align-y :center}
       (workspaces-view)
       (scroll-minimap)
       (launcher-trigger)]
-    # Center: title
+    # Center
     [:row {:w :grow :align-x :center :align-y :center}
       (title-view)]
-    # Right: system info
-    [:row {:w :grow :gap 6 :align-x :right :align-y :center}
+    # Right
+    [:row {:w :grow :gap 10 :align-x :right :align-y :center}
       (audio-view)
+      (separator)
       (net-view)
+      (separator)
       (cpu-view)
+      (separator)
       (mem-view)
+      (separator)
       (disk-view)
+      (separator)
       (bat-view)
+      (separator)
       (clock-view)]])
 
 # -- Pointer handlers --
@@ -291,7 +299,6 @@
     (def dir (get event 1 ""))
     (def id (get event 2 ""))
     (cond
-      # Scroll on workspace tags: switch tags
       (string/has-prefix? "tag-" id)
       (let [tags (get (get (cofx :db) :wm {}) :tags [])
             current (do (var found 1)
@@ -307,7 +314,6 @@
         (when (not= next current)
           {:dispatch [:wm/focus-tag next]}))
 
-      # Scroll on title: cycle focus
       (= id "title")
       {:dispatch [:wm/focus (if (= dir "up") "prev" "next")]})))
 

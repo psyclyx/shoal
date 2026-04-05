@@ -274,14 +274,18 @@
       (def update-ips (or (nil? (get prev :ipv4)) (= 0 (% tick-count 30))))
       (def ipv4 (if update-ips (or (get-local-ipv4) "") (get prev :ipv4 "")))
       (def ipv6 (if update-ips (or (get-ipv6-for-iface net-iface) "") (get prev :ipv6 "")))
-      {:db (put (cofx :db) :net {:rx-rate (max 0 rx-rate)
-                                  :tx-rate (max 0 tx-rate)
+      (def rx-clamped (max 0 rx-rate))
+      (def tx-clamped (max 0 tx-rate))
+      {:db (put (cofx :db) :net {:rx-rate rx-clamped
+                                  :tx-rate tx-clamped
                                   :prev-rx (now :rx)
                                   :prev-tx (now :tx)
                                   :iface net-iface
                                   :ipv4 ipv4
                                   :ipv6 ipv6
-                                  :tick-count tick-count})})))
+                                  :tick-count tick-count
+                                  :rx-history (push-history (get prev :rx-history) rx-clamped 60)
+                                  :tx-history (push-history (get prev :tx-history) tx-clamped 60)})})))
 
 (reg-event-handler :init
   (fn [cofx event]
@@ -289,6 +293,8 @@
      :timer {:delay 2.0 :event [:net/tick] :repeat true :id :net}}))
 
 (reg-sub :net (fn [db] (get db :net {})))
+(reg-sub :net/rx-history [:net] (fn [net] (get net :rx-history [])))
+(reg-sub :net/tx-history [:net] (fn [net] (get net :tx-history [])))
 
 # -- Audio (PipeWire/PulseAudio via wpctl) --
 
