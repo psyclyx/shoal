@@ -239,7 +239,7 @@
     [:text {:color subtle} "⌕"]])
 
 (defn- bar-view []
-  [:row {:w :grow :h :grow :pad [0 8] :bg bg :radius 8 :align-y :center}
+  [:row {:w :grow :h :fit :pad [0 8] :bg bg :radius 8 :align-y :center}
     # Left: workspaces + minimap + launcher
     [:row {:w :grow :gap 6 :align-y :center}
       (workspaces-view)
