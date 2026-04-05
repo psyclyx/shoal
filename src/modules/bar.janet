@@ -31,11 +31,34 @@
   (when (and name outputs)
     (find |(= (get $ "name") name) outputs)))
 
-# -- Helper: pill wrapper --
+# -- Helpers --
 
 (defn- pill [& children]
-  [:row {:pad [4 8] :bg surface :radius 6 :gap 6 :align-y :center}
+  [:row {:pad [6 10] :bg surface :radius 6 :gap 6 :align-y :center}
     ;children])
+
+(defn- pct-color [pct]
+  (cond (>= pct 80) red (>= pct 50) yellow green))
+
+(defn- dim-color [color &opt alpha]
+  "Return color with overridden alpha (default 120)."
+  [(color 0) (color 1) (color 2) (or alpha 120)])
+
+(defn- fmt-gb [g]
+  (let [w (math/floor g)
+        f (math/floor (* 10 (- g w)))]
+    (string w "." f)))
+
+(defn- fmt-rate [bps]
+  "Format bytes/sec as human-readable rate."
+  (cond
+    (>= bps 1073741824) (string/format "%.1fG" (/ bps 1073741824))
+    (>= bps 104857600)  (string/format "%.0fM" (/ bps 1048576))
+    (>= bps 1048576)    (string/format "%.1fM" (/ bps 1048576))
+    (>= bps 102400)     (string/format "%.0fK" (/ bps 1024))
+    (>= bps 1024)       (string/format "%.1fK" (/ bps 1024))
+    (> bps 0)           (string/format "%.1fK" (/ bps 1024))
+    "0K"))
 
 # -- Workspace tags --
 
@@ -43,17 +66,17 @@
   (def id (string "tag-" idx))
   (def hover (anim (keyword id "-hover")))
   (if (tag :focused)
-    [:row {:id id :w 22 :h 22 :bg accent :radius 5 :align-x :center :align-y :center}
-      [:text {:color bg :size 14} (string idx)]]
-    [:row {:id id :w 22 :h 22 :bg [(muted 0) (muted 1) (muted 2) (math/floor (* hover 255))]
-           :radius 5 :align-x :center :align-y :center}
-      [:text {:color text-color :size 14} (string idx)]]))
+    [:row {:id id :w 26 :h 26 :bg accent :radius 6 :align-x :center :align-y :center}
+      [:text {:color bg} (string idx)]]
+    [:row {:id id :w 26 :h 26 :bg [(muted 0) (muted 1) (muted 2) (math/floor (* hover 255))]
+           :radius 6 :align-x :center :align-y :center}
+      [:text {:color text-color} (string idx)]]))
 
 (defn- workspaces-view []
   (def out (this-output))
   (def active-tag (when out (get out "tag" 0)))
   (def occupied (sub :wm/occupied-tags))
-  [:row {:gap 4 :align-y :center :pad [2 4] :bg surface :radius 6}
+  [:row {:gap 4 :align-y :center :pad [4 6] :bg surface :radius 6}
     ;(seq [i :range [1 10]
            :let [focused (= i active-tag)
                  occ (or focused (truthy? (some |(= $ i) (or occupied []))))]
@@ -67,13 +90,12 @@
   (when out
     (def columns (get out "columns" []))
     (when (> (length columns) 0)
-      (def minimap-h 18)
-      # Sum widths, scale proportionally
+      (def minimap-h 24)
       (def total-w (sum (map |(get $ "width" 1) columns)))
-      (def minimap-w (min 180 (max 60 (* minimap-h (max 1 (* total-w 1.5))))))
+      (def minimap-w (min 200 (max 60 (* minimap-h (max 1 (* total-w 1.5))))))
       (def scale (/ minimap-w (max 0.01 total-w)))
 
-      [:row {:gap 1 :align-y :center :pad [2 4] :bg surface :radius 6}
+      [:row {:gap 1 :align-y :center :pad [4 6] :bg surface :radius 6}
         ;(seq [col :in columns
                :let [is-focused (get col "focused" false)
                      n-leaves (get col "leaves" 1)
@@ -98,54 +120,39 @@
       (def title (sub :wm/title))
       (def app-id (sub :wm/app-id))
       (if (and title (> (length title) 0))
-        [:row {:id "title" :gap 6 :align-y :center}
+        [:row {:id "title" :gap 8 :align-y :center}
           (when (and app-id (> (length app-id) 0) (not= app-id title))
-            [:text {:color muted :size 13} app-id])
-          [:text {:color text-color :size 17} title]]
-        [:text {:id "title" :color subtle :size 17} ""]))
-    [:text {:id "title" :color subtle :size 17} ""]))
+            [:text {:color muted} app-id])
+          [:text {:color text-color} title]]
+        [:text {:id "title" :color subtle} ""]))
+    [:text {:id "title" :color subtle} ""]))
 
 # -- Right-side modules --
 
-(defn- pct-color [pct]
-  (cond (>= pct 80) red (>= pct 50) yellow green))
-
-(defn- fmt-gb [g]
-  (let [w (math/floor g)
-        f (math/floor (* 10 (- g w)))]
-    (string w "." f)))
-
-(defn- fmt-rate [bps]
-  "Format bytes/sec as human-readable rate. Uses K+ units for stability."
-  (cond
-    (>= bps 1073741824) (string/format "%.1fG" (/ bps 1073741824))
-    (>= bps 104857600)  (string/format "%.0fM" (/ bps 1048576))
-    (>= bps 1048576)    (string/format "%.1fM" (/ bps 1048576))
-    (>= bps 102400)     (string/format "%.0fK" (/ bps 1024))
-    (>= bps 1024)       (string/format "%.1fK" (/ bps 1024))
-    (> bps 0)           (string/format "%.1fK" (/ bps 1024))
-    "0K"))
-
 (defn- cpu-view []
   (def pct (sub :cpu/percent))
+  (def history (sub :cpu/history))
+  (def color (pct-color pct))
   (pill
-    [:text {:color (pct-color pct) :size 14}
-      (string (math/floor pct) "%")]
-    [:text {:color subtle :size 11} "cpu"]))
+    [:area {:w 60 :h 24 :values history
+            :color (dim-color color) :smooth true}]
+    [:col {:gap 1}
+      [:text {:color color} (string (math/floor pct) "%")]
+      [:text {:color subtle :size 11} "cpu"]]))
 
 (defn- mem-view []
   (def mem (sub :mem))
+  (def history (sub :mem/history))
   (def pct (get mem :percent 0))
   (def used (get mem :used-mb 0))
-  (def total (get mem :total-mb 0))
-  (def used-str (if (>= used 1024) (fmt-gb (/ used 1024)) (string (math/floor used))))
-  (def total-str (if (>= total 1024)
-                   (string (fmt-gb (/ total 1024)) "G")
-                   (string (math/floor total) "M")))
+  (def color (pct-color pct))
   (pill
-    [:text {:color (pct-color pct) :size 13}
-      (string used-str "/" total-str)]
-    [:text {:color subtle :size 11} "mem"]))
+    [:area {:w 60 :h 24 :values history
+            :color (dim-color color) :smooth true}]
+    [:col {:gap 1}
+      [:text {:color color :size 14}
+        (string (fmt-gb (/ used 1024)) "G")]
+      [:text {:color subtle :size 11} "mem"]]))
 
 (defn- bat-view []
   (def bat (sub :bat))
@@ -154,19 +161,21 @@
     (def charging (bat :charging))
     (def color (cond charging accent (< pct 20) red (< pct 50) yellow green))
     (pill
-      [:text {:color color :size 14}
+      [:text {:color color}
         (string (if charging "⚡" "") (math/floor pct) "%")]
       [:text {:color subtle :size 11} "bat"])))
 
 (defn- disk-view []
   (def disk (sub :disk))
   (def pct (get disk :percent 0))
-  (def used (get disk :used-gb 0))
-  (def total (get disk :total-gb 0))
+  (def color (pct-color pct))
   (pill
-    [:text {:color (pct-color pct) :size 13}
-      (string (fmt-gb used) "/" (fmt-gb total) "G")]
-    [:text {:color subtle :size 11} "disk"]))
+    [:row {:w 50 :h 8 :bg overlay :radius 4}
+      [:row {:w [:percent (/ pct 100)] :h :grow :bg color :radius 4}]]
+    [:col {:gap 1}
+      [:text {:color color :size 13}
+        (string (fmt-gb (get disk :used-gb 0)) "/" (fmt-gb (get disk :total-gb 0)) "G")]
+      [:text {:color subtle :size 11} "disk"]]))
 
 (defn- net-view []
   (def net (sub :net))
@@ -174,31 +183,34 @@
   (def tx (get net :tx-rate 0))
   (def iface (get net :iface ""))
   (def ipv4 (get net :ipv4 ""))
-  [:row {:pad [4 8] :bg surface :radius 6 :gap 6 :align-y :center}
-    [:text {:color green :size 12} (string "↓" (fmt-rate rx))]
-    [:text {:color accent :size 12} (string "↑" (fmt-rate tx))]
+  [:row {:pad [6 10] :bg surface :radius 6 :gap 6 :align-y :center}
+    [:col {:gap 2}
+      [:text {:color green :size 12} (string "↓" (fmt-rate rx))]
+      [:text {:color accent :size 12} (string "↑" (fmt-rate tx))]]
     (when (> (length ipv4) 0)
-      [:text {:color muted :size 11} ipv4])
-    [:text {:color subtle :size 11} iface]])
+      [:text {:color muted :size 11} ipv4])])
 
 (defn- audio-view []
   (def audio (sub :audio))
   (def pct (get audio :percent 0))
-  (def muted (get audio :muted false))
-  (def color (cond muted red (>= pct 100) yellow accent))
-  [:row {:id "audio" :pad [4 8] :bg surface :radius 6 :gap 6 :align-y :center}
-    [:text {:color color :size 14}
-      (string (if muted "M " "") (math/floor pct) "%")]
+  (def muted-flag (get audio :muted false))
+  (def color (cond muted-flag red (>= pct 100) yellow accent))
+  [:row {:id "audio" :pad [6 10] :bg surface :radius 6 :gap 6 :align-y :center}
+    [:text {:color color}
+      (string (if muted-flag "M " "") (math/floor pct) "%")]
     [:text {:color subtle :size 11} "vol"]])
 
 (defn- clock-view []
-  (pill [:text {:color text-color :size 17} (sub :clock/time)]))
+  (pill
+    [:col {:gap 1 :align-x :right}
+      [:text {:color text-color} (sub :clock/time)]
+      [:text {:color subtle :size 12} (sub :clock/date)]]))
 
 # -- Root bar view --
 
 (defn- launcher-trigger []
-  [:row {:id "launcher" :pad [4 8] :bg surface :radius 6 :align-y :center}
-    [:text {:color subtle :size 14} "⌕"]])
+  [:row {:id "launcher" :pad [6 10] :bg surface :radius 6 :align-y :center}
+    [:text {:color subtle} "⌕"]])
 
 (defn- bar-view []
   [:row {:w :grow :h :grow :pad [0 8] :bg bg :radius 8 :align-y :center}
