@@ -85,6 +85,29 @@
 
 # -- Scroll minimap --
 
+(defn- minimap-tree
+  "Recursively render a column tree node into hiccup."
+  [node w h]
+  (def node-type (get node "type" "leaf"))
+  (def focused (get node "focused" false))
+  (def color (if focused accent overlay))
+  (if (= node-type "leaf")
+    [:row {:w w :h h :bg color :radius 1}]
+    # Container: split children along the orientation axis
+    (let [children (get node "children" [])
+          n (length children)
+          orient (get node "orientation" "vertical")
+          vertical (= orient "vertical")
+          gap 1
+          total-gap (* gap (max 0 (- n 1)))
+          avail (- (if vertical h w) total-gap)
+          child-size (max 2 (math/floor (/ avail (max 1 n))))]
+      [(if vertical :col :row) {:gap gap :w w :h h}
+        ;(seq [c :in children]
+           (minimap-tree c
+             (if vertical w child-size)
+             (if vertical child-size h)))])))
+
 (defn- scroll-minimap []
   (def out (this-output))
   (when out
@@ -97,18 +120,21 @@
 
       [:row {:gap 1 :align-y :center :pad [4 6] :bg surface :radius 6}
         ;(seq [col :in columns
-               :let [is-focused (get col "focused" false)
-                     n-leaves (get col "leaves" 1)
-                     col-w (get col "width" 1)
+               :let [col-w (get col "width" 1)
                      scaled-w (max 3 (math/floor (* col-w scale)))
-                     base-color (if is-focused accent overlay)]]
-           (if (<= n-leaves 1)
-             [:row {:w scaled-w :h minimap-h :bg base-color :radius 2}]
-             [:col {:gap 1 :w scaled-w :h minimap-h :radius 2}
-               ;(seq [r :range [0 n-leaves]
-                      :let [row-h (max 2 (math/floor (/ (- minimap-h (- n-leaves 1)) n-leaves)))
-                            color base-color]]
-                  [:row {:w scaled-w :h row-h :bg color :radius 1}])]))])))
+                     tree (get col "tree")]]
+           (if tree
+             (minimap-tree tree scaled-w minimap-h)
+             # Fallback for compositors that don't send tree data
+             (let [n-leaves (get col "leaves" 1)
+                   is-focused (get col "focused" false)
+                   color (if is-focused accent overlay)]
+               (if (<= n-leaves 1)
+                 [:row {:w scaled-w :h minimap-h :bg color :radius 2}]
+                 [:col {:gap 1 :w scaled-w :h minimap-h}
+                   ;(seq [_ :range [0 n-leaves]
+                          :let [row-h (max 2 (math/floor (/ (- minimap-h (- n-leaves 1)) n-leaves)))]]
+                      [:row {:w scaled-w :h row-h :bg color :radius 1}])]))))])))
 
 # -- Title --
 
