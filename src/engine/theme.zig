@@ -25,7 +25,7 @@ pub const Theme = struct {
 
     // Font configuration
     font_family: []const u8 = "monospace",
-    font_size: u16 = 14,
+    font_size: u16 = 21,
 
     // --- Semantic accessors ---
 
