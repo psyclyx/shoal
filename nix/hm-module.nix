@@ -31,12 +31,14 @@ let
 
       height = lib.mkOption {
         type = lib.types.ints.unsigned;
-        default = 40;
+        default = 0;
+        description = "Surface height in pixels. 0 = auto-size to content.";
       };
 
       exclusive_zone = lib.mkOption {
         type = lib.types.int;
-        default = 44;
+        default = 0;
+        description = "Exclusive zone in pixels. 0 = auto (follows height + margins).";
       };
 
       margin = lib.mkOption {
@@ -129,17 +131,24 @@ in {
         };
         Install.WantedBy = [ "graphical-session.target" ];
       };
+
     }
 
     # Generate config file when surfaces or theme are configured
     (lib.mkIf (cfg.surfaces != {} || cfg.theme != {}) {
-      xdg.configFile."shoal/config.json".text = configJson;
+      xdg.configFile."shoal/config.json" = {
+        text = configJson;
+        onChange = "systemctl restart --user shoal.service || true";
+      };
     })
 
     # Generate user Janet modules
     (lib.mkIf (cfg.modules != {}) {
       xdg.configFile = lib.mapAttrs' (name: text:
-        lib.nameValuePair "shoal/${name}.janet" { inherit text; }
+        lib.nameValuePair "shoal/${name}.janet" {
+          inherit text;
+          onChange = "systemctl restart --user shoal.service || true";
+        }
       ) cfg.modules;
     })
 
