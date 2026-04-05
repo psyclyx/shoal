@@ -29,7 +29,8 @@ pub const Vertex = extern struct {
     radius_tr: f32,
     radius_bl: f32,
     radius_br: f32,
-    // 0.0 = solid colour with rounded-rect SDF, 1.0 = texture sample
+    // 0.0 = solid colour with rounded-rect SDF, 1.0 = texture sample,
+    // 2.0 = area fill curve, 3.0 = line stroke curve
     mode: f32,
 };
 
@@ -83,6 +84,14 @@ const frag_src: [*c]const u8 =
     \\
     \\uniform sampler2D u_atlas;
     \\
+    \\// Curve uniforms
+    \\uniform float u_values[64];
+    \\uniform int u_value_count;
+    \\uniform vec4 u_color2;
+    \\uniform float u_fill;
+    \\uniform float u_thickness;
+    \\uniform int u_smooth;
+    \\
     \\out vec4 frag_color;
     \\
     \\float roundedRectSDF(vec2 p, vec2 half_size, float radius) {
@@ -90,34 +99,75 @@ const frag_src: [*c]const u8 =
     \\    return min(max(d.x, d.y), 0.0) + length(max(d, 0.0)) - radius;
     \\}
     \\
-    \\void main() {
-    \\    if (v_mode > 0.5) {
-    \\        // Texture (glyph atlas) mode -- single-channel alpha
-    \\        // Gamma-correct the coverage: FreeType produces linear coverage
-    \\        // but we blend in sRGB space, so boost midtones (approx sRGB transfer).
-    \\        float a = pow(texture(u_atlas, v_uv).r, 1.0 / 2.2);
-    \\        frag_color = vec4(v_color.rgb, v_color.a * a);
-    \\    } else {
-    \\        // Solid colour with rounded-rect SDF antialiasing
-    \\        vec2 half_size = v_rect_size * 0.5;
-    \\        vec2 p = v_local_pos - half_size; // centre-relative coords
+    \\float catmullRom(float p0, float p1, float p2, float p3, float t) {
+    \\    float t2 = t * t;
+    \\    float t3 = t2 * t;
+    \\    return 0.5 * ((2.0 * p1) +
+    \\                   (-p0 + p2) * t +
+    \\                   (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2 +
+    \\                   (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3);
+    \\}
     \\
-    \\        // Pick the radius for the quadrant this fragment is in
-    \\        // corner_radius: tl, tr, bl, br
+    \\float sampleCurve(float x) {
+    \\    if (u_value_count < 2) return u_value_count > 0 ? u_values[0] : 0.0;
+    \\    float pos = x * float(u_value_count - 1);
+    \\    int idx = int(floor(pos));
+    \\    float t = fract(pos);
+    \\    int i0 = clamp(idx - 1, 0, u_value_count - 1);
+    \\    int i1 = clamp(idx,     0, u_value_count - 1);
+    \\    int i2 = clamp(idx + 1, 0, u_value_count - 1);
+    \\    int i3 = clamp(idx + 2, 0, u_value_count - 1);
+    \\    if (u_smooth > 0) {
+    \\        return clamp(catmullRom(u_values[i0], u_values[i1],
+    \\                                u_values[i2], u_values[i3], t), 0.0, 1.0);
+    \\    } else {
+    \\        return mix(u_values[i1], u_values[i2], t);
+    \\    }
+    \\}
+    \\
+    \\void main() {
+    \\    if (v_mode > 2.5) {
+    \\        // Mode 3: line stroke curve
+    \\        float curve_val = sampleCurve(v_uv.x);
+    \\        float curve_y = 1.0 - curve_val;
+    \\        float dist = abs(v_uv.y - curve_y) * v_rect_size.y;
+    \\        float half_thick = u_thickness * 0.5;
+    \\        float aa = 1.0 - smoothstep(half_thick - 0.5, half_thick + 0.5, dist);
+    \\        float speculative = smoothstep(u_fill - 0.02, u_fill, v_uv.x);
+    \\        vec4 color = mix(v_color, u_color2, speculative);
+    \\        float a = aa * color.a;
+    \\        frag_color = vec4(color.rgb * a, a);
+    \\    } else if (v_mode > 1.5) {
+    \\        // Mode 2: area fill curve
+    \\        float curve_val = sampleCurve(v_uv.x);
+    \\        float curve_y = 1.0 - curve_val;
+    \\        float pixel_size = 1.0 / v_rect_size.y;
+    \\        float aa = smoothstep(curve_y - pixel_size, curve_y + pixel_size, v_uv.y);
+    \\        float speculative = smoothstep(u_fill - 0.02, u_fill, v_uv.x);
+    \\        vec4 color = mix(v_color, u_color2, speculative);
+    \\        float a = aa * color.a;
+    \\        frag_color = vec4(color.rgb * a, a);
+    \\    } else if (v_mode > 0.5) {
+    \\        // Mode 1: texture (glyph atlas) -- single-channel alpha
+    \\        float a = texture(u_atlas, v_uv).r * v_color.a;
+    \\        frag_color = vec4(v_color.rgb * a, a);
+    \\    } else {
+    \\        // Mode 0: solid colour with rounded-rect SDF antialiasing
+    \\        vec2 half_size = v_rect_size * 0.5;
+    \\        vec2 p = v_local_pos - half_size;
     \\        float radius;
     \\        if (p.x < 0.0 && p.y < 0.0) {
-    \\            radius = v_corner_radius.x; // top-left
+    \\            radius = v_corner_radius.x;
     \\        } else if (p.x >= 0.0 && p.y < 0.0) {
-    \\            radius = v_corner_radius.y; // top-right
+    \\            radius = v_corner_radius.y;
     \\        } else if (p.x < 0.0 && p.y >= 0.0) {
-    \\            radius = v_corner_radius.z; // bottom-left
+    \\            radius = v_corner_radius.z;
     \\        } else {
-    \\            radius = v_corner_radius.w; // bottom-right
+    \\            radius = v_corner_radius.w;
     \\        }
-    \\
     \\        float dist = roundedRectSDF(p, half_size, radius);
-    \\        float aa = 1.0 - smoothstep(-0.5, 0.5, dist);
-    \\        frag_color = vec4(v_color.rgb, v_color.a * aa);
+    \\        float aa = (1.0 - smoothstep(-0.5, 0.5, dist)) * v_color.a;
+    \\        frag_color = vec4(v_color.rgb * aa, aa);
     \\    }
     \\}
     \\
@@ -136,6 +186,13 @@ pub const Renderer = struct {
     // Uniform locations
     u_projection: c.GLint,
     u_atlas: c.GLint,
+    // Curve uniforms
+    u_values: c.GLint,
+    u_value_count: c.GLint,
+    u_color2: c.GLint,
+    u_fill: c.GLint,
+    u_thickness: c.GLint,
+    u_smooth: c.GLint,
 
     // CPU-side vertex accumulator
     vertices: std.ArrayListUnmanaged(Vertex),
@@ -155,6 +212,12 @@ pub const Renderer = struct {
 
         const u_projection = c.glGetUniformLocation(program, "u_projection");
         const u_atlas = c.glGetUniformLocation(program, "u_atlas");
+        const u_values = c.glGetUniformLocation(program, "u_values");
+        const u_value_count = c.glGetUniformLocation(program, "u_value_count");
+        const u_color2 = c.glGetUniformLocation(program, "u_color2");
+        const u_fill = c.glGetUniformLocation(program, "u_fill");
+        const u_thickness = c.glGetUniformLocation(program, "u_thickness");
+        const u_smooth = c.glGetUniformLocation(program, "u_smooth");
 
         // --- VAO / VBO ---
         var vao: c.GLuint = 0;
@@ -199,6 +262,12 @@ pub const Renderer = struct {
             .vbo = vbo,
             .u_projection = u_projection,
             .u_atlas = u_atlas,
+            .u_values = u_values,
+            .u_value_count = u_value_count,
+            .u_color2 = u_color2,
+            .u_fill = u_fill,
+            .u_thickness = u_thickness,
+            .u_smooth = u_smooth,
             .vertices = .{},
             .allocator = allocator,
             .width = 0,
@@ -227,7 +296,7 @@ pub const Renderer = struct {
         c.glClear(c.GL_COLOR_BUFFER_BIT);
 
         c.glEnable(c.GL_BLEND);
-        c.glBlendFunc(c.GL_SRC_ALPHA, c.GL_ONE_MINUS_SRC_ALPHA);
+        c.glBlendFunc(c.GL_ONE, c.GL_ONE_MINUS_SRC_ALPHA);
 
         c.glUseProgram(self.program);
 
@@ -317,6 +386,42 @@ pub const Renderer = struct {
         }
     }
 
+    /// Draw a curve (area fill or line stroke) evaluated per-pixel in the fragment shader.
+    /// Flushes the vertex batch to set curve-specific uniforms.
+    pub fn drawCurve(
+        self: *Renderer,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        values: []const f32,
+        value_count: u32,
+        color: [4]f32,
+        color2: [4]f32,
+        fill: f32,
+        thickness: f32,
+        smooth: bool,
+        is_line: bool,
+    ) void {
+        self.flush();
+
+        // Set curve uniforms
+        c.glUniform1fv(self.u_values, @intCast(value_count), values.ptr);
+        c.glUniform1i(self.u_value_count, @intCast(value_count));
+        c.glUniform4f(self.u_color2, color2[0], color2[1], color2[2], color2[3]);
+        c.glUniform1f(self.u_fill, fill);
+        c.glUniform1f(self.u_thickness, thickness);
+        c.glUniform1i(self.u_smooth, @intFromBool(smooth));
+
+        // Mode 2.0 = area fill, 3.0 = line stroke.
+        // UV is 0-1 across the quad (same mapping as mode 0 rects).
+        const mode: f32 = if (is_line) 3.0 else 2.0;
+        self.pushQuad(x, y, w, h, color, .{ 0, 0, 0, 0 }, .{ 0, 0, 1, 1 }, mode);
+
+        // Flush immediately so curve uniforms only apply to this quad.
+        self.flush();
+    }
+
     /// Enable scissor test to clip rendering to the given rectangle.
     pub fn setScissor(self: *Renderer, x: f32, y: f32, w: f32, h: f32) void {
         // Flush anything that was queued before the scissor change.
@@ -371,13 +476,14 @@ pub const Renderer = struct {
         uv_rect: [4]f32, // u0, v0, u1, v1
         mode: f32,
     ) void {
-        // For solid-colour quads the UV encodes the normalised local position
-        // (0..1 mapping to 0..rect_size) so the fragment shader can compute
-        // the SDF. For textured quads the UV is the atlas coordinate.
-        const uv_l = if (mode < 0.5) @as(f32, 0.0) else uv_rect[0];
-        const uv_t = if (mode < 0.5) @as(f32, 0.0) else uv_rect[1];
-        const uv_r = if (mode < 0.5) @as(f32, 1.0) else uv_rect[0] + uv_rect[2];
-        const uv_b = if (mode < 0.5) @as(f32, 1.0) else uv_rect[1] + uv_rect[3];
+        // For solid-colour quads and curves, UV encodes the normalised local
+        // position (0..1 mapping to 0..rect_size). For textured quads the UV
+        // is the atlas coordinate.
+        const is_normalized = mode < 0.5 or mode > 1.5;
+        const uv_l = if (is_normalized) @as(f32, 0.0) else uv_rect[0];
+        const uv_t = if (is_normalized) @as(f32, 0.0) else uv_rect[1];
+        const uv_r = if (is_normalized) @as(f32, 1.0) else uv_rect[0] + uv_rect[2];
+        const uv_b = if (is_normalized) @as(f32, 1.0) else uv_rect[1] + uv_rect[3];
 
         const base = Vertex{
             .x = 0,
