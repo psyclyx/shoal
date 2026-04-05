@@ -163,7 +163,7 @@
     [:area {:w 60 :h 24 :values history
             :color (dim-color color) :smooth true}]
     [:col {:gap 1}
-      [:text {:color color} (string (math/floor pct) "%")]
+      [:text {:color color :size 16} (string (math/floor pct) "%")]
       [:text {:color subtle :size 11} "cpu"]]))
 
 (defn- mem-view []

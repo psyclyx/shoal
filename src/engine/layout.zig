@@ -12,6 +12,7 @@ pub const Layout = struct {
     renderer: *Renderer,
     width: f32,
     height: f32,
+    content_height: f32 = 0,
 
     pub fn init(allocator: std.mem.Allocator, text_renderer: *TextRenderer, renderer: *Renderer) !Layout {
         const min_memory = clay.minMemorySize();
@@ -65,8 +66,11 @@ pub const Layout = struct {
     }
 
     fn processRenderCommands(self: *Layout, commands: []clay.RenderCommand) void {
+        var max_bottom: f32 = 0;
         for (commands) |cmd| {
             const bb = cmd.bounding_box;
+            const bottom = bb.y + bb.height;
+            if (bottom > max_bottom) max_bottom = bottom;
             switch (cmd.command_type) {
                 .rectangle => {
                     const rect = cmd.render_data.rectangle;
@@ -154,6 +158,7 @@ pub const Layout = struct {
                 .none => {},
             }
         }
+        self.content_height = max_bottom;
     }
 
     fn renderText(self: *Layout, x: f32, y: f32, text: []const u8, font_id: u16, font_size: u16, color: [4]f32) void {
