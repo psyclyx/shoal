@@ -155,13 +155,32 @@
 
 # -- Right-side modules --
 
+(defn- interp-values [history pending anim-id]
+  "Build sparkline values with an interpolated pending point."
+  (def t (anim anim-id))
+  (if (and pending (> (length history) 0))
+    (let [last-val (last history)
+          live (+ last-val (* t (- pending last-val)))]
+      [;history live])
+    history))
+
+(defn- spark-fill [values]
+  "Fill boundary: everything except the last (live) segment is confirmed."
+  (def n (length values))
+  (if (> n 2) (/ (- n 2) (- n 1)) 1))
+
 (defn- cpu-view []
   (def pct (sub :cpu/percent))
   (def history (sub :cpu/history))
+  (def pending (sub :cpu/pending))
+  (def values (interp-values history pending :cpu/interp))
   (def color (pct-color pct))
   (pill
-    [:area {:w 60 :h 24 :values history
-            :color (dim-color color) :smooth true}]
+    [:area {:w 60 :h 24 :values values
+            :color (dim-color color)
+            :color2 (dim-color color 60)
+            :fill (spark-fill values)
+            :smooth true}]
     [:col {:gap 1}
       [:text {:color color :size 16} (string (math/floor pct) "%")]
       [:text {:color subtle :size 11} "cpu"]]))
@@ -169,12 +188,17 @@
 (defn- mem-view []
   (def mem (sub :mem))
   (def history (sub :mem/history))
+  (def pending (sub :mem/pending))
+  (def values (interp-values history pending :mem/interp))
   (def pct (get mem :percent 0))
   (def used (get mem :used-mb 0))
   (def color (pct-color pct))
   (pill
-    [:area {:w 60 :h 24 :values history
-            :color (dim-color color) :smooth true}]
+    [:area {:w 60 :h 24 :values values
+            :color (dim-color color)
+            :color2 (dim-color color 60)
+            :fill (spark-fill values)
+            :smooth true}]
     [:col {:gap 1}
       [:text {:color color :size 14}
         (string (fmt-gb (/ used 1024)) "G")]

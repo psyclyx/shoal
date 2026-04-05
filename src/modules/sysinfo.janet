@@ -39,10 +39,17 @@
         (def pct (if (> dt 0)
                    (math/round (* 100 (/ (- dt di) dt)))
                    0))
+        (def normalized (/ pct 100))
+        (def old-pending (get prev :pending))
+        (def history (if old-pending
+                       (push-history (get prev :history) old-pending 60)
+                       (get prev :history @[])))
         {:db (put (cofx :db) :cpu {:percent pct
                                     :prev-idle idle
                                     :prev-total total
-                                    :history (push-history (get prev :history) (/ pct 100) 30)})}))))
+                                    :history history
+                                    :pending normalized})
+         :anim {:id :cpu/interp :from 0 :to 1 :duration 1.8 :easing :ease-out-quad}}))))
 
 (reg-event-handler :init
   (fn [cofx event]
@@ -52,6 +59,7 @@
 (reg-sub :cpu (fn [db] (get db :cpu {})))
 (reg-sub :cpu/percent [:cpu] (fn [cpu] (get cpu :percent 0)))
 (reg-sub :cpu/history [:cpu] (fn [cpu] (get cpu :history [])))
+(reg-sub :cpu/pending [:cpu] (fn [cpu] (get cpu :pending nil)))
 (reg-sub :cpu/text [:cpu]
   (fn [cpu] (string "cpu " (math/floor (get cpu :percent 0)) "%")))
 
@@ -86,10 +94,17 @@
         (def total-mb (math/floor (/ total-kb 1024)))
         (def pct (math/round (* 100.0 (/ (- total-kb avail-kb) total-kb))))
         (def prev-mem (get (cofx :db) :mem {}))
+        (def normalized (/ pct 100))
+        (def old-pending (get prev-mem :pending))
+        (def history (if old-pending
+                       (push-history (get prev-mem :history) old-pending 60)
+                       (get prev-mem :history @[])))
         {:db (put (cofx :db) :mem {:used-mb used-mb
                                     :total-mb total-mb
                                     :percent pct
-                                    :history (push-history (get prev-mem :history) (/ pct 100) 30)})}))))
+                                    :history history
+                                    :pending normalized})
+         :anim {:id :mem/interp :from 0 :to 1 :duration 4.5 :easing :ease-out-quad}}))))
 
 (reg-event-handler :init
   (fn [cofx event]
@@ -98,6 +113,7 @@
 
 (reg-sub :mem (fn [db] (get db :mem {})))
 (reg-sub :mem/history [:mem] (fn [mem] (get mem :history [])))
+(reg-sub :mem/pending [:mem] (fn [mem] (get mem :pending nil)))
 (defn- fmt-mem [mb]
   "Format MB as GiB with 1 decimal when >= 1024, otherwise as integer MB."
   (if (>= mb 1024)
