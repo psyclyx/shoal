@@ -9,11 +9,11 @@ pub const Config = struct {
 
     // Surface properties
     layer: Layer = .top,
-    anchor: Anchor = .{ .top = true, .left = true, .right = true },
+    anchor: Anchor = .{ .bottom = true, .left = true, .right = true },
     width: u32 = 0,
     height: u32 = 0,
     exclusive_zone: i32 = 0,
-    margin: Margin = .{ .top = 4, .left = 6, .right = 6 },
+    margin: Margin = .{},
     namespace: [:0]const u8 = "shoal",
     keyboard_interactivity: KeyboardInteractivity = .none,
 
