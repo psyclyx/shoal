@@ -880,10 +880,8 @@ pub const Dispatch = struct {
     // -------------------------------------------------------------------
 
     pub fn initFileReader(self: *Dispatch) void {
-        self.file_reader = fileio.AsyncReader.init() catch {
-            log.warn("failed to init async file reader", .{});
-            return;
-        };
+        self.file_reader = fileio.AsyncReader.init();
+        if (self.file_reader) |*r| r.startWorker();
     }
 
     pub fn deinitFileReader(self: *Dispatch) void {

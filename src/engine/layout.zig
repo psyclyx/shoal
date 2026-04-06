@@ -154,7 +154,9 @@ pub const Layout = struct {
                             curve.thickness,
                             curve.smooth,
                             curve.mirror,
-                            curve.grid,
+                            curve.scroll,
+                            curve.grid_lines,
+                            curve.grid_count,
                             curve.is_line,
                         );
                     }

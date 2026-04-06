@@ -35,6 +35,7 @@ var kw_thickness: jc.Janet = undefined;
 var kw_smooth: jc.Janet = undefined;
 var kw_mirror: jc.Janet = undefined;
 var kw_grid: jc.Janet = undefined;
+var kw_scroll: jc.Janet = undefined;
 // Sizing keywords
 var kw_grow: jc.Janet = undefined;
 var kw_fit: jc.Janet = undefined;
@@ -74,7 +75,9 @@ pub const CurveData = struct {
     thickness: f32 = 1.5,
     smooth: bool = true,
     mirror: bool = false,
-    grid: bool = false,
+    scroll: f32 = 0,
+    grid_lines: [8]f32 = [_]f32{0} ** 8,
+    grid_count: u32 = 0,
     is_line: bool = false,
 };
 
@@ -127,6 +130,7 @@ pub fn init() void {
     kw_smooth = janet.kw("smooth");
     kw_mirror = janet.kw("mirror");
     kw_grid = janet.kw("grid");
+    kw_scroll = janet.kw("scroll");
     kw_grow = janet.kw("grow");
     kw_fit = janet.kw("fit");
     kw_percent = janet.kw("percent");
@@ -313,10 +317,36 @@ fn walkCurve(is_line: bool, attrs: jc.Janet) void {
             data.mirror = jc.janet_truthy(mirror_val) != 0;
         }
 
-        // :grid — draw horizontal guide lines
+        // :scroll — spatial scroll offset (0-1, shifts sample coordinate)
+        const scroll_val = janet.janetGet(attrs, kw_scroll);
+        if (jc.janet_checktype(scroll_val, jc.JANET_NIL) == 0) {
+            data.scroll = janetToF32(scroll_val) orelse 0;
+        }
+
+        // :grid — grid lines: true (default 3 even), int N (N even), or [pos ...] (0-1 floats)
         const grid_val = janet.janetGet(attrs, kw_grid);
         if (jc.janet_checktype(grid_val, jc.JANET_NIL) == 0) {
-            data.grid = jc.janet_truthy(grid_val) != 0;
+            const grid_items = janetIndexedSlice(grid_val);
+            if (grid_items) |items| {
+                // Array of normalized positions
+                const n: usize = @min(items.len, 8);
+                for (items[0..n], 0..) |item, i| {
+                    data.grid_lines[i] = janetToF32(item) orelse 0;
+                }
+                data.grid_count = @intCast(n);
+            } else if (jc.janet_checktype(grid_val, jc.JANET_NUMBER) != 0) {
+                const n_int = @as(i32, @intFromFloat(jc.janet_unwrap_number(grid_val)));
+                const n: u32 = if (n_int > 0) @intCast(n_int) else 0;
+                const capped = @min(n, 8);
+                for (0..capped) |i| {
+                    data.grid_lines[i] = @as(f32, @floatFromInt(i + 1)) / @as(f32, @floatFromInt(capped));
+                }
+                data.grid_count = capped;
+            } else if (jc.janet_truthy(grid_val) != 0) {
+                // true → 3 evenly spaced
+                data.grid_lines = .{ 1.0 / 3.0, 2.0 / 3.0, 1.0, 0, 0, 0, 0, 0 };
+                data.grid_count = 3;
+            }
         }
     }
 

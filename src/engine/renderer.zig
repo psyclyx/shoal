@@ -95,6 +95,8 @@ const frag_src: [*c]const u8 =
     \\uniform int u_smooth;
     \\uniform int u_mirror;
     \\uniform int u_grid;
+    \\uniform float u_grid_lines[8];
+    \\uniform float u_scroll;
     \\
     \\out vec4 frag_color;
     \\
@@ -114,7 +116,10 @@ const frag_src: [*c]const u8 =
     \\
     \\float sampleArray(float x, int count, float vals[64]) {
     \\    if (count < 2) return count > 0 ? vals[0] : 0.0;
-    \\    float pos = x * float(count - 1);
+    \\    // When scrolling, count includes one extra value (the pending point).
+    \\    // u_scroll shifts the visible window: at 0 show [0..N-1], at 1 show [1..N].
+    \\    float span = u_scroll > 0.001 ? float(count - 2) : float(count - 1);
+    \\    float pos = u_scroll + x * span;
     \\    int idx = int(floor(pos));
     \\    float t = fract(pos);
     \\    int i0 = clamp(idx - 1, 0, count - 1);
@@ -151,7 +156,9 @@ const frag_src: [*c]const u8 =
     \\void main() {
     \\    if (v_mode > 2.5) {
     \\        // Mode 3: line stroke curve — constant thickness
-    \\        float curve_y = 1.0 - sampleCurve(v_uv.x);
+    \\        float lsv = sampleCurve(v_uv.x);
+    \\        float lmin = 2.5 / v_rect_size.y;
+    \\        float curve_y = 1.0 - (lsv > 0.001 ? max(lsv, lmin) : lsv);
     \\        float aa = lineCoverage(v_uv.y, curve_y, u_thickness, v_rect_size.y);
     \\        float speculative = smoothstep(u_fill - 0.02, u_fill, v_uv.x);
     \\        vec4 color = mix(v_color, u_color2, speculative);
@@ -165,8 +172,11 @@ const frag_src: [*c]const u8 =
     \\        if (u_mirror > 0 && u_value_count2 > 0) {
     \\            // Mirrored: values1 area above center, values2 below
     \\            float center = 0.5;
-    \\            float c1 = sampleCurve(v_uv.x) * 0.5;
-    \\            float c2 = sampleCurve2(v_uv.x) * 0.5;
+    \\            float min_vis = 2.5 / v_rect_size.y;
+    \\            float c1_raw = sampleCurve(v_uv.x) * 0.5;
+    \\            float c2_raw = sampleCurve2(v_uv.x) * 0.5;
+    \\            float c1 = c1_raw > 0.001 ? max(c1_raw, min_vis) : c1_raw;
+    \\            float c2 = c2_raw > 0.001 ? max(c2_raw, min_vis) : c2_raw;
     \\            float top = center - c1;
     \\            float bot = center + c2;
     \\            // Upper fill
@@ -180,20 +190,27 @@ const frag_src: [*c]const u8 =
     \\            float line_dn = lineCoverage(v_uv.y, bot, 2.0, v_rect_size.y);
     \\            float a1 = max(fill_up, line_up) * v_color.a;
     \\            float a2 = max(fill_dn, line_dn) * u_color2.a;
+    \\            // Center divider — thin line to separate the two halves
+    \\            float center_dist = abs(v_uv.y - center) * v_rect_size.y;
+    \\            float divider = (1.0 - smoothstep(0.0, 1.0, center_dist)) * 0.25;
     \\            a = a1 + a2 * (1.0 - a1);
+    \\            a = max(a, divider);
     \\            vec3 rgb = (v_color.rgb * a1 + u_color2.rgb * a2 * (1.0 - a1));
     \\            if (a > 0.001) rgb /= a;
     \\            color = vec4(rgb, 1.0);
     \\        } else {
     \\            // Standard bottom-up area fill
-    \\            float curve_y = 1.0 - sampleCurve(v_uv.x);
+    \\            float sv = sampleCurve(v_uv.x);
+    \\            float min_vis = 2.5 / v_rect_size.y;
+    \\            float curve_y = 1.0 - (sv > 0.001 ? max(sv, min_vis) : sv);
     \\            a = areaCoverage(v_uv.y, curve_y, v_rect_size.y) * v_color.a;
     \\            // Add edge line for readability
     \\            float edge_line = lineCoverage(v_uv.y, curve_y, 2.0, v_rect_size.y);
     \\            a = max(a, edge_line * v_color.a);
     \\            // Overlay second series as line stroke
     \\            if (u_value_count2 > 0) {
-    \\                float c2_y = 1.0 - sampleCurve2(v_uv.x);
+    \\                float sv2 = sampleCurve2(v_uv.x);
+    \\                float c2_y = 1.0 - (sv2 > 0.001 ? max(sv2, min_vis) : sv2);
     \\                float la = lineCoverage(v_uv.y, c2_y, 2.0, v_rect_size.y) * u_color2.a;
     \\                a = la + a * (1.0 - la);
     \\                vec3 bl = u_color2.rgb * la + color.rgb * (a - la);
@@ -202,17 +219,25 @@ const frag_src: [*c]const u8 =
     \\            }
     \\        }
     \\
-    \\        // Grid lines — fixed horizontal lines, independent of curve
+    \\        // Grid lines at specified value-space positions
     \\        if (u_grid > 0) {
-    \\            float py = v_uv.y * v_rect_size.y; // pixel y position
-    \\            float g1 = abs(py - v_rect_size.y * 0.25);
-    \\            float g2 = abs(py - v_rect_size.y * 0.5);
-    \\            float g3 = abs(py - v_rect_size.y * 0.75);
-    \\            float gmin = min(g1, min(g2, g3));
-    \\            float ga = (1.0 - smoothstep(0.0, 1.5, gmin)) * 0.2;
-    \\            // Premultiplied composite over curve
-    \\            float ga_pm = ga;
-    \\            a = ga_pm + a * (1.0 - ga_pm);
+    \\            float py = v_uv.y * v_rect_size.y;
+    \\            float gmin = 1.0e6;
+    \\            int gc = min(u_grid, 8);
+    \\            for (int i = 0; i < gc; i++) {
+    \\                float val = u_grid_lines[i];
+    \\                if (val <= 0.0 || val > 1.0) continue;
+    \\                if (u_mirror > 0) {
+    \\                    float gy_top = (0.5 - val * 0.5) * v_rect_size.y;
+    \\                    float gy_bot = (0.5 + val * 0.5) * v_rect_size.y;
+    \\                    gmin = min(gmin, min(abs(py - gy_top), abs(py - gy_bot)));
+    \\                } else {
+    \\                    float gy = (1.0 - val) * v_rect_size.y;
+    \\                    gmin = min(gmin, abs(py - gy));
+    \\                }
+    \\            }
+    \\            float ga = (1.0 - smoothstep(0.0, 1.5, gmin)) * 0.15;
+    \\            a = ga + a * (1.0 - ga);
     \\        }
     \\
     \\        frag_color = vec4(color.rgb * a, a);
@@ -266,6 +291,8 @@ pub const Renderer = struct {
     u_smooth: c.GLint,
     u_mirror: c.GLint,
     u_grid: c.GLint,
+    u_grid_lines: c.GLint,
+    u_scroll: c.GLint,
 
     // CPU-side vertex accumulator
     vertices: std.ArrayListUnmanaged(Vertex),
@@ -295,6 +322,8 @@ pub const Renderer = struct {
         const u_smooth = c.glGetUniformLocation(program, "u_smooth");
         const u_mirror = c.glGetUniformLocation(program, "u_mirror");
         const u_grid = c.glGetUniformLocation(program, "u_grid");
+        const u_grid_lines = c.glGetUniformLocation(program, "u_grid_lines");
+        const u_scroll = c.glGetUniformLocation(program, "u_scroll");
 
         // --- VAO / VBO ---
         var vao: c.GLuint = 0;
@@ -349,6 +378,8 @@ pub const Renderer = struct {
             .u_smooth = u_smooth,
             .u_mirror = u_mirror,
             .u_grid = u_grid,
+            .u_grid_lines = u_grid_lines,
+            .u_scroll = u_scroll,
             .vertices = .{},
             .allocator = allocator,
             .width = 0,
@@ -485,7 +516,9 @@ pub const Renderer = struct {
         thickness: f32,
         smooth: bool,
         mirror: bool,
-        grid: bool,
+        scroll: f32,
+        grid_lines: [8]f32,
+        grid_count: u32,
         is_line: bool,
     ) void {
         self.flush();
@@ -502,7 +535,11 @@ pub const Renderer = struct {
         c.glUniform1f(self.u_thickness, thickness);
         c.glUniform1i(self.u_smooth, @intFromBool(smooth));
         c.glUniform1i(self.u_mirror, @intFromBool(mirror));
-        c.glUniform1i(self.u_grid, @intFromBool(grid));
+        c.glUniform1f(self.u_scroll, scroll);
+        c.glUniform1i(self.u_grid, @intCast(grid_count));
+        if (grid_count > 0) {
+            c.glUniform1fv(self.u_grid_lines, @intCast(grid_count), &grid_lines);
+        }
 
         // Mode 2.0 = area fill, 3.0 = line stroke.
         // UV is 0-1 across the quad (same mapping as mode 0 rects).

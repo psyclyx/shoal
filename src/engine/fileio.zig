@@ -44,14 +44,23 @@ pub const AsyncReader = struct {
     thread: ?std.Thread = null,
     shutdown: bool = false,
 
-    pub fn init() !AsyncReader {
-        const fds = try std.posix.pipe2(.{ .CLOEXEC = true, .NONBLOCK = true });
-        var self = AsyncReader{
+    pub fn init() AsyncReader {
+        const fds = std.posix.pipe2(.{ .CLOEXEC = true, .NONBLOCK = true }) catch
+            return AsyncReader{};
+        return AsyncReader{
             .pipe_read = fds[0],
             .pipe_write = fds[1],
         };
-        self.thread = try std.Thread.spawn(.{}, workerLoop, .{&self});
-        return self;
+    }
+
+    /// Spawn the worker thread. Must be called after the struct is at its
+    /// final memory location (not a stack temporary that will be moved).
+    pub fn startWorker(self: *AsyncReader) void {
+        if (self.pipe_read < 0) return; // init failed
+        self.thread = std.Thread.spawn(.{}, workerLoop, .{self}) catch {
+            log.err("async-slurp: failed to spawn worker thread", .{});
+            return;
+        };
     }
 
     pub fn deinit(self: *AsyncReader) void {

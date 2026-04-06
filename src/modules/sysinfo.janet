@@ -52,7 +52,7 @@
                                     :prev-total total
                                     :history history
                                     :pending normalized})
-         :anim {:id :cpu/interp :from 0 :to 1 :duration 1.8 :easing :linear}}))))
+         :anim {:id :cpu/interp :from 0 :to 1 :duration 2.0 :easing :linear}}))))
 
 (reg-event-handler :init
   (fn [cofx event]
@@ -110,7 +110,7 @@
                                     :percent pct
                                     :history history
                                     :pending normalized})
-         :anim {:id :mem/interp :from 0 :to 1 :duration 4.5 :easing :linear}}))))
+         :anim {:id :mem/interp :from 0 :to 1 :duration 5.0 :easing :linear}}))))
 
 (reg-event-handler :init
   (fn [cofx event]
@@ -266,16 +266,22 @@
       (def tick-count (+ 1 (get prev :tick-count 0)))
       (def update-ips (or (nil? (get prev :ipv4)) (= 0 (% tick-count 30))))
       (def ipv4 (if update-ips (or (get-local-ipv4) "") (get prev :ipv4 "")))
-      (def rx-clamped (max 0 rx-rate))
-      (def tx-clamped (max 0 tx-rate))
-      # Scale tracking: zoom out instantly with 50% headroom,
-      # zoom in at 0.5% per tick so scale settles slowly.
+      (def rx-raw (max 0 rx-rate))
+      (def tx-raw (max 0 tx-rate))
+      # EMA smoothing — reduces visual spikiness (alpha=0.4)
+      (def alpha 0.4)
+      (def rx-smooth (+ (* alpha rx-raw) (* (- 1 alpha) (get prev :rx-smooth 0))))
+      (def tx-smooth (+ (* alpha tx-raw) (* (- 1 alpha) (get prev :tx-smooth 0))))
+      # Peak from visible data max + 20% headroom, smoothed both directions.
+      # Zoom out ~30%/tick, zoom in ~5%/tick.
       (def prev-peak (get prev :peak 1024))
-      (def current-max (max rx-clamped tx-clamped))
-      (def target-peak (* (max current-max 1024) 1.5))
-      (def peak (if (> target-peak prev-peak)
-                  target-peak
-                  (+ target-peak (* (- prev-peak target-peak) 0.995))))
+      (var data-max (max rx-smooth tx-smooth))
+      (each v (or (get prev :rx-history) @[]) (set data-max (max data-max v)))
+      (each v (or (get prev :tx-history) @[]) (set data-max (max data-max v)))
+      (def target (* (max data-max 1024) 1.05))
+      (def peak (if (> target prev-peak)
+                  (+ (* 0.3 target) (* 0.7 prev-peak))
+                  (+ (* 0.05 target) (* 0.95 prev-peak))))
       (def rx-pending (get prev :rx-pending))
       (def tx-pending (get prev :tx-pending))
       (def rx-hist (if rx-pending
@@ -284,19 +290,21 @@
       (def tx-hist (if tx-pending
                      (push-history (get prev :tx-history) tx-pending 60)
                      (get prev :tx-history (prefilled 60))))
-      {:db (put (cofx :db) :net {:rx-rate rx-clamped
-                                  :tx-rate tx-clamped
+      {:db (put (cofx :db) :net {:rx-rate rx-raw
+                                  :tx-rate tx-raw
+                                  :rx-smooth rx-smooth
+                                  :tx-smooth tx-smooth
                                   :prev-rx (now :rx)
                                   :prev-tx (now :tx)
                                   :iface net-iface
                                   :ipv4 ipv4
                                   :tick-count tick-count
                                   :peak peak
-                                  :rx-pending rx-clamped
-                                  :tx-pending tx-clamped
+                                  :rx-pending rx-smooth
+                                  :tx-pending tx-smooth
                                   :rx-history rx-hist
                                   :tx-history tx-hist})
-       :anim {:id :net/interp :from 0 :to 1 :duration 1.8 :easing :linear}})))
+       :anim {:id :net/interp :from 0 :to 1 :duration 2.0 :easing :linear}})))
 
 (reg-event-handler :init
   (fn [cofx event]

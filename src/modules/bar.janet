@@ -43,23 +43,23 @@
   (let [w (math/floor g) f (math/floor (* 10 (- g w)))]
     (string w "." f)))
 
+(defn- fmt3 [val suffix]
+  "Format value + suffix as exactly 4 characters: X.X or  XX or XXX + suffix."
+  (if (>= val 10)
+    (string/format "%3.0f%s" val suffix)
+    (string/format "%3.1f%s" val suffix)))
+
 (defn- fmt-rate [bps]
   (cond
-    (>= bps 1073741824) (string/format "%.1fG" (/ bps 1073741824))
-    (>= bps 104857600)  (string/format "%.0fM" (/ bps 1048576))
-    (>= bps 1048576)    (string/format "%.1fM" (/ bps 1048576))
-    (>= bps 102400)     (string/format "%.0fK" (/ bps 1024))
-    (>= bps 1024)       (string/format "%.1fK" (/ bps 1024))
-    (> bps 0)           (string/format "%.1fK" (/ bps 1024))
-    "0K"))
+    (>= bps 1073741824) (fmt3 (/ bps 1073741824) "G")
+    (>= bps 1048576)    (fmt3 (/ bps 1048576) "M")
+    (> bps 0)           (fmt3 (/ bps 1024) "K")
+    "0.0K"))
 
-(defn- interp-values [history pending anim-id]
-  "Append a live interpolated point to history."
+(defn- scroll-values [history pending]
+  "Append pending to history for shader-level spatial scrolling."
   (if (and pending (> (length history) 0))
-    (let [t (anim anim-id)
-          last-val (last history)
-          live (+ last-val (* t (- pending last-val)))]
-      [;history live])
+    [;history pending]
     history))
 
 (defn- normalize-to [history scale]
@@ -68,6 +68,7 @@
     []
     (let [s (max 1 scale)]
       (map |(min 1 (/ $ s)) history))))
+
 
 (defn- sep []
   [:row {:w 1 :h 24 :bg overlay}])
@@ -158,11 +159,12 @@
   (def pct (sub :cpu/percent))
   (def history (sub :cpu/history))
   (def pending (sub :cpu/pending))
-  (def values (interp-values history pending :cpu/interp))
+  (def values (scroll-values history pending))
   (def color (pct-color pct))
   [:row {:gap 8 :align-y :center}
     [:area {:w 80 :h 32 :values values
-            :color (dim color 140) :grid true :smooth true}]
+            :color (dim color 140) :smooth true
+            :scroll (if pending (anim :cpu/interp) 0)}]
     [:col {:gap 0}
       [:text {:color color :size 18} (string (math/floor pct) "%")]
       [:text {:color subtle :size 12} "󰍛 cpu"]]])
@@ -202,14 +204,15 @@
   (def tx-hist (sub :net/tx-history))
   (def rx-pending (get net :rx-pending))
   (def tx-pending (get net :tx-pending))
-  (def rx-vals (interp-values (or rx-hist @[]) rx-pending :net/interp))
-  (def tx-vals (interp-values (or tx-hist @[]) tx-pending :net/interp))
+  (def rx-vals (scroll-values (or rx-hist @[]) rx-pending))
+  (def tx-vals (scroll-values (or tx-hist @[]) tx-pending))
   (def rx-norm (normalize-to rx-vals peak))
   (def tx-norm (normalize-to tx-vals peak))
+  (def scroll (if rx-pending (anim :net/interp) 0))
   [:row {:gap 8 :align-y :center}
     [:area {:w 80 :h 32 :values rx-norm :values2 tx-norm
             :color (dim green 140) :color2 (dim cyan 140)
-            :mirror true :grid true :smooth true}]
+            :mirror true :smooth true :scroll scroll}]
     [:col {:gap 1}
       [:text {:color green :size 13} (string "↓" (fmt-rate rx))]
       [:text {:color cyan :size 13} (string "↑" (fmt-rate tx))]]])

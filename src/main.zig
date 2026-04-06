@@ -427,11 +427,8 @@ pub fn main() !void {
             db_changed = true;
         }
 
-        if (db_changed) {
+        if (db_changed or anim_active) {
             markAllDirty();
-        } else if (anim_active) {
-            // Only animations changed — only dynamic surfaces use animations
-            markDynamicDirty();
         }
     }
 }
