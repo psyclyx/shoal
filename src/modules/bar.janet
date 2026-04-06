@@ -165,7 +165,7 @@
             :color (dim color 140) :grid true :smooth true}]
     [:col {:gap 0}
       [:text {:color color :size 18} (string (math/floor pct) "%")]
-      [:text {:color subtle :size 12} "cpu"]]])
+      [:text {:color subtle :size 12} "󰍛 cpu"]]])
 
 (defn- mem-view []
   (def mem (sub :mem))
@@ -177,7 +177,7 @@
     [:row {:gap 6 :align-y :center}
       [:text {:color color :size 16}
         (string (fmt-gb (/ used 1024)) "/" (fmt-gb (/ total 1024)) "G")]
-      [:text {:color subtle :size 12} "mem"]]
+      [:text {:color subtle :size 12} "󰍛 mem"]]
     [:row {:w 90 :h 6 :bg surface}
       [:row {:w [:percent (/ pct 100)] :h :grow :bg color}]]])
 
@@ -189,7 +189,7 @@
     [:row {:gap 6 :align-y :center}
       [:text {:color color :size 16}
         (string (fmt-gb (get disk :used-gb 0)) "/" (fmt-gb (get disk :total-gb 0)) "G")]
-      [:text {:color subtle :size 12} "disk"]]
+      [:text {:color subtle :size 12} "󰋊 disk"]]
     [:row {:w 90 :h 6 :bg surface}
       [:row {:w [:percent (/ pct 100)] :h :grow :bg color}]]])
 
@@ -220,9 +220,9 @@
   (def muted-flag (get audio :muted false))
   (def color (cond muted-flag red (>= pct 100) yellow purple))
   [:row {:id "audio" :align-y :center :gap 6}
-    [:text {:color color :size 18}
-      (string (if muted-flag "M " "") (math/floor pct) "%")]
-    [:text {:color subtle :size 12} "vol"]])
+    [:text {:color color :size 16}
+      (if muted-flag "󰝟" (if (>= pct 50) "󰕾" "󰖀"))]
+    [:text {:color color :size 18} (string (math/floor pct) "%")]])
 
 (defn- bat-view []
   (def bat (sub :bat))
@@ -230,21 +230,29 @@
     (def pct (get bat :percent 0))
     (def charging (bat :charging))
     (def color (cond charging green (< pct 20) red (< pct 50) orange accent))
+    (def icon (cond
+                charging "󰂄"
+                (>= pct 90) "󰁹"
+                (>= pct 60) "󰂀"
+                (>= pct 30) "󰁾"
+                (>= pct 10) "󰁻"
+                "󰂎"))
     [:row {:align-y :center :gap 6}
-      [:text {:color color :size 18}
-        (string (if charging "+" "") (math/floor pct) "%")]
-      [:text {:color subtle :size 12} "bat"]]))
+      [:text {:color color :size 16} icon]
+      [:text {:color color :size 18} (string (math/floor pct) "%")]]))
 
 (defn- clock-view []
-  [:col {:gap 1 :align-x :right}
-    [:text {:color bright :size 18} (sub :clock/time)]
-    [:text {:color subtle :size 13} (sub :clock/date)]])
+  [:row {:gap 8 :align-y :center}
+    [:text {:color subtle :size 16} "󰥔"]
+    [:col {:gap 1 :align-x :right}
+      [:text {:color bright :size 18} (sub :clock/time)]
+      [:text {:color subtle :size 13} (sub :clock/date)]]])
 
 # -- Root --
 
 (defn- launcher-trigger []
   [:row {:id "launcher" :align-y :center}
-    [:text {:color subtle :size 18} "⌕"]])
+    [:text {:color subtle :size 18} "󰍉"]])
 
 (defn- intersperse [separator items]
   "Insert separator between non-nil items."
