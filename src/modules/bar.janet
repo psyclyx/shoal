@@ -246,10 +246,29 @@
   [:row {:id "launcher" :align-y :center}
     [:text {:color subtle :size 18} "⌕"]])
 
+(defn- intersperse [separator items]
+  "Insert separator between non-nil items."
+  (def result @[])
+  (each item items
+    (when item
+      (when (> (length result) 0)
+        (array/push result (separator)))
+      (array/push result item)))
+  result)
+
 (defn- bar-view []
-  [:row {:w :grow :h :fit :pad [8 16] :bg bg :align-y :center :gap 14}
+  (def right-modules
+    (intersperse sep
+      [(audio-view)
+       (net-view)
+       (cpu-view)
+       (mem-view)
+       (disk-view)
+       (bat-view)
+       (clock-view)]))
+  [:row {:w :grow :h :fit :pad [8 0] :bg bg :align-y :center :gap 14}
     # Left
-    [:row {:w :grow :gap 10 :align-y :center}
+    [:row {:w :grow :gap 10 :pad [0 8] :align-y :center}
       (workspaces-view)
       (scroll-minimap)
       (launcher-trigger)]
@@ -257,20 +276,8 @@
     [:row {:w :grow :align-x :center :align-y :center}
       (title-view)]
     # Right
-    [:row {:w :grow :gap 14 :align-x :right :align-y :center}
-      (audio-view)
-      (sep)
-      (net-view)
-      (sep)
-      (cpu-view)
-      (sep)
-      (mem-view)
-      (sep)
-      (disk-view)
-      (sep)
-      (bat-view)
-      (sep)
-      (clock-view)]])
+    [:row {:w :grow :gap 14 :pad [0 8] :align-x :right :align-y :center}
+      ;right-modules]])
 
 # -- Pointer handlers --
 

@@ -134,9 +134,10 @@ const frag_src: [*c]const u8 =
     \\        // Mode 3: line stroke curve
     \\        float curve_val = sampleCurve(v_uv.x);
     \\        float curve_y = 1.0 - curve_val;
+    \\        float fw3 = fwidth(curve_y) * v_rect_size.y;
     \\        float dist = abs(v_uv.y - curve_y) * v_rect_size.y;
-    \\        float half_thick = u_thickness * 0.5;
-    \\        float aa = 1.0 - smoothstep(half_thick - 0.5, half_thick + 0.5, dist);
+    \\        float half_thick = max(u_thickness, fw3) * 0.5;
+    \\        float aa = 1.0 - smoothstep(half_thick - 0.75, half_thick + 0.75, dist);
     \\        float speculative = smoothstep(u_fill - 0.02, u_fill, v_uv.x);
     \\        vec4 color = mix(v_color, u_color2, speculative);
     \\        float a = aa * color.a;
@@ -145,8 +146,10 @@ const frag_src: [*c]const u8 =
     \\        // Mode 2: area fill curve + optional line overlay from values2
     \\        float curve_val = sampleCurve(v_uv.x);
     \\        float curve_y = 1.0 - curve_val;
-    \\        float pixel_size = 2.0 / v_rect_size.y;
-    \\        float aa = smoothstep(curve_y - pixel_size, curve_y + pixel_size, v_uv.y);
+    \\        // Use fwidth for slope-aware AA — widens on steep curves
+    \\        float fw = fwidth(curve_y);
+    \\        float aa_size = max(2.0 / v_rect_size.y, fw * 1.5);
+    \\        float aa = smoothstep(curve_y - aa_size, curve_y + aa_size, v_uv.y);
     \\        float speculative = smoothstep(u_fill - 0.02, u_fill, v_uv.x);
     \\        vec4 color = mix(v_color, u_color2, speculative);
     \\        float a = aa * color.a;
@@ -154,8 +157,10 @@ const frag_src: [*c]const u8 =
     \\        if (u_value_count2 > 0) {
     \\            float c2_val = sampleCurve2(v_uv.x);
     \\            float c2_y = 1.0 - c2_val;
+    \\            float fw2 = fwidth(c2_y) * v_rect_size.y;
     \\            float dist2 = abs(v_uv.y - c2_y) * v_rect_size.y;
-    \\            float line_aa = 1.0 - smoothstep(1.0, 2.0, dist2);
+    \\            float half2 = max(1.0, fw2) * 0.5 + 0.5;
+    \\            float line_aa = 1.0 - smoothstep(half2 - 0.5, half2 + 0.5, dist2);
     \\            float line_a = line_aa * u_color2.a;
     \\            // Composite line over area: premultiplied alpha blend
     \\            a = line_a + a * (1.0 - line_a);
