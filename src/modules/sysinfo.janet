@@ -39,10 +39,17 @@
         (def pct (if (> dt 0)
                    (math/round (* 100 (/ (- dt di) dt)))
                    0))
+        (def normalized (/ pct 100))
+        (def old-pending (get prev :pending))
+        (def history (if old-pending
+                       (push-history (get prev :history) old-pending 60)
+                       (get prev :history @[])))
         {:db (put (cofx :db) :cpu {:percent pct
                                     :prev-idle idle
                                     :prev-total total
-                                    :history (push-history (get prev :history) (/ pct 100) 60)})}))))
+                                    :history history
+                                    :pending normalized})
+         :anim {:id :cpu/interp :from 0 :to 1 :duration 1.8 :easing :linear}}))))
 
 (reg-event-handler :init
   (fn [cofx event]
@@ -52,6 +59,7 @@
 (reg-sub :cpu (fn [db] (get db :cpu {})))
 (reg-sub :cpu/percent [:cpu] (fn [cpu] (get cpu :percent 0)))
 (reg-sub :cpu/history [:cpu] (fn [cpu] (get cpu :history [])))
+(reg-sub :cpu/pending [:cpu] (fn [cpu] (get cpu :pending)))
 (reg-sub :cpu/text [:cpu]
   (fn [cpu] (string "cpu " (math/floor (get cpu :percent 0)) "%")))
 
@@ -86,10 +94,17 @@
         (def total-mb (math/floor (/ total-kb 1024)))
         (def pct (math/round (* 100.0 (/ (- total-kb avail-kb) total-kb))))
         (def prev-mem (get (cofx :db) :mem {}))
+        (def normalized (/ pct 100))
+        (def old-pending (get prev-mem :pending))
+        (def history (if old-pending
+                       (push-history (get prev-mem :history) old-pending 60)
+                       (get prev-mem :history @[])))
         {:db (put (cofx :db) :mem {:used-mb used-mb
                                     :total-mb total-mb
                                     :percent pct
-                                    :history (push-history (get prev-mem :history) (/ pct 100) 60)})}))))
+                                    :history history
+                                    :pending normalized})
+         :anim {:id :mem/interp :from 0 :to 1 :duration 4.5 :easing :linear}}))))
 
 (reg-event-handler :init
   (fn [cofx event]
@@ -98,6 +113,7 @@
 
 (reg-sub :mem (fn [db] (get db :mem {})))
 (reg-sub :mem/history [:mem] (fn [mem] (get mem :history [])))
+(reg-sub :mem/pending [:mem] (fn [mem] (get mem :pending)))
 (defn- fmt-mem [mb]
   "Format MB as GiB with 1 decimal when >= 1024, otherwise as integer MB."
   (if (>= mb 1024)
@@ -276,11 +292,20 @@
       (def ipv6 (if update-ips (or (get-ipv6-for-iface net-iface) "") (get prev :ipv6 "")))
       (def rx-clamped (max 0 rx-rate))
       (def tx-clamped (max 0 tx-rate))
-      # Decaying peak for stable sparkline scaling — tracks max of either
-      # series, decays by 5% per tick so old spikes fade out smoothly.
+      # Decaying peak for stable sparkline scaling — 2% decay per tick,
+      # 25% headroom so new values don't immediately hit the ceiling.
       (def prev-peak (get prev :peak 1024))
       (def current-max (max rx-clamped tx-clamped))
-      (def peak (max current-max (* prev-peak 0.95)))
+      (def peak (max current-max (* prev-peak 0.98)))
+      # Buffer pending values for smooth interpolation
+      (def rx-pending (get prev :rx-pending))
+      (def tx-pending (get prev :tx-pending))
+      (def rx-hist (if rx-pending
+                     (push-history (get prev :rx-history) rx-pending 60)
+                     (get prev :rx-history @[])))
+      (def tx-hist (if tx-pending
+                     (push-history (get prev :tx-history) tx-pending 60)
+                     (get prev :tx-history @[])))
       {:db (put (cofx :db) :net {:rx-rate rx-clamped
                                   :tx-rate tx-clamped
                                   :prev-rx (now :rx)
@@ -290,8 +315,11 @@
                                   :ipv6 ipv6
                                   :tick-count tick-count
                                   :peak peak
-                                  :rx-history (push-history (get prev :rx-history) rx-clamped 60)
-                                  :tx-history (push-history (get prev :tx-history) tx-clamped 60)})})))
+                                  :rx-pending rx-clamped
+                                  :tx-pending tx-clamped
+                                  :rx-history rx-hist
+                                  :tx-history tx-hist})
+       :anim {:id :net/interp :from 0 :to 1 :duration 1.8 :easing :linear}})))
 
 (reg-event-handler :init
   (fn [cofx event]

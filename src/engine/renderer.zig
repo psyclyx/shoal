@@ -145,7 +145,7 @@ const frag_src: [*c]const u8 =
     \\        // Mode 2: area fill curve + optional line overlay from values2
     \\        float curve_val = sampleCurve(v_uv.x);
     \\        float curve_y = 1.0 - curve_val;
-    \\        float pixel_size = 1.5 / v_rect_size.y;
+    \\        float pixel_size = 2.0 / v_rect_size.y;
     \\        float aa = smoothstep(curve_y - pixel_size, curve_y + pixel_size, v_uv.y);
     \\        float speculative = smoothstep(u_fill - 0.02, u_fill, v_uv.x);
     \\        vec4 color = mix(v_color, u_color2, speculative);
@@ -155,7 +155,7 @@ const frag_src: [*c]const u8 =
     \\            float c2_val = sampleCurve2(v_uv.x);
     \\            float c2_y = 1.0 - c2_val;
     \\            float dist2 = abs(v_uv.y - c2_y) * v_rect_size.y;
-    \\            float line_aa = 1.0 - smoothstep(0.75, 1.75, dist2);
+    \\            float line_aa = 1.0 - smoothstep(1.0, 2.0, dist2);
     \\            float line_a = line_aa * u_color2.a;
     \\            // Composite line over area: premultiplied alpha blend
     \\            a = line_a + a * (1.0 - line_a);
