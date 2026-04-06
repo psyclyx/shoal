@@ -163,6 +163,8 @@ pub fn main() !void {
 
     dispatch = janet.createDispatch();
     try dispatch.initBoot(cfg.theme, dmenu.enabled);
+    dispatch.initFileReader();
+    defer dispatch.deinitFileReader();
     defer dispatch.deinitDispatch();
 
     // In dmenu mode: read stdin items and inject into db
@@ -342,9 +344,16 @@ pub fn main() !void {
         _ = display.flush();
 
         // Poll Wayland fd + spawn fds + IPC fds with timeout based on timers
-        var poll_fds: [26]std.posix.pollfd = undefined; // 1 base + 16 spawns + 8 ipc + 1 headroom
+        var poll_fds: [28]std.posix.pollfd = undefined;
         poll_fds[0] = .{ .fd = wl_fd, .events = std.posix.POLL.IN, .revents = 0 };
         var nfds: usize = 1;
+        // Async file reader pipe
+        const fileio_fd_idx: ?usize = if (dispatch.getFileReaderPollFd()) |fd| blk: {
+            poll_fds[nfds] = .{ .fd = fd, .events = std.posix.POLL.IN, .revents = 0 };
+            const idx = nfds;
+            nfds += 1;
+            break :blk idx;
+        } else null;
         const spawn_fd_start = nfds;
         nfds += dispatch.fillSpawnPollFds(poll_fds[nfds..]);
         const ipc_fd_start = nfds;
@@ -373,6 +382,13 @@ pub fn main() !void {
         for (poll_fds[ipc_fd_start..nfds]) |pfd| {
             if (pfd.revents & (std.posix.POLL.IN | std.posix.POLL.HUP) != 0) {
                 dispatch.onIpcReadable(pfd.fd);
+            }
+        }
+
+        // Process async file reader results
+        if (fileio_fd_idx) |idx| {
+            if (poll_fds[idx].revents & std.posix.POLL.IN != 0) {
+                dispatch.onFileReaderReadable();
             }
         }
 

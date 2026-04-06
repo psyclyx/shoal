@@ -4,6 +4,7 @@ const animation = @import("animation.zig");
 const jutil = @import("jutil.zig");
 const spawn_mod = @import("spawn.zig");
 const ipc_mod = @import("ipc.zig");
+const fileio = @import("fileio.zig");
 const theme_mod = @import("theme.zig");
 const log = std.log.scoped(.janet);
 
@@ -77,6 +78,7 @@ const fx_order = [_][:0]const u8{
     "timer",
     "spawn",
     "exec",
+    "async-slurp",
     "ipc",
     "surface",
     "stdout",
@@ -132,6 +134,9 @@ pub const Dispatch = struct {
 
     // IPC connection pool (Unix sockets)
     ipcs: ipc_mod.IpcPool = .{},
+
+    // Async file reader (worker thread)
+    file_reader: ?fileio.AsyncReader = null,
 
     // Surface lifecycle requests (processed by main.zig)
     surface_requests: [MAX_SURFACE_REQUESTS]Janet = undefined,
@@ -348,6 +353,8 @@ pub const Dispatch = struct {
                 handleExecFx(fx_val);
             } else if (std.mem.eql(u8, fx_name, "ipc")) {
                 self.ipcs.handleFx(fx_val, self.eventSink());
+            } else if (std.mem.eql(u8, fx_name, "async-slurp")) {
+                self.handleAsyncSlurpFx(fx_val);
             } else if (std.mem.eql(u8, fx_name, "surface")) {
                 self.enqueueSurfaceRequest(fx_val);
             } else if (std.mem.eql(u8, fx_name, "stdout")) {
@@ -378,6 +385,47 @@ pub const Dispatch = struct {
     /// Handle :timer fx. Value is a table with:
     ///   {:delay N :event [...]}              — one-shot timer
     ///   {:delay N :event [...] :repeat true} — repeating timer
+    /// Handle :async-slurp fx. Spec: {:path "/proc/stat" :event :event-id}
+    /// Or an array of specs.
+    fn handleAsyncSlurpFx(self: *Dispatch, val: Janet) void {
+        const reader = &(self.file_reader orelse return);
+
+        // Handle array of specs
+        if (c.janet_checktype(val, c.JANET_TUPLE) != 0 or
+            c.janet_checktype(val, c.JANET_ARRAY) != 0)
+        {
+            const view = jutil.janetIndexedView(val);
+            if (view.items) |items| {
+                for (items[0..@intCast(view.len)]) |item| {
+                    self.handleOneAsyncSlurp(reader, item);
+                }
+            }
+            return;
+        }
+        self.handleOneAsyncSlurp(reader, val);
+    }
+
+    fn handleOneAsyncSlurp(_: *Dispatch, reader: *fileio.AsyncReader, val: Janet) void {
+        if (c.janet_checktype(val, c.JANET_TABLE) == 0 and
+            c.janet_checktype(val, c.JANET_STRUCT) == 0) return;
+
+        const path_val = jutil.janetGet(val, kw("path"));
+        const event_val = jutil.janetGet(val, kw("event"));
+
+        if (c.janet_checktype(path_val, c.JANET_STRING) == 0) {
+            log.warn("async-slurp: missing :path string", .{});
+            return;
+        }
+        if (c.janet_checktype(event_val, c.JANET_KEYWORD) == 0) {
+            log.warn("async-slurp: missing :event keyword", .{});
+            return;
+        }
+
+        const s = c.janet_unwrap_string(path_val);
+        const len: usize = @intCast(c.janet_string_length(s));
+        reader.request(s[0..len], event_val);
+    }
+
     ///   {:id :name :cancel true}             — cancel a timer by id
     /// Optional :id key for named timers (enables cancellation/replacement).
     fn handleTimerFx(self: *Dispatch, val: Janet) void {
@@ -825,6 +873,31 @@ pub const Dispatch = struct {
 
     pub fn fillIpcPollFds(self: *Dispatch, buf: []std.posix.pollfd) usize {
         return self.ipcs.fillPollFds(buf);
+    }
+
+    // -------------------------------------------------------------------
+    // Async file I/O
+    // -------------------------------------------------------------------
+
+    pub fn initFileReader(self: *Dispatch) void {
+        self.file_reader = fileio.AsyncReader.init() catch {
+            log.warn("failed to init async file reader", .{});
+            return;
+        };
+    }
+
+    pub fn deinitFileReader(self: *Dispatch) void {
+        if (self.file_reader) |*r| r.deinit();
+        self.file_reader = null;
+    }
+
+    pub fn onFileReaderReadable(self: *Dispatch) void {
+        if (self.file_reader) |*r| r.onReadable(self.eventSink());
+    }
+
+    pub fn getFileReaderPollFd(self: *Dispatch) ?std.posix.fd_t {
+        if (self.file_reader) |*r| return r.getPollFd();
+        return null;
     }
 
     /// Build an EventSink that routes enqueue/timer calls back to this Dispatch.

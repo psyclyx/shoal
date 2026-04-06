@@ -1,7 +1,7 @@
-# sysinfo — CPU, memory, battery data sources
+# sysinfo — CPU, memory, battery, disk, network, audio data sources
 #
-# Uses :timer + slurp to read /proc and /sys. Pure Janet.
-# CPU polls every 2s, memory every 5s, battery every 10s.
+# All file I/O uses :async-slurp to avoid blocking the event loop.
+# Audio uses pactl subscribe for instant change detection.
 
 (defn- push-history [prev value n]
   "Append value to history array, keeping at most n entries."
@@ -17,15 +17,14 @@
 
 (reg-event-handler :cpu/tick
   (fn [cofx event]
-    (def line
-      (try
-        (let [data (slurp "/proc/stat")]
-          (get (string/split "\n" data) 0))
-        ([_] nil)))
+    {:async-slurp {:path "/proc/stat" :event :cpu/read}}))
+
+(reg-event-handler :cpu/read
+  (fn [cofx event]
+    (def data (get event 1 ""))
+    (def line (get (string/split "\n" data) 0))
     (when line
       (def parts (string/split " " line))
-      # /proc/stat "cpu" line: user nice system idle iowait irq softirq steal
-      # Filter empty strings from double-space after "cpu"
       (def vals (seq [p :in (slice parts 1)
                       :when (> (length p) 0)
                       :let [n (scan-number p)]
@@ -82,9 +81,12 @@
 
 (reg-event-handler :mem/tick
   (fn [cofx event]
-    (def data
-      (try (slurp "/proc/meminfo") ([_] nil)))
-    (when data
+    {:async-slurp {:path "/proc/meminfo" :event :mem/read}}))
+
+(reg-event-handler :mem/read
+  (fn [cofx event]
+    (def data (get event 1 ""))
+    (when (> (length data) 0)
       (var total-kb 0)
       (var avail-kb 0)
       (each line (string/split "\n" data)
@@ -119,7 +121,6 @@
 (reg-sub :mem/history [:mem] (fn [mem] (get mem :history [])))
 (reg-sub :mem/pending [:mem] (fn [mem] (get mem :pending)))
 (defn- fmt-mem [mb]
-  "Format MB as GiB with 1 decimal when >= 1024, otherwise as integer MB."
   (if (>= mb 1024)
     (let [gib (/ mb 1024)
           whole (math/floor gib)
@@ -136,13 +137,9 @@
 
 (defn- slurp-trim [path]
   "Read a file and trim whitespace. Returns nil on failure."
-  (try
-    (string/trim (slurp path))
-    ([_] nil)))
+  (try (string/trim (slurp path)) ([_] nil)))
 
 (defn- find-battery-path []
-  "Discover battery sysfs path. Handles BAT0, BAT1, macsmc-battery, etc.
-   Skips peripheral batteries (scope=Device) like mice/keyboards."
   (var result nil)
   (try
     (each entry (os/dir "/sys/class/power_supply")
@@ -211,7 +208,6 @@
 # -- Network --
 
 (defn- default-iface []
-  "Find the default route interface from /proc/net/route."
   (def data (try (slurp "/proc/net/route") ([_] nil)))
   (when data
     (var result nil)
@@ -224,7 +220,6 @@
     result))
 
 (defn- get-local-ipv4 []
-  "Get a non-loopback local IPv4 from /proc/net/fib_trie."
   (def data (try (slurp "/proc/net/fib_trie") ([_] nil)))
   (when data
     (var result nil)
@@ -238,51 +233,29 @@
           (break))))
     result))
 
-(defn- get-ipv6-for-iface [iface]
-  "Get global-scope IPv6 address for iface from /proc/net/if_inet6."
-  (def data (try (slurp "/proc/net/if_inet6") ([_] nil)))
-  (when data
-    (var result nil)
-    (each line (string/split "\n" data)
-      (def parts (seq [p :in (string/split " " line)
-                       :when (> (length p) 0)] p))
-      # Format: hex_addr ifindex prefix scope flags iface
-      (when (and (>= (length parts) 6)
-                 (= (string/trim (get parts 5)) iface)
-                 (= (get parts 3) "00"))
-        (def hex (get parts 0))
-        (when (= (length hex) 32)
-          (def groups (seq [i :range [0 8]]
-                       (string/slice hex (* i 4) (+ (* i 4) 4))))
-          (set result (string/join groups ":"))
-          (break))))
-    result))
-
-(defn- parse-iface-bytes [iface]
-  "Read RX/TX bytes for a specific interface from /proc/net/dev."
-  (def data (try (slurp "/proc/net/dev") ([_] nil)))
-  (when data
-    (var result nil)
-    (each line (string/split "\n" data)
-      (when (string/find ":" line)
-        (def halves (string/split ":" line))
-        (def name (string/trim (get halves 0 "")))
-        (when (= name iface)
-          (def parts (seq [p :in (string/split " " (get halves 1 ""))
-                           :when (> (length p) 0)] p))
-          (when (>= (length parts) 10)
-            (set result {:rx (or (scan-number (get parts 0)) 0)
-                         :tx (or (scan-number (get parts 8)) 0)})
-            (break)))))
-    result))
-
 (var- net-iface nil)
 
 (reg-event-handler :net/tick
   (fn [cofx event]
+    {:async-slurp {:path "/proc/net/dev" :event :net/read}}))
+
+(reg-event-handler :net/read
+  (fn [cofx event]
     (when (nil? net-iface)
       (set net-iface (or (default-iface) "wlan0")))
-    (def now (parse-iface-bytes net-iface))
+    (def data (get event 1 ""))
+    (var now nil)
+    (each line (string/split "\n" data)
+      (when (string/find ":" line)
+        (def halves (string/split ":" line))
+        (def name (string/trim (get halves 0 "")))
+        (when (= name net-iface)
+          (def parts (seq [p :in (string/split " " (get halves 1 ""))
+                           :when (> (length p) 0)] p))
+          (when (>= (length parts) 10)
+            (set now {:rx (or (scan-number (get parts 0)) 0)
+                      :tx (or (scan-number (get parts 8)) 0)})
+            (break)))))
     (when now
       (def prev (get (cofx :db) :net {}))
       (def prev-rx (get prev :prev-rx 0))
@@ -293,15 +266,12 @@
       (def tick-count (+ 1 (get prev :tick-count 0)))
       (def update-ips (or (nil? (get prev :ipv4)) (= 0 (% tick-count 30))))
       (def ipv4 (if update-ips (or (get-local-ipv4) "") (get prev :ipv4 "")))
-      (def ipv6 (if update-ips (or (get-ipv6-for-iface net-iface) "") (get prev :ipv6 "")))
       (def rx-clamped (max 0 rx-rate))
       (def tx-clamped (max 0 tx-rate))
-      # Decaying peak for stable sparkline scaling — 2% decay per tick,
-      # 25% headroom so new values don't immediately hit the ceiling.
+      # Decaying peak: zoom out instantly, zoom in at 1% per tick
       (def prev-peak (get prev :peak 1024))
       (def current-max (max rx-clamped tx-clamped))
-      (def peak (max current-max (* prev-peak 0.98)))
-      # Buffer pending values for smooth interpolation
+      (def peak (max current-max (* prev-peak 0.99)))
       (def rx-pending (get prev :rx-pending))
       (def tx-pending (get prev :tx-pending))
       (def rx-hist (if rx-pending
@@ -316,7 +286,6 @@
                                   :prev-tx (now :tx)
                                   :iface net-iface
                                   :ipv4 ipv4
-                                  :ipv6 ipv6
                                   :tick-count tick-count
                                   :peak peak
                                   :rx-pending rx-clamped
@@ -343,7 +312,6 @@
 
 (reg-event-handler :audio/read
   (fn [cofx event]
-    # wpctl output: "Volume: 0.50" or "Volume: 0.50 [MUTED]"
     (def line (get event 1 ""))
     (def parts (string/split " " line))
     (when (>= (length parts) 2)
@@ -352,9 +320,6 @@
       (def muted (truthy? (string/find "[MUTED]" line)))
       {:db (put (cofx :db) :audio {:percent pct :muted muted})})))
 
-# pactl subscribe streams events line-by-line. When we see a sink
-# change, query the current volume. This reacts instantly to external
-# volume changes (media keys, pavucontrol, etc.)
 (reg-event-handler :audio/subscribe-event
   (fn [cofx event]
     (def line (get event 1 ""))
@@ -369,7 +334,6 @@
 
 (reg-event-handler :audio/subscribe-exited
   (fn [cofx event]
-    # pactl subscribe exited (PulseAudio restart, etc.) — reconnect after delay
     {:timer {:delay 2.0 :event [:audio/start-subscribe] :id :audio-resub}}))
 
 (reg-event-handler :init
