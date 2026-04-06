@@ -9,6 +9,10 @@
   (when (>= (length h) n) (array/remove h 0))
   (array/push h value))
 
+(defn- prefilled [n]
+  "Create an array of n zeros for initial sparkline state."
+  (array/new-filled n 0))
+
 # -- CPU --
 
 (reg-event-handler :cpu/tick
@@ -43,7 +47,7 @@
         (def old-pending (get prev :pending))
         (def history (if old-pending
                        (push-history (get prev :history) old-pending 60)
-                       (get prev :history @[])))
+                       (get prev :history (prefilled 60))))
         {:db (put (cofx :db) :cpu {:percent pct
                                     :prev-idle idle
                                     :prev-total total
@@ -98,7 +102,7 @@
         (def old-pending (get prev-mem :pending))
         (def history (if old-pending
                        (push-history (get prev-mem :history) old-pending 60)
-                       (get prev-mem :history @[])))
+                       (get prev-mem :history (prefilled 60))))
         {:db (put (cofx :db) :mem {:used-mb used-mb
                                     :total-mb total-mb
                                     :percent pct
@@ -302,10 +306,10 @@
       (def tx-pending (get prev :tx-pending))
       (def rx-hist (if rx-pending
                      (push-history (get prev :rx-history) rx-pending 60)
-                     (get prev :rx-history @[])))
+                     (get prev :rx-history (prefilled 60))))
       (def tx-hist (if tx-pending
                      (push-history (get prev :tx-history) tx-pending 60)
-                     (get prev :tx-history @[])))
+                     (get prev :tx-history (prefilled 60))))
       {:db (put (cofx :db) :net {:rx-rate rx-clamped
                                   :tx-rate tx-clamped
                                   :prev-rx (now :rx)

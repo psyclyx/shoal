@@ -153,6 +153,8 @@ pub const Layout = struct {
                             curve.fill,
                             curve.thickness,
                             curve.smooth,
+                            curve.mirror,
+                            curve.grid,
                             curve.is_line,
                         );
                     }

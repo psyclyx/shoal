@@ -93,6 +93,8 @@ const frag_src: [*c]const u8 =
     \\uniform float u_fill;
     \\uniform float u_thickness;
     \\uniform int u_smooth;
+    \\uniform int u_mirror;
+    \\uniform int u_grid;
     \\
     \\out vec4 frag_color;
     \\
@@ -143,31 +145,69 @@ const frag_src: [*c]const u8 =
     \\        float a = aa * color.a;
     \\        frag_color = vec4(color.rgb * a, a);
     \\    } else if (v_mode > 1.5) {
-    \\        // Mode 2: area fill curve + optional line overlay from values2
-    \\        float curve_val = sampleCurve(v_uv.x);
-    \\        float curve_y = 1.0 - curve_val;
-    \\        // Use fwidth for slope-aware AA — widens on steep curves
-    \\        float fw = fwidth(curve_y);
-    \\        float aa_size = max(2.0 / v_rect_size.y, fw * 1.5);
-    \\        float aa = smoothstep(curve_y - aa_size, curve_y + aa_size, v_uv.y);
-    \\        float speculative = smoothstep(u_fill - 0.02, u_fill, v_uv.x);
-    \\        vec4 color = mix(v_color, u_color2, speculative);
-    \\        float a = aa * color.a;
-    \\        // Overlay second series as a line stroke
-    \\        if (u_value_count2 > 0) {
-    \\            float c2_val = sampleCurve2(v_uv.x);
-    \\            float c2_y = 1.0 - c2_val;
-    \\            float fw2 = fwidth(c2_y) * v_rect_size.y;
-    \\            float dist2 = abs(v_uv.y - c2_y) * v_rect_size.y;
-    \\            float half2 = max(1.0, fw2) * 0.5 + 0.5;
-    \\            float line_aa = 1.0 - smoothstep(half2 - 0.5, half2 + 0.5, dist2);
-    \\            float line_a = line_aa * u_color2.a;
-    \\            // Composite line over area: premultiplied alpha blend
-    \\            a = line_a + a * (1.0 - line_a);
-    \\            vec3 blended = (u_color2.rgb * line_a + color.rgb * aa * color.a * (1.0 - line_a));
-    \\            if (a > 0.0) blended /= a;
-    \\            color = vec4(blended, 1.0);
+    \\        // Mode 2: area fill curve
+    \\        // u_mirror: 0=bottom-up area, 1=mirrored (values1 up, values2 down from center)
+    \\        // u_grid: 1=draw horizontal guide lines
+    \\        float a = 0.0;
+    \\        vec4 color = v_color;
+    \\
+    \\        if (u_mirror > 0 && u_value_count2 > 0) {
+    \\            // Mirrored mode: values1 area above center, values2 area below
+    \\            float center = 0.5;
+    \\            float c1 = sampleCurve(v_uv.x) * 0.5;
+    \\            float c2 = sampleCurve2(v_uv.x) * 0.5;
+    \\            float top_edge = center - c1;
+    \\            float bot_edge = center + c2;
+    \\            float fw1 = fwidth(top_edge);
+    \\            float fw2 = fwidth(bot_edge);
+    \\            float aa1 = max(2.0 / v_rect_size.y, fw1 * 1.5);
+    \\            float aa2 = max(2.0 / v_rect_size.y, fw2 * 1.5);
+    \\            // Upper fill: from top_edge to center
+    \\            float fill_up = smoothstep(top_edge - aa1, top_edge + aa1, v_uv.y)
+    \\                          * (1.0 - smoothstep(center - aa1, center, v_uv.y));
+    \\            // Lower fill: from center to bot_edge
+    \\            float fill_dn = smoothstep(center, center + aa2, v_uv.y)
+    \\                          * (1.0 - smoothstep(bot_edge - aa2, bot_edge + aa2, v_uv.y));
+    \\            float a1 = fill_up * v_color.a;
+    \\            float a2 = fill_dn * u_color2.a;
+    \\            // Composite: upper (v_color) + lower (u_color2)
+    \\            a = a1 + a2 * (1.0 - a1);
+    \\            vec3 rgb = (v_color.rgb * a1 + u_color2.rgb * a2 * (1.0 - a1));
+    \\            if (a > 0.001) rgb /= a;
+    \\            color = vec4(rgb, 1.0);
+    \\        } else {
+    \\            // Standard bottom-up area fill
+    \\            float curve_val = sampleCurve(v_uv.x);
+    \\            float curve_y = 1.0 - curve_val;
+    \\            float fw = fwidth(curve_y);
+    \\            float aa_size = max(2.0 / v_rect_size.y, fw * 1.5);
+    \\            a = smoothstep(curve_y - aa_size, curve_y + aa_size, v_uv.y) * v_color.a;
+    \\            // Overlay second series as line stroke if present
+    \\            if (u_value_count2 > 0) {
+    \\                float c2_val = sampleCurve2(v_uv.x);
+    \\                float c2_y = 1.0 - c2_val;
+    \\                float fw2 = fwidth(c2_y) * v_rect_size.y;
+    \\                float dist2 = abs(v_uv.y - c2_y) * v_rect_size.y;
+    \\                float half2 = max(1.5, fw2) * 0.5 + 0.5;
+    \\                float la = (1.0 - smoothstep(half2 - 0.5, half2 + 0.5, dist2)) * u_color2.a;
+    \\                a = la + a * (1.0 - la);
+    \\                vec3 bl = u_color2.rgb * la + color.rgb * (a - la);
+    \\                if (a > 0.001) bl /= a;
+    \\                color = vec4(bl, 1.0);
+    \\            }
     \\        }
+    \\
+    \\        // Grid lines
+    \\        if (u_grid > 0) {
+    \\            float grid_a = 0.0;
+    \\            for (int gi = 1; gi <= 3; gi++) {
+    \\                float gy = float(gi) * 0.25;
+    \\                float gd = abs(v_uv.y - gy) * v_rect_size.y;
+    \\                grid_a = max(grid_a, (1.0 - smoothstep(0.0, 1.0, gd)) * 0.15);
+    \\            }
+    \\            a = max(a, grid_a * v_color.a);
+    \\        }
+    \\
     \\        frag_color = vec4(color.rgb * a, a);
     \\    } else if (v_mode > 0.5) {
     \\        // Mode 1: texture (glyph atlas) -- single-channel alpha
@@ -217,6 +257,8 @@ pub const Renderer = struct {
     u_fill: c.GLint,
     u_thickness: c.GLint,
     u_smooth: c.GLint,
+    u_mirror: c.GLint,
+    u_grid: c.GLint,
 
     // CPU-side vertex accumulator
     vertices: std.ArrayListUnmanaged(Vertex),
@@ -244,6 +286,8 @@ pub const Renderer = struct {
         const u_fill = c.glGetUniformLocation(program, "u_fill");
         const u_thickness = c.glGetUniformLocation(program, "u_thickness");
         const u_smooth = c.glGetUniformLocation(program, "u_smooth");
+        const u_mirror = c.glGetUniformLocation(program, "u_mirror");
+        const u_grid = c.glGetUniformLocation(program, "u_grid");
 
         // --- VAO / VBO ---
         var vao: c.GLuint = 0;
@@ -296,6 +340,8 @@ pub const Renderer = struct {
             .u_fill = u_fill,
             .u_thickness = u_thickness,
             .u_smooth = u_smooth,
+            .u_mirror = u_mirror,
+            .u_grid = u_grid,
             .vertices = .{},
             .allocator = allocator,
             .width = 0,
@@ -431,6 +477,8 @@ pub const Renderer = struct {
         fill: f32,
         thickness: f32,
         smooth: bool,
+        mirror: bool,
+        grid: bool,
         is_line: bool,
     ) void {
         self.flush();
@@ -446,6 +494,8 @@ pub const Renderer = struct {
         c.glUniform1f(self.u_fill, fill);
         c.glUniform1f(self.u_thickness, thickness);
         c.glUniform1i(self.u_smooth, @intFromBool(smooth));
+        c.glUniform1i(self.u_mirror, @intFromBool(mirror));
+        c.glUniform1i(self.u_grid, @intFromBool(grid));
 
         // Mode 2.0 = area fill, 3.0 = line stroke.
         // UV is 0-1 across the quad (same mapping as mode 0 rects).

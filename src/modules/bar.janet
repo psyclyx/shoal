@@ -162,7 +162,7 @@
   (def color (pct-color pct))
   [:row {:gap 8 :align-y :center}
     [:area {:w 80 :h 32 :values values
-            :color (dim color 140) :smooth true}]
+            :color (dim color 140) :grid true :smooth true}]
     [:col {:gap 0}
       [:text {:color color :size 18} (string (math/floor pct) "%")]
       [:text {:color subtle :size 12} "cpu"]]])
@@ -208,8 +208,8 @@
   (def tx-norm (normalize-to tx-vals peak))
   [:row {:gap 8 :align-y :center}
     [:area {:w 80 :h 32 :values rx-norm :values2 tx-norm
-            :color (dim green 140) :color2 (dim cyan 180)
-            :smooth true}]
+            :color (dim green 140) :color2 (dim cyan 140)
+            :mirror true :grid true :smooth true}]
     [:col {:gap 1}
       [:text {:color green :size 13} (string "↓" (fmt-rate rx))]
       [:text {:color cyan :size 13} (string "↑" (fmt-rate tx))]]])

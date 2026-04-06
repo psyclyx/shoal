@@ -33,6 +33,8 @@ var kw_values2: jc.Janet = undefined;
 var kw_fill: jc.Janet = undefined;
 var kw_thickness: jc.Janet = undefined;
 var kw_smooth: jc.Janet = undefined;
+var kw_mirror: jc.Janet = undefined;
+var kw_grid: jc.Janet = undefined;
 // Sizing keywords
 var kw_grow: jc.Janet = undefined;
 var kw_fit: jc.Janet = undefined;
@@ -71,6 +73,8 @@ pub const CurveData = struct {
     fill: f32 = 1.0,
     thickness: f32 = 1.5,
     smooth: bool = true,
+    mirror: bool = false,
+    grid: bool = false,
     is_line: bool = false,
 };
 
@@ -121,6 +125,8 @@ pub fn init() void {
     kw_fill = janet.kw("fill");
     kw_thickness = janet.kw("thickness");
     kw_smooth = janet.kw("smooth");
+    kw_mirror = janet.kw("mirror");
+    kw_grid = janet.kw("grid");
     kw_grow = janet.kw("grow");
     kw_fit = janet.kw("fit");
     kw_percent = janet.kw("percent");
@@ -299,6 +305,18 @@ fn walkCurve(is_line: bool, attrs: jc.Janet) void {
         const smooth_val = janet.janetGet(attrs, kw_smooth);
         if (jc.janet_checktype(smooth_val, jc.JANET_NIL) == 0) {
             data.smooth = jc.janet_truthy(smooth_val) != 0;
+        }
+
+        // :mirror — mirrored chart (values1 up, values2 down from center)
+        const mirror_val = janet.janetGet(attrs, kw_mirror);
+        if (jc.janet_checktype(mirror_val, jc.JANET_NIL) == 0) {
+            data.mirror = jc.janet_truthy(mirror_val) != 0;
+        }
+
+        // :grid — draw horizontal guide lines
+        const grid_val = janet.janetGet(attrs, kw_grid);
+        if (jc.janet_checktype(grid_val, jc.JANET_NIL) == 0) {
+            data.grid = jc.janet_truthy(grid_val) != 0;
         }
     }
 
