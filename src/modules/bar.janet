@@ -63,10 +63,10 @@
     history))
 
 (defn- normalize-to [history scale]
-  "Normalize history to 0-1 against a fixed scale with headroom."
+  "Normalize history to 0-1 against a scale."
   (if (or (nil? history) (= 0 (length history)))
     []
-    (let [s (max 1 (* scale 1.25))]
+    (let [s (max 1 scale)]
       (map |(min 1 (/ $ s)) history))))
 
 (defn- sep []

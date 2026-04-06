@@ -131,65 +131,70 @@ const frag_src: [*c]const u8 =
     \\float sampleCurve(float x) { return sampleArray(x, u_value_count, u_values); }
     \\float sampleCurve2(float x) { return sampleArray(x, u_value_count2, u_values2); }
     \\
+    \\// Line coverage at constant pixel thickness with slope-aware AA.
+    \\// Returns alpha for a line at curve_y with fixed thickness in pixels.
+    \\float lineCoverage(float frag_y, float curve_y, float thickness_px, float height) {
+    \\    float dist = abs(frag_y - curve_y) * height;
+    \\    float fw = fwidth(curve_y) * height;
+    \\    float half = thickness_px * 0.5;
+    \\    float edge = max(1.0, fw * 0.5); // AA band widens on steep slopes
+    \\    return 1.0 - smoothstep(half - edge, half + edge, dist);
+    \\}
+    \\
+    \\// Area fill coverage: filled below curve_y with slope-aware AA at edge.
+    \\float areaCoverage(float frag_y, float curve_y, float height) {
+    \\    float fw = fwidth(curve_y);
+    \\    float aa = max(2.0 / height, fw * 1.5);
+    \\    return smoothstep(curve_y - aa, curve_y + aa, frag_y);
+    \\}
+    \\
     \\void main() {
     \\    if (v_mode > 2.5) {
-    \\        // Mode 3: line stroke curve
-    \\        float curve_val = sampleCurve(v_uv.x);
-    \\        float curve_y = 1.0 - curve_val;
-    \\        float fw3 = fwidth(curve_y) * v_rect_size.y;
-    \\        float dist = abs(v_uv.y - curve_y) * v_rect_size.y;
-    \\        float half_thick = max(u_thickness, fw3) * 0.5;
-    \\        float aa = 1.0 - smoothstep(half_thick - 0.75, half_thick + 0.75, dist);
+    \\        // Mode 3: line stroke curve — constant thickness
+    \\        float curve_y = 1.0 - sampleCurve(v_uv.x);
+    \\        float aa = lineCoverage(v_uv.y, curve_y, u_thickness, v_rect_size.y);
     \\        float speculative = smoothstep(u_fill - 0.02, u_fill, v_uv.x);
     \\        vec4 color = mix(v_color, u_color2, speculative);
     \\        float a = aa * color.a;
     \\        frag_color = vec4(color.rgb * a, a);
     \\    } else if (v_mode > 1.5) {
     \\        // Mode 2: area fill curve
-    \\        // u_mirror: 0=bottom-up area, 1=mirrored (values1 up, values2 down from center)
-    \\        // u_grid: 1=draw horizontal guide lines
     \\        float a = 0.0;
     \\        vec4 color = v_color;
     \\
     \\        if (u_mirror > 0 && u_value_count2 > 0) {
-    \\            // Mirrored mode: values1 area above center, values2 area below
+    \\            // Mirrored: values1 area above center, values2 below
     \\            float center = 0.5;
     \\            float c1 = sampleCurve(v_uv.x) * 0.5;
     \\            float c2 = sampleCurve2(v_uv.x) * 0.5;
-    \\            float top_edge = center - c1;
-    \\            float bot_edge = center + c2;
-    \\            float fw1 = fwidth(top_edge);
-    \\            float fw2 = fwidth(bot_edge);
-    \\            float aa1 = max(2.0 / v_rect_size.y, fw1 * 1.5);
-    \\            float aa2 = max(2.0 / v_rect_size.y, fw2 * 1.5);
-    \\            // Upper fill: from top_edge to center
-    \\            float fill_up = smoothstep(top_edge - aa1, top_edge + aa1, v_uv.y)
-    \\                          * (1.0 - smoothstep(center - aa1, center, v_uv.y));
-    \\            // Lower fill: from center to bot_edge
-    \\            float fill_dn = smoothstep(center, center + aa2, v_uv.y)
-    \\                          * (1.0 - smoothstep(bot_edge - aa2, bot_edge + aa2, v_uv.y));
-    \\            float a1 = fill_up * v_color.a;
-    \\            float a2 = fill_dn * u_color2.a;
-    \\            // Composite: upper (v_color) + lower (u_color2)
+    \\            float top = center - c1;
+    \\            float bot = center + c2;
+    \\            // Upper fill
+    \\            float fill_up = areaCoverage(v_uv.y, top, v_rect_size.y)
+    \\                          * (1.0 - step(center, v_uv.y));
+    \\            // Lower fill
+    \\            float fill_dn = step(center, v_uv.y)
+    \\                          * (1.0 - areaCoverage(v_uv.y, bot, v_rect_size.y));
+    \\            // Add edge lines for clarity
+    \\            float line_up = lineCoverage(v_uv.y, top, 2.0, v_rect_size.y);
+    \\            float line_dn = lineCoverage(v_uv.y, bot, 2.0, v_rect_size.y);
+    \\            float a1 = max(fill_up, line_up) * v_color.a;
+    \\            float a2 = max(fill_dn, line_dn) * u_color2.a;
     \\            a = a1 + a2 * (1.0 - a1);
     \\            vec3 rgb = (v_color.rgb * a1 + u_color2.rgb * a2 * (1.0 - a1));
     \\            if (a > 0.001) rgb /= a;
     \\            color = vec4(rgb, 1.0);
     \\        } else {
     \\            // Standard bottom-up area fill
-    \\            float curve_val = sampleCurve(v_uv.x);
-    \\            float curve_y = 1.0 - curve_val;
-    \\            float fw = fwidth(curve_y);
-    \\            float aa_size = max(2.0 / v_rect_size.y, fw * 1.5);
-    \\            a = smoothstep(curve_y - aa_size, curve_y + aa_size, v_uv.y) * v_color.a;
-    \\            // Overlay second series as line stroke if present
+    \\            float curve_y = 1.0 - sampleCurve(v_uv.x);
+    \\            a = areaCoverage(v_uv.y, curve_y, v_rect_size.y) * v_color.a;
+    \\            // Add edge line for readability
+    \\            float edge_line = lineCoverage(v_uv.y, curve_y, 2.0, v_rect_size.y);
+    \\            a = max(a, edge_line * v_color.a);
+    \\            // Overlay second series as line stroke
     \\            if (u_value_count2 > 0) {
-    \\                float c2_val = sampleCurve2(v_uv.x);
-    \\                float c2_y = 1.0 - c2_val;
-    \\                float fw2 = fwidth(c2_y) * v_rect_size.y;
-    \\                float dist2 = abs(v_uv.y - c2_y) * v_rect_size.y;
-    \\                float half2 = max(1.5, fw2) * 0.5 + 0.5;
-    \\                float la = (1.0 - smoothstep(half2 - 0.5, half2 + 0.5, dist2)) * u_color2.a;
+    \\                float c2_y = 1.0 - sampleCurve2(v_uv.x);
+    \\                float la = lineCoverage(v_uv.y, c2_y, 2.0, v_rect_size.y) * u_color2.a;
     \\                a = la + a * (1.0 - la);
     \\                vec3 bl = u_color2.rgb * la + color.rgb * (a - la);
     \\                if (a > 0.001) bl /= a;
@@ -203,7 +208,7 @@ const frag_src: [*c]const u8 =
     \\            for (int gi = 1; gi <= 3; gi++) {
     \\                float gy = float(gi) * 0.25;
     \\                float gd = abs(v_uv.y - gy) * v_rect_size.y;
-    \\                grid_a = max(grid_a, (1.0 - smoothstep(0.0, 1.0, gd)) * 0.15);
+    \\                grid_a = max(grid_a, (1.0 - smoothstep(0.0, 1.0, gd)) * 0.12);
     \\            }
     \\            a = max(a, grid_a * v_color.a);
     \\        }

@@ -268,10 +268,14 @@
       (def ipv4 (if update-ips (or (get-local-ipv4) "") (get prev :ipv4 "")))
       (def rx-clamped (max 0 rx-rate))
       (def tx-clamped (max 0 tx-rate))
-      # Decaying peak: zoom out instantly, zoom in at 1% per tick
+      # Scale tracking: zoom out instantly with 50% headroom,
+      # zoom in at 0.5% per tick so scale settles slowly.
       (def prev-peak (get prev :peak 1024))
       (def current-max (max rx-clamped tx-clamped))
-      (def peak (max current-max (* prev-peak 0.99)))
+      (def target-peak (* (max current-max 1024) 1.5))
+      (def peak (if (> target-peak prev-peak)
+                  target-peak
+                  (+ target-peak (* (- prev-peak target-peak) 0.995))))
       (def rx-pending (get prev :rx-pending))
       (def tx-pending (get prev :tx-pending))
       (def rx-hist (if rx-pending
