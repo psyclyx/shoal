@@ -268,20 +268,21 @@
       (def ipv4 (if update-ips (or (get-local-ipv4) "") (get prev :ipv4 "")))
       (def rx-raw (max 0 rx-rate))
       (def tx-raw (max 0 tx-rate))
-      # EMA smoothing — reduces visual spikiness (alpha=0.4)
-      (def alpha 0.4)
+      # EMA smoothing — reduces visual spikiness (alpha=0.3)
+      (def alpha 0.3)
       (def rx-smooth (+ (* alpha rx-raw) (* (- 1 alpha) (get prev :rx-smooth 0))))
       (def tx-smooth (+ (* alpha tx-raw) (* (- 1 alpha) (get prev :tx-smooth 0))))
-      # Peak from visible data max + 20% headroom, smoothed both directions.
-      # Zoom out ~30%/tick, zoom in ~5%/tick.
-      (def prev-peak (get prev :peak 1024))
-      (var data-max (max rx-smooth tx-smooth))
-      (each v (or (get prev :rx-history) @[]) (set data-max (max data-max v)))
-      (each v (or (get prev :tx-history) @[]) (set data-max (max data-max v)))
-      (def target (* (max data-max 1024) 1.05))
-      (def peak (if (> target prev-peak)
-                  (+ (* 0.3 target) (* 0.7 prev-peak))
-                  (+ (* 0.05 target) (* 0.95 prev-peak))))
+      # Per-direction peaks for independent mirror scaling.
+      # Zoom out ~30%/tick, zoom in ~3%/tick.
+      (defn- track-peak [smooth hist prev-peak]
+        (var dm smooth)
+        (each v (or hist @[]) (set dm (max dm v)))
+        (def target (* (max dm 1024) 1.2))
+        (if (> target prev-peak)
+          (+ (* 0.3 target) (* 0.7 prev-peak))
+          (+ (* 0.03 target) (* 0.97 prev-peak))))
+      (def rx-peak (track-peak rx-smooth (get prev :rx-history) (get prev :rx-peak 1024)))
+      (def tx-peak (track-peak tx-smooth (get prev :tx-history) (get prev :tx-peak 1024)))
       (def rx-pending (get prev :rx-pending))
       (def tx-pending (get prev :tx-pending))
       (def rx-hist (if rx-pending
@@ -299,7 +300,8 @@
                                   :iface net-iface
                                   :ipv4 ipv4
                                   :tick-count tick-count
-                                  :peak peak
+                                  :rx-peak rx-peak
+                                  :tx-peak tx-peak
                                   :rx-pending rx-smooth
                                   :tx-pending tx-smooth
                                   :rx-history rx-hist

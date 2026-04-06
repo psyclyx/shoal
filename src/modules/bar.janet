@@ -201,15 +201,14 @@
   (def net (sub :net))
   (def rx (get net :rx-rate 0))
   (def tx (get net :tx-rate 0))
-  (def peak (get net :peak 1024))
   (def rx-hist (sub :net/rx-history))
   (def tx-hist (sub :net/tx-history))
   (def rx-pending (get net :rx-pending))
   (def tx-pending (get net :tx-pending))
   (def rx-vals (scroll-values (or rx-hist @[]) rx-pending))
   (def tx-vals (scroll-values (or tx-hist @[]) tx-pending))
-  (def rx-norm (normalize-to rx-vals peak))
-  (def tx-norm (normalize-to tx-vals peak))
+  (def rx-norm (normalize-to rx-vals (get net :rx-peak 1024)))
+  (def tx-norm (normalize-to tx-vals (get net :tx-peak 1024)))
   (def scroll (if rx-pending (anim :net/interp) 0))
   [:row {:gap 8 :align-y :center}
     [:area {:w 80 :h 32 :values rx-norm :values2 tx-norm
