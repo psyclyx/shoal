@@ -136,9 +136,9 @@ const frag_src: [*c]const u8 =
     \\float lineCoverage(float frag_y, float curve_y, float thickness_px, float height) {
     \\    float dist = abs(frag_y - curve_y) * height;
     \\    float fw = fwidth(curve_y) * height;
-    \\    float half = thickness_px * 0.5;
-    \\    float edge = max(1.0, fw * 0.5); // AA band widens on steep slopes
-    \\    return 1.0 - smoothstep(half - edge, half + edge, dist);
+    \\    float rad = thickness_px * 0.5;
+    \\    float edge = max(1.0, fw * 0.5);
+    \\    return 1.0 - smoothstep(rad - edge, rad + edge, dist);
     \\}
     \\
     \\// Area fill coverage: filled below curve_y with slope-aware AA at edge.
