@@ -56,20 +56,41 @@
     (> bps 0)           (fmt3 (/ bps 1024) "K")
     "0.0K"))
 
-(defn- scroll-values [history pending]
-  "Pad with extrapolated boundary points for smooth Catmull-Rom edges."
-  (if (and pending (> (length history) 1))
-    (let [pad-l (- (* 2 (first history)) (get history 1))
-          pad-r (- (* 2 pending) (last history))]
-      [pad-l ;history pending pad-r])
-    history))
+(defn- resample [samples window n]
+  "Resample timestamped [time value] pairs into n evenly-spaced values.
+   Window is seconds of history ending at now."
+  (def now (os/clock))
+  (if (or (nil? samples) (< (length samples) 2))
+    (array/new-filled n 0)
+    (do
+      (def start (- now window))
+      (def step (/ window (- n 1)))
+      (def result @[])
+      (var j 0)
+      (for i 0 n
+        (def t (+ start (* i step)))
+        # Advance j to bracket t
+        (while (and (< (+ j 1) (length samples))
+                    (<= (get (get samples (+ j 1)) 0) t))
+          (++ j))
+        (def s0 (get samples j))
+        (def t0 (get s0 0))
+        (if (or (>= j (- (length samples) 1)) (<= t t0))
+          (array/push result (get s0 1))
+          (let [s1 (get samples (+ j 1))
+                t1 (get s1 0)
+                v0 (get s0 1)
+                v1 (get s1 1)
+                frac (/ (- t t0) (max 0.001 (- t1 t0)))]
+            (array/push result (+ v0 (* frac (- v1 v0)))))))
+      result)))
 
-(defn- normalize-to [history scale]
-  "Normalize history to 0-1 against a scale."
-  (if (or (nil? history) (= 0 (length history)))
+(defn- normalize-to [values scale]
+  "Normalize values to 0-1 against a scale."
+  (if (or (nil? values) (= 0 (length values)))
     []
     (let [s (max 1 scale)]
-      (map |(min 1 (/ $ s)) history))))
+      (map |(min 1 (/ $ s)) values))))
 
 
 (defn- sep []
@@ -159,14 +180,12 @@
 
 (defn- cpu-view []
   (def pct (sub :cpu/percent))
-  (def history (sub :cpu/history))
-  (def pending (sub :cpu/pending))
-  (def values (scroll-values history pending))
+  (def cpu (sub :cpu))
+  (def values (resample (get cpu :samples) 120 60))
   (def color (pct-color pct))
   [:row {:gap 8 :align-y :center}
     [:area {:w 80 :h 32 :values values
-            :color (dim color 140) :smooth true
-            :scroll (if pending (anim :cpu/interp) 0)}]
+            :color (dim color 140) :smooth true}]
     [:col {:gap 0}
       [:text {:color color :size 18} (string (math/floor pct) "%")]
       [:text {:color subtle :size 12} "󰍛 cpu"]]])
@@ -201,19 +220,14 @@
   (def net (sub :net))
   (def rx (get net :rx-rate 0))
   (def tx (get net :tx-rate 0))
-  (def rx-hist (sub :net/rx-history))
-  (def tx-hist (sub :net/tx-history))
-  (def rx-pending (get net :rx-pending))
-  (def tx-pending (get net :tx-pending))
-  (def rx-vals (scroll-values (or rx-hist @[]) rx-pending))
-  (def tx-vals (scroll-values (or tx-hist @[]) tx-pending))
+  (def rx-vals (resample (get net :rx-samples) 120 60))
+  (def tx-vals (resample (get net :tx-samples) 120 60))
   (def rx-norm (normalize-to rx-vals (get net :rx-peak 1024)))
   (def tx-norm (normalize-to tx-vals (get net :tx-peak 1024)))
-  (def scroll (if rx-pending (anim :net/interp) 0))
   [:row {:gap 8 :align-y :center}
     [:area {:w 80 :h 32 :values rx-norm :values2 tx-norm
             :color (dim green 140) :color2 (dim cyan 140)
-            :mirror true :smooth true :scroll scroll}]
+            :mirror true :smooth true}]
     [:col {:gap 1}
       [:text {:color green :size 13} (string "↓" (fmt-rate rx))]
       [:text {:color cyan :size 13} (string "↑" (fmt-rate tx))]]])

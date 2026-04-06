@@ -3,15 +3,14 @@
 # All file I/O uses :async-slurp to avoid blocking the event loop.
 # Audio uses pactl subscribe for instant change detection.
 
-(defn- push-history [prev value n]
-  "Append value to history array, keeping at most n entries."
-  (def h (array/slice (or prev @[])))
-  (when (>= (length h) n) (array/remove h 0))
-  (array/push h value))
-
-(defn- prefilled [n]
-  "Create an array of n zeros for initial sparkline state."
-  (array/new-filled n 0))
+(defn- push-sample [samples t v window]
+  "Append [time value] to samples, trimming entries older than window seconds."
+  (def s (array/slice (or samples @[])))
+  (array/push s [t v])
+  (def cutoff (- t (+ window 10)))
+  (while (and (> (length s) 0) (< (get (first s) 0) cutoff))
+    (array/remove s 0))
+  s)
 
 # -- CPU --
 
@@ -43,26 +42,21 @@
                    (math/round (* 100 (/ (- dt di) dt)))
                    0))
         (def normalized (/ pct 100))
-        (def old-pending (get prev :pending))
-        (def history (if old-pending
-                       (push-history (get prev :history) old-pending 60)
-                       (get prev :history (prefilled 60))))
+        (def samples (push-sample (get prev :samples) (os/clock) normalized 120))
         {:db (put (cofx :db) :cpu {:percent pct
                                     :prev-idle idle
                                     :prev-total total
-                                    :history history
-                                    :pending normalized})
-         :anim {:id :cpu/interp :from 0 :to 1 :duration 2.0 :easing :linear}}))))
+                                    :samples samples})}))))
 
 (reg-event-handler :init
   (fn [cofx event]
     {:dispatch [:cpu/tick]
-     :timer {:delay 2.0 :event [:cpu/tick] :repeat true :id :cpu}}))
+     :timer {:delay 2.0 :event [:cpu/tick] :repeat true :id :cpu}
+     # Heartbeat animation keeps render loop at 60fps for smooth time-based charts
+     :anim {:id :render-heartbeat :to 1 :duration 9999 :easing :linear}}))
 
 (reg-sub :cpu (fn [db] (get db :cpu {})))
 (reg-sub :cpu/percent [:cpu] (fn [cpu] (get cpu :percent 0)))
-(reg-sub :cpu/history [:cpu] (fn [cpu] (get cpu :history [])))
-(reg-sub :cpu/pending [:cpu] (fn [cpu] (get cpu :pending)))
 (reg-sub :cpu/text [:cpu]
   (fn [cpu] (string "cpu " (math/floor (get cpu :percent 0)) "%")))
 
@@ -99,18 +93,9 @@
         (def used-mb (math/floor (/ (- total-kb avail-kb) 1024)))
         (def total-mb (math/floor (/ total-kb 1024)))
         (def pct (math/round (* 100.0 (/ (- total-kb avail-kb) total-kb))))
-        (def prev-mem (get (cofx :db) :mem {}))
-        (def normalized (/ pct 100))
-        (def old-pending (get prev-mem :pending))
-        (def history (if old-pending
-                       (push-history (get prev-mem :history) old-pending 60)
-                       (get prev-mem :history (prefilled 60))))
         {:db (put (cofx :db) :mem {:used-mb used-mb
                                     :total-mb total-mb
-                                    :percent pct
-                                    :history history
-                                    :pending normalized})
-         :anim {:id :mem/interp :from 0 :to 1 :duration 5.0 :easing :linear}}))))
+                                    :percent pct})}))))
 
 (reg-event-handler :init
   (fn [cofx event]
@@ -118,8 +103,6 @@
      :timer {:delay 5.0 :event [:mem/tick] :repeat true :id :mem}}))
 
 (reg-sub :mem (fn [db] (get db :mem {})))
-(reg-sub :mem/history [:mem] (fn [mem] (get mem :history [])))
-(reg-sub :mem/pending [:mem] (fn [mem] (get mem :pending)))
 (defn- fmt-mem [mb]
   (if (>= mb 1024)
     (let [gib (/ mb 1024)
@@ -272,25 +255,22 @@
       (def alpha 0.3)
       (def rx-smooth (+ (* alpha rx-raw) (* (- 1 alpha) (get prev :rx-smooth 0))))
       (def tx-smooth (+ (* alpha tx-raw) (* (- 1 alpha) (get prev :tx-smooth 0))))
-      # Per-direction peaks for independent mirror scaling.
+      (def clock (os/clock))
+      (def rx-samples (push-sample (get prev :rx-samples) clock rx-smooth 120))
+      (def tx-samples (push-sample (get prev :tx-samples) clock tx-smooth 120))
+      # Per-direction peaks from sample max.
       # Zoom out ~30%/tick, zoom in ~3%/tick.
-      (defn- track-peak [smooth hist prev-peak]
-        (var dm smooth)
-        (each v (or hist @[]) (set dm (max dm v)))
-        (def target (* (max dm 1024) 1.2))
+      (defn- samples-max [samples]
+        (var mx 0)
+        (each s samples (set mx (max mx (get s 1))))
+        mx)
+      (defn- track-peak [current data-max prev-peak]
+        (def target (* (max (max current data-max) 1024) 1.2))
         (if (> target prev-peak)
           (+ (* 0.3 target) (* 0.7 prev-peak))
           (+ (* 0.03 target) (* 0.97 prev-peak))))
-      (def rx-peak (track-peak rx-smooth (get prev :rx-history) (get prev :rx-peak 1024)))
-      (def tx-peak (track-peak tx-smooth (get prev :tx-history) (get prev :tx-peak 1024)))
-      (def rx-pending (get prev :rx-pending))
-      (def tx-pending (get prev :tx-pending))
-      (def rx-hist (if rx-pending
-                     (push-history (get prev :rx-history) rx-pending 60)
-                     (get prev :rx-history (prefilled 60))))
-      (def tx-hist (if tx-pending
-                     (push-history (get prev :tx-history) tx-pending 60)
-                     (get prev :tx-history (prefilled 60))))
+      (def rx-peak (track-peak rx-smooth (samples-max rx-samples) (get prev :rx-peak 1024)))
+      (def tx-peak (track-peak tx-smooth (samples-max tx-samples) (get prev :tx-peak 1024)))
       {:db (put (cofx :db) :net {:rx-rate rx-raw
                                   :tx-rate tx-raw
                                   :rx-smooth rx-smooth
@@ -302,11 +282,8 @@
                                   :tick-count tick-count
                                   :rx-peak rx-peak
                                   :tx-peak tx-peak
-                                  :rx-pending rx-smooth
-                                  :tx-pending tx-smooth
-                                  :rx-history rx-hist
-                                  :tx-history tx-hist})
-       :anim {:id :net/interp :from 0 :to 1 :duration 2.0 :easing :linear}})))
+                                  :rx-samples rx-samples
+                                  :tx-samples tx-samples})})))
 
 (reg-event-handler :init
   (fn [cofx event]
@@ -314,8 +291,6 @@
      :timer {:delay 2.0 :event [:net/tick] :repeat true :id :net}}))
 
 (reg-sub :net (fn [db] (get db :net {})))
-(reg-sub :net/rx-history [:net] (fn [net] (get net :rx-history [])))
-(reg-sub :net/tx-history [:net] (fn [net] (get net :tx-history [])))
 
 # -- Audio (PipeWire/PulseAudio via wpctl + pactl subscribe) --
 
