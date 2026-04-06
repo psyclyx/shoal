@@ -218,7 +218,10 @@ pub fn main() !void {
         );
 
         const ls_surf = surf.layer_surface.?;
-        ls_surf.setSize(cfg.width, cfg.height);
+        // height=0 means auto-size, but layer shell rejects 0 unless
+        // anchored to both edges. Use a reasonable initial height.
+        const initial_h: u32 = if (cfg.height == 0) 48 else cfg.height;
+        ls_surf.setSize(cfg.width, initial_h);
         ls_surf.setAnchor(wlAnchor(cfg.anchor));
         ls_surf.setExclusiveZone(cfg.exclusive_zone);
         ls_surf.setMargin(cfg.margin.top, cfg.margin.right, cfg.margin.bottom, cfg.margin.left);
