@@ -116,10 +116,12 @@ const frag_src: [*c]const u8 =
     \\
     \\float sampleArray(float x, int count, float vals[64]) {
     \\    if (count < 2) return count > 0 ? vals[0] : 0.0;
-    \\    // When scrolling, count includes one extra value (the pending point).
-    \\    // u_scroll shifts the visible window: at 0 show [0..N-1], at 1 show [1..N].
-    \\    float span = u_scroll > 0.001 ? float(count - 2) : float(count - 1);
-    \\    float pos = u_scroll + x * span;
+    \\    // When scrolling, array is [pad_l, history..., pending, pad_r].
+    \\    // Pads are extrapolated for smooth Catmull-Rom at boundaries.
+    \\    // Visible window starts at index 1, scroll shifts by 0-1.
+    \\    float span = u_scroll > 0.001 ? float(count - 4) : float(count - 1);
+    \\    float base = u_scroll > 0.001 ? 1.0 + u_scroll : 0.0;
+    \\    float pos = base + x * span;
     \\    int idx = int(floor(pos));
     \\    float t = fract(pos);
     \\    int i0 = clamp(idx - 1, 0, count - 1);
@@ -179,22 +181,18 @@ const frag_src: [*c]const u8 =
     \\            float c2 = c2_raw > 0.001 ? max(c2_raw, min_vis) : c2_raw;
     \\            float top = center - c1;
     \\            float bot = center + c2;
-    \\            // Upper fill
-    \\            float fill_up = areaCoverage(v_uv.y, top, v_rect_size.y)
-    \\                          * (1.0 - step(center, v_uv.y));
-    \\            // Lower fill
-    \\            float fill_dn = step(center, v_uv.y)
-    \\                          * (1.0 - areaCoverage(v_uv.y, bot, v_rect_size.y));
-    \\            // Add edge lines for clarity
-    \\            float line_up = lineCoverage(v_uv.y, top, 2.0, v_rect_size.y);
-    \\            float line_dn = lineCoverage(v_uv.y, bot, 2.0, v_rect_size.y);
-    \\            float a1 = max(fill_up, line_up) * v_color.a;
-    \\            float a2 = max(fill_dn, line_dn) * u_color2.a;
-    \\            // Center divider — thin line to separate the two halves
-    \\            float center_dist = abs(v_uv.y - center) * v_rect_size.y;
-    \\            float divider = (1.0 - smoothstep(0.0, 1.0, center_dist)) * 0.25;
+    \\            float upper_mask = 1.0 - step(center, v_uv.y);
+    \\            float lower_mask = step(center, v_uv.y);
+    \\            // Area fills — dim, clamped to own half
+    \\            float fill_up = areaCoverage(v_uv.y, top, v_rect_size.y) * upper_mask;
+    \\            float fill_dn = lower_mask * (1.0 - areaCoverage(v_uv.y, bot, v_rect_size.y));
+    \\            // Edge lines — vibrant, clamped to own half (no bleed)
+    \\            float line_up = lineCoverage(v_uv.y, top, 2.0, v_rect_size.y) * upper_mask;
+    \\            float line_dn = lineCoverage(v_uv.y, bot, 2.0, v_rect_size.y) * lower_mask;
+    \\            // Dim fill + vibrant edge composite
+    \\            float a1 = max(fill_up * v_color.a, line_up);
+    \\            float a2 = max(fill_dn * u_color2.a, line_dn);
     \\            a = a1 + a2 * (1.0 - a1);
-    \\            a = max(a, divider);
     \\            vec3 rgb = (v_color.rgb * a1 + u_color2.rgb * a2 * (1.0 - a1));
     \\            if (a > 0.001) rgb /= a;
     \\            color = vec4(rgb, 1.0);
@@ -204,9 +202,9 @@ const frag_src: [*c]const u8 =
     \\            float min_vis = 2.5 / v_rect_size.y;
     \\            float curve_y = 1.0 - (sv > 0.001 ? max(sv, min_vis) : sv);
     \\            a = areaCoverage(v_uv.y, curve_y, v_rect_size.y) * v_color.a;
-    \\            // Add edge line for readability
+    \\            // Edge line — vibrant (full alpha) over dim area fill
     \\            float edge_line = lineCoverage(v_uv.y, curve_y, 2.0, v_rect_size.y);
-    \\            a = max(a, edge_line * v_color.a);
+    \\            a = max(a, edge_line);
     \\            // Overlay second series as line stroke
     \\            if (u_value_count2 > 0) {
     \\                float sv2 = sampleCurve2(v_uv.x);

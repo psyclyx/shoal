@@ -57,9 +57,11 @@
     "0.0K"))
 
 (defn- scroll-values [history pending]
-  "Append pending to history for shader-level spatial scrolling."
-  (if (and pending (> (length history) 0))
-    [;history pending]
+  "Pad with extrapolated boundary points for smooth Catmull-Rom edges."
+  (if (and pending (> (length history) 1))
+    (let [pad-l (- (* 2 (first history)) (get history 1))
+          pad-r (- (* 2 pending) (last history))]
+      [pad-l ;history pending pad-r])
     history))
 
 (defn- normalize-to [history scale]
