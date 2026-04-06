@@ -186,12 +186,13 @@ const frag_src: [*c]const u8 =
     \\            // Area fills — dim, clamped to own half
     \\            float fill_up = areaCoverage(v_uv.y, top, v_rect_size.y) * upper_mask;
     \\            float fill_dn = lower_mask * (1.0 - areaCoverage(v_uv.y, bot, v_rect_size.y));
-    \\            // Edge lines — vibrant, clamped to own half (no bleed)
+    \\            // Edge lines — boosted alpha, clamped to own half (no bleed)
     \\            float line_up = lineCoverage(v_uv.y, top, 2.0, v_rect_size.y) * upper_mask;
     \\            float line_dn = lineCoverage(v_uv.y, bot, 2.0, v_rect_size.y) * lower_mask;
-    \\            // Dim fill + vibrant edge composite
-    \\            float a1 = max(fill_up * v_color.a, line_up);
-    \\            float a2 = max(fill_dn * u_color2.a, line_dn);
+    \\            float edge_a1 = min(v_color.a * 1.8, 1.0);
+    \\            float edge_a2 = min(u_color2.a * 1.8, 1.0);
+    \\            float a1 = max(fill_up * v_color.a, line_up * edge_a1);
+    \\            float a2 = max(fill_dn * u_color2.a, line_dn * edge_a2);
     \\            a = a1 + a2 * (1.0 - a1);
     \\            vec3 rgb = (v_color.rgb * a1 + u_color2.rgb * a2 * (1.0 - a1));
     \\            if (a > 0.001) rgb /= a;
@@ -202,9 +203,9 @@ const frag_src: [*c]const u8 =
     \\            float min_vis = 2.5 / v_rect_size.y;
     \\            float curve_y = 1.0 - (sv > 0.001 ? max(sv, min_vis) : sv);
     \\            a = areaCoverage(v_uv.y, curve_y, v_rect_size.y) * v_color.a;
-    \\            // Edge line — vibrant (full alpha) over dim area fill
+    \\            // Edge line — boosted alpha over dim area fill
     \\            float edge_line = lineCoverage(v_uv.y, curve_y, 2.0, v_rect_size.y);
-    \\            a = max(a, edge_line);
+    \\            a = max(a, edge_line * min(v_color.a * 1.8, 1.0));
     \\            // Overlay second series as line stroke
     \\            if (u_value_count2 > 0) {
     \\                float sv2 = sampleCurve2(v_uv.x);
