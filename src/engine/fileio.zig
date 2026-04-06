@@ -20,7 +20,7 @@ const Result = struct {
     data: ?[]const u8, // null on error, alloc'd slice on success
 };
 
-const QUEUE_SIZE = 32;
+const QUEUE_SIZE = 64;
 
 pub const AsyncReader = struct {
     // Request queue: main → worker
