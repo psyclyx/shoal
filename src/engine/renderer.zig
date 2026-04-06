@@ -202,19 +202,17 @@ const frag_src: [*c]const u8 =
     \\            }
     \\        }
     \\
-    \\        // Grid lines — rendered as a fixed-color overlay
+    \\        // Grid lines — fixed horizontal lines, independent of curve
     \\        if (u_grid > 0) {
-    \\            float grid_a = 0.0;
-    \\            for (int gi = 1; gi <= 3; gi++) {
-    \\                float gy = float(gi) * 0.25;
-    \\                float gd = abs(v_uv.y - gy) * v_rect_size.y;
-    \\                grid_a = max(grid_a, 1.0 - smoothstep(0.0, 1.0, gd));
-    \\            }
-    \\            // Composite grid at fixed low alpha over the curve
-    \\            float ga = grid_a * 0.15;
-    \\            vec3 grid_rgb = vec3(1.0, 1.0, 1.0); // white grid lines
-    \\            color = vec4(mix(color.rgb, grid_rgb, ga / max(a + ga, 0.001)), 1.0);
-    \\            a = a + ga * (1.0 - a);
+    \\            float py = v_uv.y * v_rect_size.y; // pixel y position
+    \\            float g1 = abs(py - v_rect_size.y * 0.25);
+    \\            float g2 = abs(py - v_rect_size.y * 0.5);
+    \\            float g3 = abs(py - v_rect_size.y * 0.75);
+    \\            float gmin = min(g1, min(g2, g3));
+    \\            float ga = (1.0 - smoothstep(0.0, 1.5, gmin)) * 0.2;
+    \\            // Premultiplied composite over curve
+    \\            float ga_pm = ga;
+    \\            a = ga_pm + a * (1.0 - ga_pm);
     \\        }
     \\
     \\        frag_color = vec4(color.rgb * a, a);
