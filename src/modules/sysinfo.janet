@@ -330,7 +330,7 @@
 (reg-sub :net/rx-history [:net] (fn [net] (get net :rx-history [])))
 (reg-sub :net/tx-history [:net] (fn [net] (get net :tx-history [])))
 
-# -- Audio (PipeWire/PulseAudio via wpctl) --
+# -- Audio (PipeWire/PulseAudio via wpctl + pactl subscribe) --
 
 (reg-event-handler :audio/query
   (fn [cofx event]
@@ -348,9 +348,28 @@
       (def muted (truthy? (string/find "[MUTED]" line)))
       {:db (put (cofx :db) :audio {:percent pct :muted muted})})))
 
+# pactl subscribe streams events line-by-line. When we see a sink
+# change, query the current volume. This reacts instantly to external
+# volume changes (media keys, pavucontrol, etc.)
+(reg-event-handler :audio/subscribe-event
+  (fn [cofx event]
+    (def line (get event 1 ""))
+    (when (string/find "sink" line)
+      {:dispatch [:audio/query]})))
+
+(reg-event-handler :audio/start-subscribe
+  (fn [cofx event]
+    {:spawn {:cmd ["pactl" "subscribe"]
+             :event :audio/subscribe-event
+             :done :audio/subscribe-exited}}))
+
+(reg-event-handler :audio/subscribe-exited
+  (fn [cofx event]
+    # pactl subscribe exited (PulseAudio restart, etc.) — reconnect after delay
+    {:timer {:delay 2.0 :event [:audio/start-subscribe] :id :audio-resub}}))
+
 (reg-event-handler :init
   (fn [cofx event]
-    {:dispatch [:audio/query]
-     :timer {:delay 0.5 :event [:audio/query] :repeat true :id :audio}}))
+    {:dispatch-n [[:audio/query] [:audio/start-subscribe]]}))
 
 (reg-sub :audio (fn [db] (get db :audio {})))
