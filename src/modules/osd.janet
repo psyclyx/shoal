@@ -61,6 +61,7 @@
 
 (defn- osd/show [db label value &opt muted]
   "Update db and return fx to show the OSD."
+  (def was-visible (get db :osd/visible? false))
   (def updated (-> db
                    (put :osd/visible? true)
                    (put :osd/label label)
@@ -69,7 +70,7 @@
   (def effects @{:db updated
                  :anim {:id :osd/reveal :to 1 :duration 0.12 :easing :ease-out-cubic}
                  :timer {:delay 1.5 :event [:osd/hide] :id :osd-timeout}})
-  (when (not (get db :osd/visible?))
+  (when (not was-visible)
     (put effects :surface
       {:create {:name :osd
                 :layer :overlay

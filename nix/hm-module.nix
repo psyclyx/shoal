@@ -15,8 +15,8 @@ let
       anchor = lib.mkOption {
         type = lib.types.submodule {
           options = {
-            top = lib.mkOption { type = lib.types.bool; default = true; };
-            bottom = lib.mkOption { type = lib.types.bool; default = false; };
+            top = lib.mkOption { type = lib.types.bool; default = false; };
+            bottom = lib.mkOption { type = lib.types.bool; default = true; };
             left = lib.mkOption { type = lib.types.bool; default = true; };
             right = lib.mkOption { type = lib.types.bool; default = true; };
           };

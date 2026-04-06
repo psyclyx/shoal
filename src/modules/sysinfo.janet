@@ -276,6 +276,11 @@
       (def ipv6 (if update-ips (or (get-ipv6-for-iface net-iface) "") (get prev :ipv6 "")))
       (def rx-clamped (max 0 rx-rate))
       (def tx-clamped (max 0 tx-rate))
+      # Decaying peak for stable sparkline scaling — tracks max of either
+      # series, decays by 5% per tick so old spikes fade out smoothly.
+      (def prev-peak (get prev :peak 1024))
+      (def current-max (max rx-clamped tx-clamped))
+      (def peak (max current-max (* prev-peak 0.95)))
       {:db (put (cofx :db) :net {:rx-rate rx-clamped
                                   :tx-rate tx-clamped
                                   :prev-rx (now :rx)
@@ -284,6 +289,7 @@
                                   :ipv4 ipv4
                                   :ipv6 ipv6
                                   :tick-count tick-count
+                                  :peak peak
                                   :rx-history (push-history (get prev :rx-history) rx-clamped 60)
                                   :tx-history (push-history (get prev :tx-history) tx-clamped 60)})})))
 

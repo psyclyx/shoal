@@ -53,11 +53,11 @@
     (> bps 0)           (string/format "%.1fK" (/ bps 1024))
     "0K"))
 
-(defn- normalize-history [history]
+(defn- normalize-history [history scale]
+  "Normalize history to 0-1. Scale is the max value to normalize against."
   (if (or (nil? history) (= 0 (length history)))
     []
-    (let [mx (max 1 (apply max history))]
-      (map |(/ $ mx) history))))
+    (map |(min 1 (/ $ (max 1 scale))) history)))
 
 (defn- sep []
   [:row {:w 1 :h 20 :bg overlay}])
@@ -185,12 +185,9 @@
   (def net (sub :net))
   (def rx (get net :rx-rate 0))
   (def tx (get net :tx-rate 0))
-  (def rx-raw (sub :net/rx-history))
-  (def tx-raw (sub :net/tx-history))
-  (def all-vals (array/concat @[] (or rx-raw @[]) (or tx-raw @[])))
-  (def mx (max 1 (if (> (length all-vals) 0) (apply max all-vals) 1)))
-  (def rx-norm (map |(/ $ mx) (or rx-raw @[])))
-  (def tx-norm (map |(/ $ mx) (or tx-raw @[])))
+  (def peak (get net :peak 1024))
+  (def rx-norm (normalize-history (sub :net/rx-history) peak))
+  (def tx-norm (normalize-history (sub :net/tx-history) peak))
   [:row {:gap 6 :align-y :center}
     [:area {:w 80 :h 28 :values rx-norm :values2 tx-norm
             :color (dim green) :color2 (dim cyan)
