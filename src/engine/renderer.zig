@@ -128,9 +128,11 @@ const frag_src: [*c]const u8 =
     \\    int i1 = clamp(idx,     0, count - 1);
     \\    int i2 = clamp(idx + 1, 0, count - 1);
     \\    int i3 = clamp(idx + 2, 0, count - 1);
+    \\    // Unclamped — callers decide how to handle values outside [0,1]
+    \\    // (e.g. mirror mode fades clipped regions).
     \\    if (u_smooth > 0) {
-    \\        return clamp(catmullRom(vals[i0], vals[i1],
-    \\                                vals[i2], vals[i3], t), 0.0, 1.0);
+    \\        return max(0.0, catmullRom(vals[i0], vals[i1],
+    \\                                   vals[i2], vals[i3], t));
     \\    } else {
     \\        return mix(vals[i1], vals[i2], t);
     \\    }
@@ -158,7 +160,7 @@ const frag_src: [*c]const u8 =
     \\void main() {
     \\    if (v_mode > 2.5) {
     \\        // Mode 3: line stroke curve — constant thickness
-    \\        float lsv = sampleCurve(v_uv.x);
+    \\        float lsv = clamp(sampleCurve(v_uv.x), 0.0, 1.0);
     \\        float lmin = 2.5 / v_rect_size.y;
     \\        float curve_y = 1.0 - (lsv > 0.001 ? max(lsv, lmin) : lsv);
     \\        float aa = lineCoverage(v_uv.y, curve_y, u_thickness, v_rect_size.y);
@@ -172,23 +174,33 @@ const frag_src: [*c]const u8 =
     \\        vec4 color = v_color;
     \\
     \\        if (u_mirror > 0 && u_value_count2 > 0) {
-    \\            // Mirrored: values1 area above center, values2 below
+    \\            // Mirrored: values1 area above center, values2 below.
+    \\            // No min-visibility clamp — curves go to exactly 0 so
+    \\            // interpolated samples move smoothly through the seam.
+    \\            // Center mask is a ~1 px smoothstep so the two halves
+    \\            // AA against each other instead of being hard-cut.
+    \\            // Curves that exceed the ceiling (c > 0.5 == value > 1)
+    \\            // fade out: line fully, fill to a dim ghost — lets
+    \\            // historic spikes past the current scale read as "there
+    \\            // was activity" without shouting.
     \\            float center = 0.5;
-    \\            float min_vis = 2.5 / v_rect_size.y;
-    \\            float c1_raw = sampleCurve(v_uv.x) * 0.5;
-    \\            float c2_raw = sampleCurve2(v_uv.x) * 0.5;
-    \\            float c1 = c1_raw > 0.001 ? max(c1_raw, min_vis) : c1_raw;
-    \\            float c2 = c2_raw > 0.001 ? max(c2_raw, min_vis) : c2_raw;
+    \\            float c1 = sampleCurve(v_uv.x) * 0.5;
+    \\            float c2 = sampleCurve2(v_uv.x) * 0.5;
     \\            float top = center - c1;
     \\            float bot = center + c2;
-    \\            float upper_mask = 1.0 - step(center, v_uv.y);
-    \\            float lower_mask = step(center, v_uv.y);
-    \\            // Area fills — dim, clamped to own half
-    \\            float fill_up = areaCoverage(v_uv.y, top, v_rect_size.y) * upper_mask;
-    \\            float fill_dn = lower_mask * (1.0 - areaCoverage(v_uv.y, bot, v_rect_size.y));
-    \\            // Edge lines — boosted alpha, clamped to own half (no bleed)
-    \\            float line_up = lineCoverage(v_uv.y, top, 2.0, v_rect_size.y) * upper_mask;
-    \\            float line_dn = lineCoverage(v_uv.y, bot, 2.0, v_rect_size.y) * lower_mask;
+    \\            float center_aa = 1.0 / v_rect_size.y;
+    \\            float lower_mask = smoothstep(center - center_aa, center + center_aa, v_uv.y);
+    \\            float upper_mask = 1.0 - lower_mask;
+    \\            float fade1 = 1.0 - smoothstep(0.48, 0.52, c1);
+    \\            float fade2 = 1.0 - smoothstep(0.48, 0.52, c2);
+    \\            float fill_dim1 = mix(0.35, 1.0, fade1);
+    \\            float fill_dim2 = mix(0.35, 1.0, fade2);
+    \\            // Area fills clamped to own half with smooth center seam.
+    \\            float fill_up = areaCoverage(v_uv.y, top, v_rect_size.y) * upper_mask * fill_dim1;
+    \\            float fill_dn = (1.0 - areaCoverage(v_uv.y, bot, v_rect_size.y)) * lower_mask * fill_dim2;
+    \\            // Edge lines — boosted alpha, clamped to own half with soft seam.
+    \\            float line_up = lineCoverage(v_uv.y, top, 2.0, v_rect_size.y) * upper_mask * fade1;
+    \\            float line_dn = lineCoverage(v_uv.y, bot, 2.0, v_rect_size.y) * lower_mask * fade2;
     \\            float edge_a1 = min(v_color.a * 1.8, 1.0);
     \\            float edge_a2 = min(u_color2.a * 1.8, 1.0);
     \\            float a1 = max(fill_up * v_color.a, line_up * edge_a1);
@@ -199,7 +211,7 @@ const frag_src: [*c]const u8 =
     \\            color = vec4(rgb, 1.0);
     \\        } else {
     \\            // Standard bottom-up area fill
-    \\            float sv = sampleCurve(v_uv.x);
+    \\            float sv = clamp(sampleCurve(v_uv.x), 0.0, 1.0);
     \\            float min_vis = 2.5 / v_rect_size.y;
     \\            float curve_y = 1.0 - (sv > 0.001 ? max(sv, min_vis) : sv);
     \\            a = areaCoverage(v_uv.y, curve_y, v_rect_size.y) * v_color.a;
@@ -208,7 +220,7 @@ const frag_src: [*c]const u8 =
     \\            a = max(a, edge_line * min(v_color.a * 1.8, 1.0));
     \\            // Overlay second series as line stroke
     \\            if (u_value_count2 > 0) {
-    \\                float sv2 = sampleCurve2(v_uv.x);
+    \\                float sv2 = clamp(sampleCurve2(v_uv.x), 0.0, 1.0);
     \\                float c2_y = 1.0 - (sv2 > 0.001 ? max(sv2, min_vis) : sv2);
     \\                float la = lineCoverage(v_uv.y, c2_y, 2.0, v_rect_size.y) * u_color2.a;
     \\                a = la + a * (1.0 - la);

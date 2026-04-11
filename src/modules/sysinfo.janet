@@ -243,52 +243,57 @@
       (def prev (get (cofx :db) :net {}))
       (def prev-rx (get prev :prev-rx 0))
       (def prev-tx (get prev :prev-tx 0))
-      (def dt 2.0)
+      (def clock (os/clock))
+      (def prev-clock (get prev :prev-clock 0))
+      (def dt (if (> prev-clock 0) (max 0.1 (- clock prev-clock)) 1.0))
       (def rx-rate (if (> prev-rx 0) (/ (- (now :rx) prev-rx) dt) 0))
       (def tx-rate (if (> prev-tx 0) (/ (- (now :tx) prev-tx) dt) 0))
       (def tick-count (+ 1 (get prev :tick-count 0)))
-      (def update-ips (or (nil? (get prev :ipv4)) (= 0 (% tick-count 30))))
+      (def update-ips (or (nil? (get prev :ipv4)) (= 0 (% tick-count 60))))
       (def ipv4 (if update-ips (or (get-local-ipv4) "") (get prev :ipv4 "")))
       (def rx-raw (max 0 rx-rate))
       (def tx-raw (max 0 tx-rate))
-      # EMA smoothing — reduces visual spikiness (alpha=0.3)
-      (def alpha 0.3)
-      (def rx-smooth (+ (* alpha rx-raw) (* (- 1 alpha) (get prev :rx-smooth 0))))
-      (def tx-smooth (+ (* alpha tx-raw) (* (- 1 alpha) (get prev :tx-smooth 0))))
-      (def clock (os/clock))
-      (def rx-samples (push-sample (get prev :rx-samples) clock rx-smooth 120))
-      (def tx-samples (push-sample (get prev :tx-samples) clock tx-smooth 120))
-      # Per-direction peaks from sample max.
-      # Zoom out ~30%/tick, zoom in ~3%/tick.
-      (defn- samples-max [samples]
-        (var mx 0)
-        (each s samples (set mx (max mx (get s 1))))
-        mx)
-      (defn- track-peak [current data-max prev-peak]
-        (def target (* (max (max current data-max) 1024) 1.2))
-        (if (> target prev-peak)
-          (+ (* 0.3 target) (* 0.7 prev-peak))
-          (+ (* 0.03 target) (* 0.97 prev-peak))))
-      (def rx-peak (track-peak rx-smooth (samples-max rx-samples) (get prev :rx-peak 1024)))
-      (def tx-peak (track-peak tx-smooth (samples-max tx-samples) (get prev :tx-peak 1024)))
+      # Double-EMA smoothing — reduces visual spikiness.
+      # Stage 1 (alpha1) smooths raw rate; stage 2 (alpha2) smooths the smoothed signal.
+      (def alpha1 0.25)
+      (def alpha2 0.4)
+      (def rx-s1 (+ (* alpha1 rx-raw) (* (- 1 alpha1) (get prev :rx-s1 0))))
+      (def tx-s1 (+ (* alpha1 tx-raw) (* (- 1 alpha1) (get prev :tx-s1 0))))
+      (def rx-smooth (+ (* alpha2 rx-s1) (* (- 1 alpha2) (get prev :rx-smooth 0))))
+      (def tx-smooth (+ (* alpha2 tx-s1) (* (- 1 alpha2) (get prev :tx-smooth 0))))
+      (def rx-samples (push-sample (get prev :rx-samples) clock rx-smooth 60))
+      (def tx-samples (push-sample (get prev :tx-samples) clock tx-smooth 60))
+      # Shared peak tracks max(rx, tx) with asymmetric EMA — fast zoom
+      # out on bursts, slow zoom in so brief lulls don't shrink the
+      # scale. Don't anchor to historical samples max: a single spike
+      # would pin the scale for the full sample window and crush the
+      # quieter direction until the spike aged out.
+      (def current-max (max rx-smooth tx-smooth))
+      (def target (* (max current-max 1024) 1.2))
+      (def prev-peak (get prev :peak 1024))
+      (def peak (if (> target prev-peak)
+                  (+ (* 0.3 target) (* 0.7 prev-peak))
+                  (+ (* 0.08 target) (* 0.92 prev-peak))))
       {:db (put (cofx :db) :net {:rx-rate rx-raw
                                   :tx-rate tx-raw
+                                  :rx-s1 rx-s1
+                                  :tx-s1 tx-s1
                                   :rx-smooth rx-smooth
                                   :tx-smooth tx-smooth
                                   :prev-rx (now :rx)
                                   :prev-tx (now :tx)
+                                  :prev-clock clock
                                   :iface net-iface
                                   :ipv4 ipv4
                                   :tick-count tick-count
-                                  :rx-peak rx-peak
-                                  :tx-peak tx-peak
+                                  :peak peak
                                   :rx-samples rx-samples
                                   :tx-samples tx-samples})})))
 
 (reg-event-handler :init
   (fn [cofx event]
     {:dispatch [:net/tick]
-     :timer {:delay 2.0 :event [:net/tick] :repeat true :id :net}}))
+     :timer {:delay 1.0 :event [:net/tick] :repeat true :id :net}}))
 
 (reg-sub :net (fn [db] (get db :net {})))
 

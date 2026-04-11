@@ -86,11 +86,12 @@
       result)))
 
 (defn- normalize-to [values scale]
-  "Normalize values to 0-1 against a scale."
+  "Normalize values to scale. Values above 1 signal clipping to the
+   shader, which fades them out — so don't cap here."
   (if (or (nil? values) (= 0 (length values)))
     []
     (let [s (max 1 scale)]
-      (map |(min 1 (/ $ s)) values))))
+      (map |(max 0 (/ $ s)) values))))
 
 
 (defn- sep []
@@ -220,10 +221,11 @@
   (def net (sub :net))
   (def rx (get net :rx-rate 0))
   (def tx (get net :tx-rate 0))
-  (def rx-vals (resample (get net :rx-samples) 120 60))
-  (def tx-vals (resample (get net :tx-samples) 120 60))
-  (def rx-norm (normalize-to rx-vals (get net :rx-peak 1024)))
-  (def tx-norm (normalize-to tx-vals (get net :tx-peak 1024)))
+  (def rx-vals (resample (get net :rx-samples) 60 60))
+  (def tx-vals (resample (get net :tx-samples) 60 60))
+  (def peak (get net :peak 1024))
+  (def rx-norm (normalize-to rx-vals peak))
+  (def tx-norm (normalize-to tx-vals peak))
   [:row {:gap 8 :align-y :center}
     [:area {:w 80 :h 32 :values rx-norm :values2 tx-norm
             :color (dim green 140) :color2 (dim cyan 140)
