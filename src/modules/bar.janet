@@ -56,10 +56,31 @@
     (> bps 0)           (fmt3 (/ bps 1024) "K")
     "0.0K"))
 
-(defn- resample [samples window n]
+(defn- weighted-peak [samples tau]
+  "Time-weighted max: each sample contributes value * exp(-age/tau).
+   Recent samples dominate; old samples trail off smoothly. Used to
+   drive chart scale so it zooms out on fresh bursts and smoothly
+   zooms back in as they recede into the past — no window cliffs,
+   no hard forget of old activity, just gradual fade of influence."
+  (if (or (nil? samples) (= 0 (length samples)))
+    0
+    (do
+      (def now (os/clock :monotonic))
+      (var mx 0)
+      (each s samples
+        (def age (- now (get s 0)))
+        (when (>= age 0)
+          (def w (math/exp (- (/ age tau))))
+          (def contrib (* (get s 1) w))
+          (when (> contrib mx) (set mx contrib))))
+      mx)))
+
+(defn- resample [samples window lag n]
   "Resample timestamped [time value] pairs into n evenly-spaced values.
-   Window is seconds of history ending at now."
-  (def now (os/clock))
+   The window ends at (now - lag). A lag equal to one sample interval
+   keeps the right edge between two known samples, so interpolation is
+   continuous across sample arrivals — no lurch when new data lands."
+  (def now (- (os/clock :monotonic) lag))
   (if (or (nil? samples) (< (length samples) 2))
     (array/new-filled n 0)
     (do
@@ -84,15 +105,6 @@
                 frac (/ (- t t0) (max 0.001 (- t1 t0)))]
             (array/push result (+ v0 (* frac (- v1 v0)))))))
       result)))
-
-(defn- normalize-to [values scale]
-  "Normalize values to scale. Values above 1 signal clipping to the
-   shader, which fades them out — so don't cap here."
-  (if (or (nil? values) (= 0 (length values)))
-    []
-    (let [s (max 1 scale)]
-      (map |(max 0 (/ $ s)) values))))
-
 
 (defn- sep []
   [:row {:w 1 :h 24 :bg overlay}])
@@ -182,7 +194,7 @@
 (defn- cpu-view []
   (def pct (sub :cpu/percent))
   (def cpu (sub :cpu))
-  (def values (resample (get cpu :samples) 120 60))
+  (def values (resample (get cpu :samples) 120 2 60))
   (def color (pct-color pct))
   [:row {:gap 8 :align-y :center}
     [:area {:w 80 :h 32 :values values
@@ -221,11 +233,19 @@
   (def net (sub :net))
   (def rx (get net :rx-rate 0))
   (def tx (get net :tx-rate 0))
-  (def rx-vals (resample (get net :rx-samples) 60 60))
-  (def tx-vals (resample (get net :tx-samples) 60 60))
-  (def peak (get net :peak 1024))
-  (def rx-norm (normalize-to rx-vals peak))
-  (def tx-norm (normalize-to tx-vals peak))
+  (def rx-samples (get net :rx-samples))
+  (def tx-samples (get net :tx-samples))
+  # Time-weighted scale: recent data dominates, old data contributes
+  # less. Tau ~= 30s means a 30s-old spike has ~37% influence; a 60s
+  # one ~14%. Chart zooms out on bursts and gradually back in.
+  (def tau 30)
+  (def scale (max 1024
+                  (* 1.2 (max (weighted-peak rx-samples tau)
+                              (weighted-peak tx-samples tau)))))
+  (def rx-vals (resample rx-samples 60 1 60))
+  (def tx-vals (resample tx-samples 60 1 60))
+  (def rx-norm (map |(max 0 (/ $ scale)) rx-vals))
+  (def tx-norm (map |(max 0 (/ $ scale)) tx-vals))
   [:row {:gap 8 :align-y :center}
     [:area {:w 80 :h 32 :values rx-norm :values2 tx-norm
             :color (dim green 140) :color2 (dim cyan 140)
