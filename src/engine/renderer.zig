@@ -30,8 +30,16 @@ pub const Vertex = extern struct {
     radius_bl: f32,
     radius_br: f32,
     // 0.0 = solid colour with rounded-rect SDF, 1.0 = texture sample,
-    // 2.0 = area fill curve, 3.0 = line stroke curve
+    // 2.0 = area fill curve, 3.0 = line stroke curve, 4.0 = triangle SDF
     mode: f32,
+};
+
+/// Triangle direction — which rect edge the apex points toward.
+pub const TriDir = enum(i32) {
+    up = 0,
+    right = 1,
+    down = 2,
+    left = 3,
 };
 
 // ---------------------------------------------------------------------------
@@ -97,6 +105,7 @@ const frag_src: [*c]const u8 =
     \\uniform int u_grid;
     \\uniform float u_grid_lines[8];
     \\uniform float u_scroll;
+    \\uniform int u_tri_dir;
     \\
     \\out vec4 frag_color;
     \\
@@ -154,8 +163,46 @@ const frag_src: [*c]const u8 =
     \\    return smoothstep(curve_y - aa, curve_y + aa, frag_y);
     \\}
     \\
+    \\// Triangle SDF inscribed in the unit rect, apex toward an edge
+    \\// selected by u_tri_dir (0=up, 1=right, 2=down, 3=left).
+    \\// Returns signed distance in logical pixel space; negative = inside.
+    \\float triangleSDF(vec2 p, vec2 size, int dir) {
+    \\    vec2 q = p;
+    \\    vec2 s = size;
+    \\    if (dir == 1) {        // right: apex at (w, h/2)
+    \\        q = vec2(p.y, size.x - p.x);
+    \\        s = vec2(size.y, size.x);
+    \\    } else if (dir == 2) { // down: apex at (w/2, h)
+    \\        q = vec2(size.x - p.x, size.y - p.y);
+    \\    } else if (dir == 3) { // left: apex at (0, h/2)
+    \\        q = vec2(size.y - p.y, p.x);
+    \\        s = vec2(size.y, size.x);
+    \\    }
+    \\    // Canonical triangle: apex (s.x/2, 0), base (0, s.y)-(s.x, s.y).
+    \\    vec2 a = vec2(s.x * 0.5, 0.0);
+    \\    vec2 b = vec2(0.0, s.y);
+    \\    vec2 cc = vec2(s.x, s.y);
+    \\    vec2 ab = b - a;
+    \\    vec2 nab = normalize(vec2(ab.y, -ab.x));
+    \\    float dab = dot(q - a, nab);
+    \\    vec2 bc = cc - b;
+    \\    vec2 nbc = normalize(vec2(bc.y, -bc.x));
+    \\    float dbc = dot(q - b, nbc);
+    \\    vec2 ca = a - cc;
+    \\    vec2 nca = normalize(vec2(ca.y, -ca.x));
+    \\    float dca = dot(q - cc, nca);
+    \\    return max(max(dab, dbc), dca);
+    \\}
+    \\
     \\void main() {
-    \\    if (v_mode > 2.5) {
+    \\    if (v_mode > 3.5) {
+    \\        // Mode 4: triangle SDF
+    \\        float dist = triangleSDF(v_local_pos, v_rect_size, u_tri_dir);
+    \\        float fw = max(fwidth(dist), 1e-4);
+    \\        float cov = 1.0 - smoothstep(-0.5, 0.5, dist / fw);
+    \\        float a = cov * v_color.a;
+    \\        frag_color = vec4(v_color.rgb * a, a);
+    \\    } else if (v_mode > 2.5) {
     \\        // Mode 3: line stroke curve — constant thickness
     \\        float lsv = min(1.0, sampleCurve(v_uv.x));
     \\        float lmin = 2.5 / v_rect_size.y;
@@ -262,8 +309,13 @@ const frag_src: [*c]const u8 =
     \\            radius = v_corner_radius.w;
     \\        }
     \\        float dist = roundedRectSDF(p, half_size, radius);
-    \\        float aa = (1.0 - smoothstep(-0.5, 0.5, dist)) * v_color.a;
-    \\        frag_color = vec4(v_color.rgb * aa, aa);
+    \\        // Normalise distance by its per-pixel gradient magnitude so
+    \\        // the smoothstep always spans ~1 pixel in screen space.
+    \\        // Correct for both axis-aligned rects and sheared parallelograms
+    \\        // emitted by pushQuad with nonzero skew.
+    \\        float fw = max(fwidth(dist), 1e-4);
+    \\        float a = (1.0 - smoothstep(-0.5, 0.5, dist / fw)) * v_color.a;
+    \\        frag_color = vec4(v_color.rgb * a, a);
     \\    }
     \\}
     \\
@@ -295,6 +347,7 @@ pub const Renderer = struct {
     u_grid: c.GLint,
     u_grid_lines: c.GLint,
     u_scroll: c.GLint,
+    u_tri_dir: c.GLint,
 
     // CPU-side vertex accumulator
     vertices: std.ArrayListUnmanaged(Vertex),
@@ -326,6 +379,7 @@ pub const Renderer = struct {
         const u_grid = c.glGetUniformLocation(program, "u_grid");
         const u_grid_lines = c.glGetUniformLocation(program, "u_grid_lines");
         const u_scroll = c.glGetUniformLocation(program, "u_scroll");
+        const u_tri_dir = c.glGetUniformLocation(program, "u_tri_dir");
 
         // --- VAO / VBO ---
         var vao: c.GLuint = 0;
@@ -382,6 +436,7 @@ pub const Renderer = struct {
             .u_grid = u_grid,
             .u_grid_lines = u_grid_lines,
             .u_scroll = u_scroll,
+            .u_tri_dir = u_tri_dir,
             .vertices = .{},
             .allocator = allocator,
             .width = 0,
@@ -442,7 +497,42 @@ pub const Renderer = struct {
         color: [4]f32,
         corner_radius: [4]f32,
     ) void {
-        self.pushQuad(x, y, w, h, color, corner_radius, .{ 0, 0, 1, 1 }, 0.0);
+        self.pushQuad(x, y, w, h, color, corner_radius, .{ 0, 0, 1, 1 }, 0.0, 0);
+    }
+
+    /// Draw a filled parallelogram. `skew` is horizontal shift per unit of
+    /// height — positive values slant the top edge to the right (`/`).
+    /// Corner radius is not supported; it is ignored.
+    pub fn drawSlantRect(
+        self: *Renderer,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        color: [4]f32,
+        skew: f32,
+    ) void {
+        const no_radius = [4]f32{ 0, 0, 0, 0 };
+        self.pushQuad(x, y, w, h, color, no_radius, .{ 0, 0, 1, 1 }, 0.0, skew);
+    }
+
+    /// Draw a filled triangle inscribed in the given rect, apex pointing
+    /// toward the edge selected by `dir`.
+    pub fn drawTriangle(
+        self: *Renderer,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        color: [4]f32,
+        dir: TriDir,
+    ) void {
+        // Uniforms are set per-draw; flush before and after to bracket this call.
+        self.flush();
+        c.glUniform1i(self.u_tri_dir, @intFromEnum(dir));
+        const no_radius = [4]f32{ 0, 0, 0, 0 };
+        self.pushQuad(x, y, w, h, color, no_radius, .{ 0, 0, 1, 1 }, 4.0, 0);
+        self.flush();
     }
 
     /// Draw a textured quad (e.g. a glyph from an atlas).
@@ -460,7 +550,7 @@ pub const Renderer = struct {
         tex_h: f32,
     ) void {
         const no_radius = [4]f32{ 0, 0, 0, 0 };
-        self.pushQuad(x, y, w, h, color, no_radius, .{ tex_x, tex_y, tex_w, tex_h }, 1.0);
+        self.pushQuad(x, y, w, h, color, no_radius, .{ tex_x, tex_y, tex_w, tex_h }, 1.0, 0);
     }
 
     /// Draw a border as four rectangles (top, bottom, left, right).
@@ -546,7 +636,7 @@ pub const Renderer = struct {
         // Mode 2.0 = area fill, 3.0 = line stroke.
         // UV is 0-1 across the quad (same mapping as mode 0 rects).
         const mode: f32 = if (is_line) 3.0 else 2.0;
-        self.pushQuad(x, y, w, h, color, .{ 0, 0, 0, 0 }, .{ 0, 0, 1, 1 }, mode);
+        self.pushQuad(x, y, w, h, color, .{ 0, 0, 0, 0 }, .{ 0, 0, 1, 1 }, mode, 0);
 
         // Flush immediately so curve uniforms only apply to this quad.
         self.flush();
@@ -605,6 +695,7 @@ pub const Renderer = struct {
         corner_radius: [4]f32,
         uv_rect: [4]f32, // u0, v0, u1, v1
         mode: f32,
+        skew: f32, // horizontal shift per unit of height; shears top edge right
     ) void {
         // For solid-colour quads and curves, UV encodes the normalised local
         // position (0..1 mapping to 0..rect_size). For textured quads the UV
@@ -614,6 +705,11 @@ pub const Renderer = struct {
         const uv_t = if (is_normalized) @as(f32, 0.0) else uv_rect[1];
         const uv_r = if (is_normalized) @as(f32, 1.0) else uv_rect[0] + uv_rect[2];
         const uv_b = if (is_normalized) @as(f32, 1.0) else uv_rect[1] + uv_rect[3];
+
+        // Top edge shifts right by skew*h. UVs stay (0,0)..(1,1) so
+        // v_local_pos interpolates linearly across the logical rect and
+        // the rounded-rect SDF stays correct.
+        const shift = skew * h;
 
         const base = Vertex{
             .x = 0,
@@ -636,13 +732,13 @@ pub const Renderer = struct {
         // Two triangles: TL, TR, BL  and  TR, BR, BL
         const verts = [6]Vertex{
             // top-left
-            withPosUV(base, x, y, uv_l, uv_t),
+            withPosUV(base, x + shift, y, uv_l, uv_t),
             // top-right
-            withPosUV(base, x + w, y, uv_r, uv_t),
+            withPosUV(base, x + w + shift, y, uv_r, uv_t),
             // bottom-left
             withPosUV(base, x, y + h, uv_l, uv_b),
             // top-right
-            withPosUV(base, x + w, y, uv_r, uv_t),
+            withPosUV(base, x + w + shift, y, uv_r, uv_t),
             // bottom-right
             withPosUV(base, x + w, y + h, uv_r, uv_b),
             // bottom-left

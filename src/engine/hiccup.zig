@@ -2,6 +2,7 @@ const std = @import("std");
 const clay = @import("clay");
 const janet = @import("janet.zig");
 const jc = janet.c;
+const renderer_mod = @import("renderer.zig");
 
 const log = std.log.scoped(.hiccup);
 
@@ -11,6 +12,7 @@ var kw_col: jc.Janet = undefined;
 var kw_text: jc.Janet = undefined;
 var kw_area: jc.Janet = undefined;
 var kw_line: jc.Janet = undefined;
+var kw_tri: jc.Janet = undefined;
 var kw_w: jc.Janet = undefined;
 var kw_h: jc.Janet = undefined;
 var kw_pad: jc.Janet = undefined;
@@ -36,6 +38,10 @@ var kw_smooth: jc.Janet = undefined;
 var kw_mirror: jc.Janet = undefined;
 var kw_grid: jc.Janet = undefined;
 var kw_scroll: jc.Janet = undefined;
+var kw_skew: jc.Janet = undefined;
+var kw_dir: jc.Janet = undefined;
+var kw_up: jc.Janet = undefined;
+var kw_down: jc.Janet = undefined;
 // Sizing keywords
 var kw_grow: jc.Janet = undefined;
 var kw_fit: jc.Janet = undefined;
@@ -58,13 +64,25 @@ var coerced_roots: [MAX_COERCED_STRINGS]jc.Janet = undefined;
 var coerced_count: usize = 0;
 
 // ---------------------------------------------------------------------------
-// Per-frame curve data storage
+// Per-frame custom render payloads
 // ---------------------------------------------------------------------------
+//
+// Clay's `.custom` render command carries an opaque `custom_data` pointer.
+// We route multiple payload types through that slot by prepending a tag to
+// every struct and dispatching in layout.zig. All custom payloads in this
+// file MUST have `header: CustomHeader` as their first field.
+
+pub const CustomKind = enum(u32) { curve, skew_bg, triangle };
+
+pub const CustomHeader = extern struct {
+    kind: CustomKind,
+};
 
 pub const MAX_CURVES = 16;
 pub const MAX_CURVE_VALUES = 64;
 
 pub const CurveData = struct {
+    header: CustomHeader = .{ .kind = .curve },
     values: [MAX_CURVE_VALUES]f32 = [_]f32{0} ** MAX_CURVE_VALUES,
     value_count: u32 = 0,
     values2: [MAX_CURVE_VALUES]f32 = [_]f32{0} ** MAX_CURVE_VALUES,
@@ -81,13 +99,36 @@ pub const CurveData = struct {
     is_line: bool = false,
 };
 
+pub const SkewBgData = struct {
+    header: CustomHeader = .{ .kind = .skew_bg },
+    color: [4]f32 = .{ 0, 0, 0, 0 },
+    skew: f32 = 0,
+};
+
+pub const TriData = struct {
+    header: CustomHeader = .{ .kind = .triangle },
+    color: [4]f32 = .{ 1, 1, 1, 1 },
+    dir: renderer_mod.TriDir = .up,
+};
+
+pub const MAX_SKEW_BGS = 32;
+pub const MAX_TRIS = 64;
+
 var curve_storage: [MAX_CURVES]CurveData = undefined;
 var curve_count: usize = 0;
+
+var skew_storage: [MAX_SKEW_BGS]SkewBgData = undefined;
+var skew_count: usize = 0;
+
+var tri_storage: [MAX_TRIS]TriData = undefined;
+var tri_count: usize = 0;
 
 /// Call before walkHiccup to begin tracking coerced string roots.
 pub fn beginPass() void {
     coerced_count = 0;
     curve_count = 0;
+    skew_count = 0;
+    tri_count = 0;
 }
 
 /// Call after Clay endLayout to unroot coerced strings.
@@ -106,6 +147,7 @@ pub fn init() void {
     kw_text = janet.kw("text");
     kw_area = janet.kw("area");
     kw_line = janet.kw("line");
+    kw_tri = janet.kw("tri");
     kw_w = janet.kw("w");
     kw_h = janet.kw("h");
     kw_pad = janet.kw("pad");
@@ -131,6 +173,10 @@ pub fn init() void {
     kw_mirror = janet.kw("mirror");
     kw_grid = janet.kw("grid");
     kw_scroll = janet.kw("scroll");
+    kw_skew = janet.kw("skew");
+    kw_dir = janet.kw("dir");
+    kw_up = janet.kw("up");
+    kw_down = janet.kw("down");
     kw_grow = janet.kw("grow");
     kw_fit = janet.kw("fit");
     kw_percent = janet.kw("percent");
@@ -203,6 +249,8 @@ pub fn walkHiccup(node: jc.Janet) void {
         walkCurve(false, attrs);
     } else if (janetKeywordEql(tag, kw_line)) {
         walkCurve(true, attrs);
+    } else if (janetKeywordEql(tag, kw_tri)) {
+        walkTriangle(attrs);
     } else {
         log.warn("unknown hiccup tag, skipping", .{});
     }
@@ -217,6 +265,37 @@ fn walkContainer(direction: clay.LayoutDirection, attrs: jc.Janet, children: []c
 
     applyContainerAttrs(&config, attrs);
 
+    // If `:skew` is present, route the background through a tagged custom
+    // payload instead of Clay's built-in .rectangle path — that lets the
+    // renderer emit a parallelogram (sheared top edge) for this element.
+    // The background_color set by applyContainerAttrs is moved into the
+    // SkewBgData so Clay doesn't also emit a rectangle behind it.
+    if (jc.janet_checktype(attrs, jc.JANET_NIL) == 0) {
+        const skew_val = janet.janetGet(attrs, kw_skew);
+        if (jc.janet_checktype(skew_val, jc.JANET_NIL) == 0) {
+            const skew = janetToF32(skew_val) orelse 0;
+            if (skew != 0 and skew_count < MAX_SKEW_BGS) {
+                var data = SkewBgData{ .skew = skew };
+                // Move container's bg into the skew payload (Clay colors are
+                // 0-255; renderer consumes 0-1).
+                data.color = .{
+                    config.background_color[0] / 255.0,
+                    config.background_color[1] / 255.0,
+                    config.background_color[2] / 255.0,
+                    config.background_color[3] / 255.0,
+                };
+                skew_storage[skew_count] = data;
+                config.custom = .{ .custom_data = @ptrCast(&skew_storage[skew_count]) };
+                config.background_color = .{ 0, 0, 0, 0 };
+                // Rounded parallelograms aren't supported; drop any radius.
+                config.corner_radius = .{};
+                skew_count += 1;
+            } else if (skew != 0) {
+                log.warn("too many :skew elements ({d}), skipping bg", .{MAX_SKEW_BGS});
+            }
+        }
+    }
+
     clay.cdefs.Clay__OpenElement();
     clay.cdefs.Clay__ConfigureOpenElement(config);
 
@@ -224,6 +303,50 @@ fn walkContainer(direction: clay.LayoutDirection, attrs: jc.Janet, children: []c
         walkHiccup(child);
     }
 
+    clay.cdefs.Clay__CloseElement();
+}
+
+fn walkTriangle(attrs: jc.Janet) void {
+    if (tri_count >= MAX_TRIS) {
+        log.warn("too many :tri elements ({d}), skipping", .{MAX_TRIS});
+        return;
+    }
+
+    var data = TriData{};
+
+    if (jc.janet_checktype(attrs, jc.JANET_NIL) == 0) {
+        const color_val = janet.janetGet(attrs, kw_color);
+        if (jc.janet_checktype(color_val, jc.JANET_NIL) == 0) {
+            const col = parseColor(color_val);
+            data.color = .{ col[0] / 255.0, col[1] / 255.0, col[2] / 255.0, col[3] / 255.0 };
+        }
+
+        const dir_val = janet.janetGet(attrs, kw_dir);
+        if (jc.janet_checktype(dir_val, jc.JANET_NIL) == 0) {
+            if (janetKeywordEql(dir_val, kw_up)) {
+                data.dir = .up;
+            } else if (janetKeywordEql(dir_val, kw_right)) {
+                data.dir = .right;
+            } else if (janetKeywordEql(dir_val, kw_down)) {
+                data.dir = .down;
+            } else if (janetKeywordEql(dir_val, kw_left)) {
+                data.dir = .left;
+            }
+        }
+    }
+
+    tri_storage[tri_count] = data;
+
+    var config = clay.ElementDeclaration{
+        .custom = .{ .custom_data = @ptrCast(&tri_storage[tri_count]) },
+    };
+    tri_count += 1;
+
+    // Size + padding come from the normal container attr path.
+    applyContainerAttrs(&config, attrs);
+
+    clay.cdefs.Clay__OpenElement();
+    clay.cdefs.Clay__ConfigureOpenElement(config);
     clay.cdefs.Clay__CloseElement();
 }
 

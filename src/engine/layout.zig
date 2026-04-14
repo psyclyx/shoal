@@ -138,27 +138,54 @@ pub const Layout = struct {
                 .custom => {
                     const cd = cmd.render_data.custom;
                     if (cd.custom_data) |ptr| {
-                        const curve: *const hiccup.CurveData = @ptrCast(@alignCast(ptr));
-                        self.renderer.drawCurve(
-                            bb.x,
-                            bb.y,
-                            bb.width,
-                            bb.height,
-                            curve.values[0..curve.value_count],
-                            curve.value_count,
-                            curve.values2[0..curve.value_count2],
-                            curve.value_count2,
-                            curve.color,
-                            curve.color2,
-                            curve.fill,
-                            curve.thickness,
-                            curve.smooth,
-                            curve.mirror,
-                            curve.scroll,
-                            curve.grid_lines,
-                            curve.grid_count,
-                            curve.is_line,
-                        );
+                        const header: *const hiccup.CustomHeader = @ptrCast(@alignCast(ptr));
+                        switch (header.kind) {
+                            .curve => {
+                                const curve: *const hiccup.CurveData = @ptrCast(@alignCast(ptr));
+                                self.renderer.drawCurve(
+                                    bb.x,
+                                    bb.y,
+                                    bb.width,
+                                    bb.height,
+                                    curve.values[0..curve.value_count],
+                                    curve.value_count,
+                                    curve.values2[0..curve.value_count2],
+                                    curve.value_count2,
+                                    curve.color,
+                                    curve.color2,
+                                    curve.fill,
+                                    curve.thickness,
+                                    curve.smooth,
+                                    curve.mirror,
+                                    curve.scroll,
+                                    curve.grid_lines,
+                                    curve.grid_count,
+                                    curve.is_line,
+                                );
+                            },
+                            .skew_bg => {
+                                const sk: *const hiccup.SkewBgData = @ptrCast(@alignCast(ptr));
+                                self.renderer.drawSlantRect(
+                                    bb.x,
+                                    bb.y,
+                                    bb.width,
+                                    bb.height,
+                                    sk.color,
+                                    sk.skew,
+                                );
+                            },
+                            .triangle => {
+                                const tri: *const hiccup.TriData = @ptrCast(@alignCast(ptr));
+                                self.renderer.drawTriangle(
+                                    bb.x,
+                                    bb.y,
+                                    bb.width,
+                                    bb.height,
+                                    tri.color,
+                                    tri.dir,
+                                );
+                            },
+                        }
                     }
                 },
                 .none => {},

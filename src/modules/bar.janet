@@ -1,7 +1,15 @@
 # bar — status bar view
 #
-# Flat bottom bar, edge-to-edge.
-# Uses wm/* subscriptions (compositor-agnostic), clock.janet, sysinfo.janet.
+# Powerline-style bottom bar: each right-side module is a coloured
+# parallelogram section, adjacent sections tessellate along their `/`
+# slants. Icons are drawn natively from primitive shapes (rects, tris,
+# parallelograms) — no font glyphs.
+
+# -- Layout constants --
+
+(def- SLANT 0.30)   # horizontal shift per unit of height for /-dividers
+(def- BAR-H 38)
+(def- SEC-H BAR-H)
 
 # -- Theme colors --
 
@@ -18,7 +26,21 @@
 (def- red        (theme :base08))
 (def- orange     (theme :base09))
 (def- cyan       (theme :base0C))
+(def- blue       (theme :base0D))
 (def- purple     (theme :base0E))
+
+(defn- tint [color &opt a]
+  "Colour with overridden alpha (0-255). Default 100 for section bgs."
+  [(color 0) (color 1) (color 2) (or a 100)])
+
+(def- audio-bg (tint purple))
+(def- net-bg   (tint cyan))
+(def- cpu-bg   (tint yellow))
+(def- mem-bg   (tint green))
+(def- disk-bg  (tint orange))
+(def- bat-bg   (tint red))
+(def- clock-bg (tint blue))
+(def- launcher-bg (tint muted 80))
 
 # -- Subscriptions --
 
@@ -35,9 +57,6 @@
 
 (defn- pct-color [pct]
   (cond (>= pct 80) red (>= pct 50) yellow green))
-
-(defn- dim [color &opt a]
-  [(color 0) (color 1) (color 2) (or a 100)])
 
 (defn- fmt-gb [g]
   (let [w (math/floor g) f (math/floor (* 10 (- g w)))]
@@ -58,10 +77,7 @@
 
 (defn- weighted-peak [samples tau]
   "Time-weighted max: each sample contributes value * exp(-age/tau).
-   Recent samples dominate; old samples trail off smoothly. Used to
-   drive chart scale so it zooms out on fresh bursts and smoothly
-   zooms back in as they recede into the past — no window cliffs,
-   no hard forget of old activity, just gradual fade of influence."
+   Recent samples dominate; old samples trail off smoothly."
   (if (or (nil? samples) (= 0 (length samples)))
     0
     (do
@@ -77,9 +93,7 @@
 
 (defn- resample [samples window lag n]
   "Resample timestamped [time value] pairs into n evenly-spaced values.
-   The window ends at (now - lag). A lag equal to one sample interval
-   keeps the right edge between two known samples, so interpolation is
-   continuous across sample arrivals — no lurch when new data lands."
+   Window ends at (now - lag)."
   (def now (- (os/clock :monotonic) lag))
   (if (or (nil? samples) (< (length samples) 2))
     (array/new-filled n 0)
@@ -90,7 +104,6 @@
       (var j 0)
       (for i 0 n
         (def t (+ start (* i step)))
-        # Advance j to bracket t
         (while (and (< (+ j 1) (length samples))
                     (<= (get (get samples (+ j 1)) 0) t))
           (++ j))
@@ -106,8 +119,109 @@
             (array/push result (+ v0 (* frac (- v1 v0)))))))
       result)))
 
-(defn- sep []
-  [:row {:w 1 :h 24 :bg overlay}])
+# -- Section primitive --
+
+(defn- section [color & children]
+  "Powerline section: parallelogram bg with /-slanted right/left edges.
+   Children are laid out normally inside; the background is drawn behind
+   via a :skew attribute routed through a custom render payload."
+  [:row {:h SEC-H :pad [0 14] :align-y :center :gap 10
+         :bg color :skew SLANT}
+    ;children])
+
+# -- Slanted bar chart --
+
+(defn- slant-bars [w h color values]
+  "Render values (each 0..1) as slanted parallelogram bars rising from
+   a shared baseline. Adjacent bars tessellate on their /-slants."
+  (def n (max 1 (length values)))
+  (def bw (max 2 (math/floor (/ w n))))
+  [:row {:w w :h h :align-y :bottom :gap 0}
+    ;(seq [v :in values
+           :let [clamped (max 0 (min 1 v))
+                 bh (math/floor (* clamped h))]
+           :when (> bh 0)]
+       [:row {:w bw :h bh :bg color :skew SLANT}])])
+
+(defn- mirrored-slant-bars [w h c1 c2 vals1 vals2]
+  "Two stacked slanted-bar charts sharing a midline baseline.
+   vals1 rises up from the midline, vals2 descends down."
+  (def half (math/floor (/ h 2)))
+  [:col {:w w :h h :gap 0}
+    [:row {:w w :h half :align-y :bottom :gap 0}
+      ;(seq [v :in vals1
+             :let [clamped (max 0 (min 1 v))
+                   bh (math/floor (* clamped half))]
+             :when (> bh 0)]
+         [:row {:w (max 2 (math/floor (/ w (max 1 (length vals1)))))
+                :h bh :bg c1 :skew SLANT}])]
+    [:row {:w w :h half :align-y :top :gap 0}
+      ;(seq [v :in vals2
+             :let [clamped (max 0 (min 1 v))
+                   bh (math/floor (* clamped half))]
+             :when (> bh 0)]
+         [:row {:w (max 2 (math/floor (/ w (max 1 (length vals2)))))
+                :h bh :bg c2 :skew SLANT}])]])
+
+# -- Icons (composed from rect/tri/parallelogram primitives) --
+
+(defn- icon-cpu [color]
+  [:row {:gap 2 :align-y :bottom :h 22}
+    [:row {:w 4 :h 9  :bg color :radius 1}]
+    [:row {:w 4 :h 14 :bg color :radius 1}]
+    [:row {:w 4 :h 19 :bg color :radius 1}]
+    [:row {:w 4 :h 22 :bg color :radius 1}]])
+
+(defn- icon-mem [color]
+  [:col {:gap 2}
+    [:row {:gap 2}
+      [:row {:w 9 :h 9 :bg color :radius 2}]
+      [:row {:w 9 :h 9 :bg color :radius 2}]]
+    [:row {:gap 2}
+      [:row {:w 9 :h 9 :bg color :radius 2}]
+      [:row {:w 9 :h 9 :bg color :radius 2}]]])
+
+(defn- icon-disk [color]
+  [:row {:w 22 :h 22 :border-color color :border-width 2
+         :radius 11 :align-x :center :align-y :center}
+    [:row {:w 5 :h 5 :bg color :radius 3}]])
+
+(defn- icon-battery [color fill-pct charging]
+  (def inner-w (max 0 (math/floor (* 15 (/ fill-pct 100)))))
+  [:row {:gap 0 :align-y :center}
+    [:row {:w 22 :h 12 :border-color color :border-width 1
+           :radius 2 :pad 2 :align-y :center}
+      [:row {:w inner-w :h :grow :bg color :radius 1}]]
+    [:row {:w 2 :h 6 :bg color}]])
+
+(defn- icon-net-rx [color]
+  [:tri {:w 14 :h 10 :dir :up :color color}])
+
+(defn- icon-net-tx [color]
+  [:tri {:w 14 :h 10 :dir :down :color color}])
+
+(defn- icon-audio [color]
+  [:row {:gap 2 :align-y :center}
+    [:row {:w 3 :h 10 :bg color :radius 1}]
+    [:tri {:w 12 :h 16 :dir :right :color color}]
+    [:col {:gap 3 :align-y :center}
+      [:row {:w 2 :h 2 :bg color :radius 1}]
+      [:row {:w 2 :h 2 :bg color :radius 1}]]])
+
+(defn- icon-launcher [color]
+  [:col {:gap 2}
+    [:row {:gap 2}
+      [:row {:w 4 :h 4 :bg color :radius 1}]
+      [:row {:w 4 :h 4 :bg color :radius 1}]
+      [:row {:w 4 :h 4 :bg color :radius 1}]]
+    [:row {:gap 2}
+      [:row {:w 4 :h 4 :bg color :radius 1}]
+      [:row {:w 4 :h 4 :bg color :radius 1}]
+      [:row {:w 4 :h 4 :bg color :radius 1}]]
+    [:row {:gap 2}
+      [:row {:w 4 :h 4 :bg color :radius 1}]
+      [:row {:w 4 :h 4 :bg color :radius 1}]
+      [:row {:w 4 :h 4 :bg color :radius 1}]]])
 
 # -- Workspace tags --
 
@@ -189,19 +303,17 @@
         [:text {:id "title" :color subtle :size 18} ""]))
     [:text {:id "title" :color subtle :size 18} ""]))
 
-# -- Right-side modules --
+# -- Right-side section views --
 
 (defn- cpu-view []
   (def pct (sub :cpu/percent))
   (def cpu (sub :cpu))
-  (def values (resample (get cpu :samples) 120 2 60))
+  (def values (resample (get cpu :samples) 60 2 18))
   (def color (pct-color pct))
-  [:row {:gap 8 :align-y :center}
-    [:area {:w 80 :h 32 :values values
-            :color (dim color 140) :smooth true}]
-    [:col {:gap 0}
-      [:text {:color color :size 18} (string (math/floor pct) "%")]
-      [:text {:color subtle :size 12} "󰍛 cpu"]]])
+  (section cpu-bg
+    (icon-cpu color)
+    (slant-bars 60 24 (tint color 220) values)
+    [:text {:color color :size 19} (string (math/floor pct) "%")]))
 
 (defn- mem-view []
   (def mem (sub :mem))
@@ -209,25 +321,19 @@
   (def used (get mem :used-mb 0))
   (def total (get mem :total-mb 0))
   (def color (pct-color pct))
-  [:col {:gap 3}
-    [:row {:gap 6 :align-y :center}
-      [:text {:color color :size 16}
-        (string (fmt-gb (/ used 1024)) "/" (fmt-gb (/ total 1024)) "G")]
-      [:text {:color subtle :size 12} "󰍛 mem"]]
-    [:row {:w 90 :h 6 :bg surface}
-      [:row {:w [:percent (/ pct 100)] :h :grow :bg color}]]])
+  (section mem-bg
+    (icon-mem color)
+    [:text {:color color :size 18}
+      (string (fmt-gb (/ used 1024)) "/" (fmt-gb (/ total 1024)) "G")]))
 
 (defn- disk-view []
   (def disk (sub :disk))
   (def pct (get disk :percent 0))
   (def color (pct-color pct))
-  [:col {:gap 3}
-    [:row {:gap 6 :align-y :center}
-      [:text {:color color :size 16}
-        (string (fmt-gb (get disk :used-gb 0)) "/" (fmt-gb (get disk :total-gb 0)) "G")]
-      [:text {:color subtle :size 12} "󰋊 disk"]]
-    [:row {:w 90 :h 6 :bg surface}
-      [:row {:w [:percent (/ pct 100)] :h :grow :bg color}]]])
+  (section disk-bg
+    (icon-disk color)
+    [:text {:color color :size 18}
+      (string (fmt-gb (get disk :used-gb 0)) "/" (fmt-gb (get disk :total-gb 0)) "G")]))
 
 (defn- net-view []
   (def net (sub :net))
@@ -235,34 +341,32 @@
   (def tx (get net :tx-rate 0))
   (def rx-samples (get net :rx-samples))
   (def tx-samples (get net :tx-samples))
-  # Time-weighted scale: recent data dominates, old data contributes
-  # less. Tau ~= 30s means a 30s-old spike has ~37% influence; a 60s
-  # one ~14%. Chart zooms out on bursts and gradually back in.
   (def tau 30)
   (def scale (max 1024
                   (* 1.2 (max (weighted-peak rx-samples tau)
                               (weighted-peak tx-samples tau)))))
-  (def rx-vals (resample rx-samples 60 1 60))
-  (def tx-vals (resample tx-samples 60 1 60))
+  (def rx-vals (resample rx-samples 60 1 18))
+  (def tx-vals (resample tx-samples 60 1 18))
   (def rx-norm (map |(max 0 (/ $ scale)) rx-vals))
   (def tx-norm (map |(max 0 (/ $ scale)) tx-vals))
-  [:row {:gap 8 :align-y :center}
-    [:area {:w 80 :h 32 :values rx-norm :values2 tx-norm
-            :color (dim green 140) :color2 (dim cyan 140)
-            :mirror true :smooth true}]
-    [:col {:gap 1}
-      [:text {:color green :size 13} (string "↓" (fmt-rate rx))]
-      [:text {:color cyan :size 13} (string "↑" (fmt-rate tx))]]])
+  (section net-bg
+    (mirrored-slant-bars 60 26 (tint green 220) (tint cyan 220) rx-norm tx-norm)
+    [:col {:gap 2}
+      [:row {:gap 4 :align-y :center}
+        (icon-net-rx green)
+        [:text {:color green :size 14} (fmt-rate rx)]]
+      [:row {:gap 4 :align-y :center}
+        (icon-net-tx cyan)
+        [:text {:color cyan :size 14} (fmt-rate tx)]]]))
 
 (defn- audio-view []
   (def audio (sub :audio))
   (def pct (get audio :percent 0))
   (def muted-flag (get audio :muted false))
   (def color (cond muted-flag red (>= pct 100) yellow purple))
-  [:row {:id "audio" :align-y :center :gap 6}
-    [:text {:color color :size 16}
-      (if muted-flag "󰝟" (if (>= pct 50) "󰕾" "󰖀"))]
-    [:text {:color color :size 18} (string (math/floor pct) "%")]])
+  (section audio-bg
+    (icon-audio color)
+    [:text {:id "audio" :color color :size 19} (string (math/floor pct) "%")]))
 
 (defn- bat-view []
   (def bat (sub :bat))
@@ -270,62 +374,49 @@
     (def pct (get bat :percent 0))
     (def charging (bat :charging))
     (def color (cond charging green (< pct 20) red (< pct 50) orange accent))
-    (def icon (cond
-                charging "󰂄"
-                (>= pct 90) "󰁹"
-                (>= pct 60) "󰂀"
-                (>= pct 30) "󰁾"
-                (>= pct 10) "󰁻"
-                "󰂎"))
-    [:row {:align-y :center :gap 6}
-      [:text {:color color :size 16} icon]
-      [:text {:color color :size 18} (string (math/floor pct) "%")]]))
+    (section bat-bg
+      (icon-battery color pct charging)
+      [:text {:color color :size 19} (string (math/floor pct) "%")])))
 
 (defn- clock-view []
-  [:row {:gap 8 :align-y :center}
-    [:text {:color subtle :size 16} "󰥔"]
-    [:col {:gap 1 :align-x :right}
-      [:text {:color bright :size 18} (sub :clock/time)]
-      [:text {:color subtle :size 13} (sub :clock/date)]]])
+  # Date (longer, top) and time (shorter, bottom) both right-align inside
+  # the parallelogram. The col right-aligns both lines to its own right
+  # edge; time gets extra trailing padding so its right edge sits further
+  # left — anchoring each line to the /-slant at its own y position.
+  (def time-right-pad (math/floor (* SLANT 14)))
+  (section clock-bg
+    [:col {:align-x :right :gap 1}
+      [:text {:color bright :size 17} (sub :clock/date)]
+      [:row {:pad [0 time-right-pad 0 0]}
+        [:text {:color subtle :size 14} (sub :clock/time)]]]))
 
 # -- Root --
 
-(defn- launcher-trigger []
-  [:row {:id "launcher" :align-y :center}
-    [:text {:color subtle :size 18} "󰍉"]])
-
-(defn- intersperse [separator items]
-  "Insert separator between non-nil items."
-  (def result @[])
-  (each item items
-    (when item
-      (when (> (length result) 0)
-        (array/push result (separator)))
-      (array/push result item)))
-  result)
+(defn- launcher-view []
+  (section launcher-bg
+    [:row {:id "launcher" :align-y :center}
+      (icon-launcher bright)]))
 
 (defn- bar-view []
-  (def right-modules
-    (intersperse sep
-      [(audio-view)
-       (net-view)
-       (cpu-view)
-       (mem-view)
-       (disk-view)
-       (bat-view)
-       (clock-view)]))
-  [:row {:w :grow :h :fit :pad [8 0] :bg bg :align-y :center :gap 14}
+  [:row {:w :grow :h BAR-H :bg bg :align-y :center}
     # Left
-    [:row {:w :grow :gap 10 :pad [0 8] :align-y :center}
-      (workspaces-view)
-      (scroll-minimap)
-      (launcher-trigger)]
+    [:row {:w :grow :gap 10 :pad [0 0 0 0] :align-y :center}
+      (launcher-view)
+      [:row {:pad [0 10] :gap 10 :align-y :center}
+        (workspaces-view)
+        (scroll-minimap)]]
     # Center
     [:row {:w :grow :align-x :center :align-y :center}
       (title-view)]
-    # Right
-    [:row {:w :grow :gap 14 :pad [0 8] :align-x :right :align-y :center}
-      ;right-modules]])
+    # Right: powerline chain, no gap between sections
+    [:row {:w :grow :align-x :right :align-y :center :gap 0}
+      (audio-view)
+      (net-view)
+      (cpu-view)
+      (mem-view)
+      (disk-view)
+      (bat-view)
+      (clock-view)]])
 
 # -- Pointer handlers --
 
