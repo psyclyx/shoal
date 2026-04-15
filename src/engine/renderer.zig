@@ -143,23 +143,57 @@ const frag_src: [*c]const u8 =
     \\        return max(0.0, mix(vals[i1], vals[i2], t));
     \\    }
     \\}
-    \\float sampleCurve(float x) { return sampleArray(x, u_value_count, u_values); }
-    \\float sampleCurve2(float x) { return sampleArray(x, u_value_count2, u_values2); }
-    \\
-    \\// Line coverage at constant pixel thickness with slope-aware AA.
-    \\// Returns alpha for a line at curve_y with fixed thickness in pixels.
-    \\float lineCoverage(float frag_y, float curve_y, float thickness_px, float height) {
-    \\    float dist = abs(frag_y - curve_y) * height;
-    \\    float fw = fwidth(curve_y) * height;
-    \\    float rad = thickness_px * 0.5;
-    \\    float edge = max(1.0, fw * 0.5);
-    \\    return 1.0 - smoothstep(rad - edge, rad + edge, dist);
+    \\float sampleCurve(float x) {
+    \\    float sx = x + u_scroll / max(1.0, float(u_value_count - 1));
+    \\    return sampleArray(sx, u_value_count, u_values);
+    \\}
+    \\float sampleCurve2(float x) {
+    \\    float sx = x + u_scroll / max(1.0, float(u_value_count2 - 1));
+    \\    return sampleArray(sx, u_value_count2, u_values2);
+    \\}
+    \\// Peak-stable max-pooling: for each pixel, find all data points
+    \\// within ±1px and take the max value. Guarantees peaks at data
+    \\// resolution are visible at pixel resolution — no height
+    \\// oscillation as data scrolls across the pixel grid.
+    \\float sampleCurveAA(float x) {
+    \\    float base = sampleCurve(x);
+    \\    if (u_value_count < 2) return base;
+    \\    float sx = x + u_scroll / float(u_value_count - 1);
+    \\    float pw = 1.0 / v_rect_size.x;
+    \\    float span = float(u_value_count - 1);
+    \\    int lo = clamp(int(floor((sx - pw) * span)), 0, u_value_count - 1);
+    \\    int hi = clamp(int(ceil((sx + pw) * span)), 0, u_value_count - 1);
+    \\    for (int i = lo; i <= hi; i++) {
+    \\        base = max(base, u_values[i]);
+    \\    }
+    \\    return base;
+    \\}
+    \\float sampleCurve2AA(float x) {
+    \\    float base = sampleCurve2(x);
+    \\    if (u_value_count2 < 2) return base;
+    \\    float sx = x + u_scroll / float(u_value_count2 - 1);
+    \\    float pw = 1.0 / v_rect_size.x;
+    \\    float span = float(u_value_count2 - 1);
+    \\    int lo = clamp(int(floor((sx - pw) * span)), 0, u_value_count2 - 1);
+    \\    int hi = clamp(int(ceil((sx + pw) * span)), 0, u_value_count2 - 1);
+    \\    for (int i = lo; i <= hi; i++) {
+    \\        base = max(base, u_values2[i]);
+    \\    }
+    \\    return base;
     \\}
     \\
-    \\// Area fill coverage: filled below curve_y with slope-aware AA at edge.
+    \\// Line coverage at constant pixel thickness with fixed AA.
+    \\// No fwidth() — derivative-based AA causes frame-to-frame jitter
+    \\// when curve values shift by sub-pixel amounts each frame.
+    \\float lineCoverage(float frag_y, float curve_y, float thickness_px, float height) {
+    \\    float dist = abs(frag_y - curve_y) * height;
+    \\    float rad = thickness_px * 0.5;
+    \\    return 1.0 - smoothstep(rad - 1.0, rad + 1.0, dist);
+    \\}
+    \\
+    \\// Area fill coverage: filled below curve_y with fixed AA band.
     \\float areaCoverage(float frag_y, float curve_y, float height) {
-    \\    float fw = fwidth(curve_y);
-    \\    float aa = max(2.0 / height, fw * 1.5);
+    \\    float aa = 2.0 / height;
     \\    return smoothstep(curve_y - aa, curve_y + aa, frag_y);
     \\}
     \\
@@ -204,7 +238,7 @@ const frag_src: [*c]const u8 =
     \\        frag_color = vec4(v_color.rgb * a, a);
     \\    } else if (v_mode > 2.5) {
     \\        // Mode 3: line stroke curve — constant thickness
-    \\        float lsv = min(1.0, sampleCurve(v_uv.x));
+    \\        float lsv = min(1.0, sampleCurveAA(v_uv.x));
     \\        float lmin = 2.5 / v_rect_size.y;
     \\        float curve_y = 1.0 - (lsv > 0.001 ? max(lsv, lmin) : lsv);
     \\        float aa = lineCoverage(v_uv.y, curve_y, u_thickness, v_rect_size.y);
@@ -225,8 +259,8 @@ const frag_src: [*c]const u8 =
     \\            // overshooting curves fade off-chart instead of hard-
     \\            // capping — no per-column clipping logic needed.
     \\            float center = 0.5;
-    \\            float c1 = sampleCurve(v_uv.x) * 0.5;
-    \\            float c2 = sampleCurve2(v_uv.x) * 0.5;
+    \\            float c1 = sampleCurveAA(v_uv.x) * 0.5;
+    \\            float c2 = sampleCurve2AA(v_uv.x) * 0.5;
     \\            float top = center - c1;
     \\            float bot = center + c2;
     \\            float center_aa = 1.0 / v_rect_size.y;
@@ -249,7 +283,7 @@ const frag_src: [*c]const u8 =
     \\            color = vec4(rgb, 1.0);
     \\        } else {
     \\            // Standard bottom-up area fill
-    \\            float sv = min(1.0, sampleCurve(v_uv.x));
+    \\            float sv = min(1.0, sampleCurveAA(v_uv.x));
     \\            float min_vis = 2.5 / v_rect_size.y;
     \\            float curve_y = 1.0 - (sv > 0.001 ? max(sv, min_vis) : sv);
     \\            a = areaCoverage(v_uv.y, curve_y, v_rect_size.y) * v_color.a;
@@ -258,7 +292,7 @@ const frag_src: [*c]const u8 =
     \\            a = max(a, edge_line * min(v_color.a * 1.8, 1.0));
     \\            // Overlay second series as line stroke
     \\            if (u_value_count2 > 0) {
-    \\                float sv2 = min(1.0, sampleCurve2(v_uv.x));
+    \\                float sv2 = min(1.0, sampleCurve2AA(v_uv.x));
     \\                float c2_y = 1.0 - (sv2 > 0.001 ? max(sv2, min_vis) : sv2);
     \\                float la = lineCoverage(v_uv.y, c2_y, 2.0, v_rect_size.y) * u_color2.a;
     \\                a = la + a * (1.0 - la);
@@ -295,27 +329,35 @@ const frag_src: [*c]const u8 =
     \\        float a = texture(u_atlas, v_uv).r * v_color.a;
     \\        frag_color = vec4(v_color.rgb * a, a);
     \\    } else {
-    \\        // Mode 0: solid colour with rounded-rect SDF antialiasing
-    \\        vec2 half_size = v_rect_size * 0.5;
-    \\        vec2 p = v_local_pos - half_size;
-    \\        float radius;
-    \\        if (p.x < 0.0 && p.y < 0.0) {
-    \\            radius = v_corner_radius.x;
-    \\        } else if (p.x >= 0.0 && p.y < 0.0) {
-    \\            radius = v_corner_radius.y;
-    \\        } else if (p.x < 0.0 && p.y >= 0.0) {
-    \\            radius = v_corner_radius.z;
+    \\        // Mode 0: solid colour, optionally with rounded-rect SDF.
+    \\        float max_r = max(max(v_corner_radius.x, v_corner_radius.y),
+    \\                          max(v_corner_radius.z, v_corner_radius.w));
+    \\        if (max_r < 0.5) {
+    \\            // No corner radius — shape is the rasterized quad itself.
+    \\            // Skipping the SDF avoids seam artifacts between adjacent
+    \\            // tessellating parallelograms (the SDF would fade each
+    \\            // edge independently, leaking the clear color at shared
+    \\            // edges where the AA bands don't sum to full coverage).
+    \\            frag_color = vec4(v_color.rgb * v_color.a, v_color.a);
     \\        } else {
-    \\            radius = v_corner_radius.w;
+    \\            // Rounded rect: SDF for curved corners with AA.
+    \\            vec2 half_size = v_rect_size * 0.5;
+    \\            vec2 p = v_local_pos - half_size;
+    \\            float radius;
+    \\            if (p.x < 0.0 && p.y < 0.0) {
+    \\                radius = v_corner_radius.x;
+    \\            } else if (p.x >= 0.0 && p.y < 0.0) {
+    \\                radius = v_corner_radius.y;
+    \\            } else if (p.x < 0.0 && p.y >= 0.0) {
+    \\                radius = v_corner_radius.z;
+    \\            } else {
+    \\                radius = v_corner_radius.w;
+    \\            }
+    \\            float dist = roundedRectSDF(p, half_size, radius);
+    \\            float fw = max(fwidth(dist), 1e-4);
+    \\            float a = (1.0 - smoothstep(-0.5, 0.5, dist / fw)) * v_color.a;
+    \\            frag_color = vec4(v_color.rgb * a, a);
     \\        }
-    \\        float dist = roundedRectSDF(p, half_size, radius);
-    \\        // Normalise distance by its per-pixel gradient magnitude so
-    \\        // the smoothstep always spans ~1 pixel in screen space.
-    \\        // Correct for both axis-aligned rects and sheared parallelograms
-    \\        // emitted by pushQuad with nonzero skew.
-    \\        float fw = max(fwidth(dist), 1e-4);
-    \\        float a = (1.0 - smoothstep(-0.5, 0.5, dist / fw)) * v_color.a;
-    \\        frag_color = vec4(v_color.rgb * a, a);
     \\    }
     \\}
     \\

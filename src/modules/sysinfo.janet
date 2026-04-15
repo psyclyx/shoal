@@ -3,14 +3,12 @@
 # All file I/O uses :async-slurp to avoid blocking the event loop.
 # Audio uses pactl subscribe for instant change detection.
 
-(defn- push-sample [samples t v window]
-  "Append [time value] to samples, trimming entries older than window seconds."
-  (def s (array/slice (or samples @[])))
-  (array/push s [t v])
-  (def cutoff (- t (+ window 10)))
-  (while (and (> (length s) 0) (< (get (first s) 0) cutoff))
-    (array/remove s 0))
-  s)
+(defn- push-history [history v n]
+  "Append v to a flat circular buffer of length n."
+  (def h (array/slice (or history @[])))
+  (array/push h v)
+  (while (> (length h) n) (array/remove h 0))
+  h)
 
 # -- CPU --
 
@@ -42,11 +40,12 @@
                    (math/round (* 100 (/ (- dt di) dt)))
                    0))
         (def normalized (/ pct 100))
-        (def samples (push-sample (get prev :samples) (os/clock :monotonic) normalized 120))
+        (def history (push-history (get prev :history (array/new-filled 61 0)) normalized 61))
         {:db (put (cofx :db) :cpu {:percent pct
                                     :prev-idle idle
                                     :prev-total total
-                                    :samples samples})}))))
+                                    :history history
+                                    :tick-clock (os/clock :monotonic)})}))))
 
 (reg-event-handler :init
   (fn [cofx event]
@@ -218,6 +217,32 @@
 
 (var- net-iface nil)
 
+# Log10 scale tiers — smallest ceiling that contains the peak.
+# Tier only drops when all visible samples fit in the lower tier.
+(def- net-tiers [102400 1048576 10485760 104857600 1073741824 10737418240])
+(def- net-floor 1024)
+(def- ln10 (math/log 10))
+
+(defn- log10 [x] (/ (math/log x) ln10))
+
+(defn- net-tier [peak]
+  (var result (last net-tiers))
+  (each t net-tiers
+    (when (>= t peak)
+      (set result t)
+      (break)))
+  result)
+
+(defn- log-normalize [values tier]
+  "Log10-normalize bytes/sec values into 0-1."
+  (def log-floor (log10 net-floor))
+  (def log-ceil (log10 tier))
+  (def range (- log-ceil log-floor))
+  (if (<= range 0)
+    (array/new-filled (length values) 0)
+    (map |(max 0 (min 1 (/ (- (log10 (max $ net-floor)) log-floor) range)))
+         values)))
+
 (reg-event-handler :net/tick
   (fn [cofx event]
     {:async-slurp {:path "/proc/net/dev" :event :net/read}}))
@@ -246,34 +271,32 @@
       (def clock (os/clock :monotonic))
       (def prev-clock (get prev :prev-clock 0))
       (def dt (if (> prev-clock 0) (max 0.1 (- clock prev-clock)) 1.0))
-      (def rx-rate (if (> prev-rx 0) (/ (- (now :rx) prev-rx) dt) 0))
-      (def tx-rate (if (> prev-tx 0) (/ (- (now :tx) prev-tx) dt) 0))
+      (def rx-rate (if (> prev-rx 0) (max 0 (/ (- (now :rx) prev-rx) dt)) 0))
+      (def tx-rate (if (> prev-tx 0) (max 0 (/ (- (now :tx) prev-tx) dt)) 0))
       (def tick-count (+ 1 (get prev :tick-count 0)))
       (def update-ips (or (nil? (get prev :ipv4)) (= 0 (% tick-count 60))))
       (def ipv4 (if update-ips (or (get-local-ipv4) "") (get prev :ipv4 "")))
-      (def rx-raw (max 0 rx-rate))
-      (def tx-raw (max 0 tx-rate))
-      # Light single-EMA — kills per-sample noise without lagging real spikes.
-      (def alpha 0.6)
-      (def rx-smooth (+ (* alpha rx-raw) (* (- 1 alpha) (get prev :rx-smooth 0))))
-      (def tx-smooth (+ (* alpha tx-raw) (* (- 1 alpha) (get prev :tx-smooth 0))))
-      (def rx-samples (push-sample (get prev :rx-samples) clock rx-smooth 60))
-      (def tx-samples (push-sample (get prev :tx-samples) clock tx-smooth 60))
-      # Scale is computed at render time from the samples (time-weighted
-      # so recent data dominates, older data fades out smoothly), so we
-      # don't track a peak in the db.
-      {:db (put (cofx :db) :net {:rx-rate rx-raw
-                                  :tx-rate tx-raw
-                                  :rx-smooth rx-smooth
-                                  :tx-smooth tx-smooth
+      # Flat circular buffers — raw bytes/sec, no smoothing
+      (def rx-history (push-history (get prev :rx-history (array/new-filled 61 0)) rx-rate 61))
+      (def tx-history (push-history (get prev :tx-history (array/new-filled 61 0)) tx-rate 61))
+      # Quantized log10 tier from visible peak
+      (var peak 0)
+      (each v rx-history (when (> v peak) (set peak v)))
+      (each v tx-history (when (> v peak) (set peak v)))
+      (def tier (net-tier peak))
+      {:db (put (cofx :db) :net {:rx-rate rx-rate
+                                  :tx-rate tx-rate
                                   :prev-rx (now :rx)
                                   :prev-tx (now :tx)
                                   :prev-clock clock
                                   :iface net-iface
                                   :ipv4 ipv4
                                   :tick-count tick-count
-                                  :rx-samples rx-samples
-                                  :tx-samples tx-samples})})))
+                                  :rx-history rx-history
+                                  :tx-history tx-history
+                                  :rx-norm (log-normalize rx-history tier)
+                                  :tx-norm (log-normalize tx-history tier)
+                                  :tier tier})})))
 
 (reg-event-handler :init
   (fn [cofx event]

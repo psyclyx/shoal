@@ -142,6 +142,7 @@ pub const Layout = struct {
                         switch (header.kind) {
                             .curve => {
                                 const curve: *const hiccup.CurveData = @ptrCast(@alignCast(ptr));
+                                self.renderer.setScissor(bb.x, bb.y, bb.width, bb.height);
                                 self.renderer.drawCurve(
                                     bb.x,
                                     bb.y,
@@ -162,6 +163,7 @@ pub const Layout = struct {
                                     curve.grid_count,
                                     curve.is_line,
                                 );
+                                self.renderer.clearScissor();
                             },
                             .skew_bg => {
                                 const sk: *const hiccup.SkewBgData = @ptrCast(@alignCast(ptr));

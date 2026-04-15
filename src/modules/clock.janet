@@ -26,6 +26,10 @@
 (reg-sub :clock/time [:clock]
   (fn [clock]
     (string/format "%02d:%02d" (get clock :hours 0) (get clock :minutes 0))))
+(def- day-names ["Sun" "Mon" "Tue" "Wed" "Thu" "Fri" "Sat"])
+(reg-sub :clock/dow [:clock]
+  (fn [clock]
+    (get day-names (get clock :week-day 0) "???")))
 (reg-sub :clock/date [:clock]
   (fn [clock]
     (string/format "%04d-%02d-%02d"

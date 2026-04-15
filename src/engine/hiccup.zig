@@ -91,7 +91,7 @@ pub const CurveData = struct {
     color2: [4]f32 = .{ 1, 1, 1, 0.3 },
     fill: f32 = 1.0,
     thickness: f32 = 1.5,
-    smooth: bool = true,
+    smooth: bool = false,
     mirror: bool = false,
     scroll: f32 = 0,
     grid_lines: [8]f32 = [_]f32{0} ** 8,
@@ -111,7 +111,7 @@ pub const TriData = struct {
     dir: renderer_mod.TriDir = .up,
 };
 
-pub const MAX_SKEW_BGS = 32;
+pub const MAX_SKEW_BGS = 256;
 pub const MAX_TRIS = 64;
 
 var curve_storage: [MAX_CURVES]CurveData = undefined;
