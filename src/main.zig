@@ -209,12 +209,18 @@ pub fn main() !void {
 
     if (surface_count == 0) return error.NoOutputs;
 
+    if (dmenu.enabled) {
+        // dmenu mode: single surface, compositor picks the focused output
+        surfaces[0] = .{};
+        surface_count = 1;
+    }
+
     // Create layer surfaces for each output
     for (surfaces[0..surface_count]) |*surf| {
         surf.wl_surface = try comp.createSurface();
         surf.layer_surface = try ls.getLayerSurface(
             surf.wl_surface.?,
-            surf.output,
+            if (dmenu.enabled) null else surf.output,
             wlLayer(cfg.layer),
             cfg.namespace,
         );
@@ -445,6 +451,8 @@ fn frameListener(_: *wl.Callback, event: wl.Callback.Event, surf: *Surface) void
     switch (event) {
         .done => {
             surf.frame_pending = false;
+            // Surface may have been destroyed while this callback was pending.
+            if (surf.wl_surface == null) return;
             if (surf.needs_render) {
                 requestFrame(surf);
                 if (renderSurface(surf)) {
@@ -618,6 +626,9 @@ fn destroyDynamicSurface(name_val: janet.Janet) void {
                 surf.deinitEgl();
                 if (surf.layer_surface) |ls_surf| ls_surf.destroy();
                 if (surf.wl_surface) |ws| ws.destroy();
+                // Null out so any stale frame callback sees the surface is gone
+                surf.wl_surface = null;
+                surf.layer_surface = null;
 
                 // Swap with last and shrink
                 surface_count -= 1;

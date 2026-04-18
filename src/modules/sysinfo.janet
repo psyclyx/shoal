@@ -3,13 +3,6 @@
 # All file I/O uses :async-slurp to avoid blocking the event loop.
 # Audio uses pactl subscribe for instant change detection.
 
-(defn- push-history [history v n]
-  "Append v to a flat circular buffer of length n."
-  (def h (array/slice (or history @[])))
-  (array/push h v)
-  (while (> (length h) n) (array/remove h 0))
-  h)
-
 # -- CPU --
 
 (reg-event-handler :cpu/tick
@@ -18,34 +11,35 @@
 
 (reg-event-handler :cpu/read
   (fn [cofx event]
-    (def data (get event 1 ""))
-    (def line (get (string/split "\n" data) 0))
-    (when line
-      (def parts (string/split " " line))
-      (def vals (seq [p :in (slice parts 1)
-                      :when (> (length p) 0)
-                      :let [n (scan-number p)]
-                      :when n]
-                  n))
-      (when (>= (length vals) 5)
-        (var total 0)
-        (each v vals (set total (+ total v)))
-        (def idle (+ (get vals 3 0) (get vals 4 0)))
-        (def prev (get (cofx :db) :cpu {}))
-        (def prev-idle (get prev :prev-idle 0))
-        (def prev-total (get prev :prev-total 0))
-        (def dt (- total prev-total))
-        (def di (- idle prev-idle))
-        (def pct (if (> dt 0)
-                   (math/round (* 100 (/ (- dt di) dt)))
-                   0))
-        (def normalized (/ pct 100))
-        (def history (push-history (get prev :history (array/new-filled 61 0)) normalized 61))
-        {:db (put (cofx :db) :cpu {:percent pct
-                                    :prev-idle idle
-                                    :prev-total total
-                                    :history history
-                                    :tick-clock (os/clock :monotonic)})}))))
+    (let [data (get event 1 "")
+          line (get (string/split "\n" data) 0)]
+      (when line
+        (def vals (seq [p :in (slice (string/split " " line) 1)
+                        :when (> (length p) 0)
+                        :let [n (scan-number p)]
+                        :when n]
+                    n))
+        (when (>= (length vals) 5)
+          (var total 0)
+          (each v vals (set total (+ total v)))
+          (let [idle (+ (get vals 3 0) (get vals 4 0))
+                prev (get (cofx :db) :cpu {})
+                prev-idle (get prev :prev-idle 0)
+                prev-total (get prev :prev-total 0)
+                dt (- total prev-total)
+                di (- idle prev-idle)
+                pct (if (> dt 0)
+                      (math/round (* 100 (/ (- dt di) dt)))
+                      0)
+                normalized (/ pct 100)
+                clock (os/clock :monotonic)
+                samples (array/slice (or (get prev :samples) @[]))]
+            (array/push samples {:t clock :v normalized})
+            (while (> (length samples) 40) (array/remove samples 0))
+            {:db (put (cofx :db) :cpu {:percent pct
+                                        :prev-idle idle
+                                        :prev-total total
+                                        :samples samples})}))))))
 
 (reg-event-handler :init
   (fn [cofx event]
@@ -78,23 +72,23 @@
 
 (reg-event-handler :mem/read
   (fn [cofx event]
-    (def data (get event 1 ""))
-    (when (> (length data) 0)
-      (var total-kb 0)
-      (var avail-kb 0)
-      (each line (string/split "\n" data)
-        (cond
-          (string/has-prefix? "MemTotal:" line)
-          (set total-kb (parse-meminfo-value line))
-          (string/has-prefix? "MemAvailable:" line)
-          (set avail-kb (parse-meminfo-value line))))
-      (when (> total-kb 0)
-        (def used-mb (math/floor (/ (- total-kb avail-kb) 1024)))
-        (def total-mb (math/floor (/ total-kb 1024)))
-        (def pct (math/round (* 100.0 (/ (- total-kb avail-kb) total-kb))))
-        {:db (put (cofx :db) :mem {:used-mb used-mb
-                                    :total-mb total-mb
-                                    :percent pct})}))))
+    (let [data (get event 1 "")]
+      (when (> (length data) 0)
+        (var total-kb 0)
+        (var avail-kb 0)
+        (each line (string/split "\n" data)
+          (cond
+            (string/has-prefix? "MemTotal:" line)
+            (set total-kb (parse-meminfo-value line))
+            (string/has-prefix? "MemAvailable:" line)
+            (set avail-kb (parse-meminfo-value line))))
+        (when (> total-kb 0)
+          (let [used-mb (math/floor (/ (- total-kb avail-kb) 1024))
+                total-mb (math/floor (/ total-kb 1024))
+                pct (math/round (* 100.0 (/ (- total-kb avail-kb) total-kb)))]
+            {:db (put (cofx :db) :mem {:used-mb used-mb
+                                        :total-mb total-mb
+                                        :percent pct})}))))))
 
 (reg-event-handler :init
   (fn [cofx event]
@@ -171,14 +165,13 @@
 
 (reg-event-handler :disk/tick
   (fn [cofx event]
-    (def info (disk-usage "/"))
-    (when info
-      (def total (get info :total 0))
-      (def used (get info :used 0))
-      (def pct (get info :percent 0))
-      {:db (put (cofx :db) :disk {:total-gb (/ total 1073741824)
-                                   :used-gb (/ used 1073741824)
-                                   :percent (math/round pct)})})))
+    (when-let [info (disk-usage "/")]
+      (let [total (get info :total 0)
+            used (get info :used 0)
+            pct (get info :percent 0)]
+        {:db (put (cofx :db) :disk {:total-gb (/ total 1073741824)
+                                     :used-gb (/ used 1073741824)
+                                     :percent (math/round pct)})}))))
 
 (reg-event-handler :init
   (fn [cofx event]
@@ -217,31 +210,14 @@
 
 (var- net-iface nil)
 
-# Log10 scale tiers — smallest ceiling that contains the peak.
-# Tier only drops when all visible samples fit in the lower tier.
-(def- net-tiers [102400 1048576 10485760 104857600 1073741824 10737418240])
-(def- net-floor 1024)
-(def- ln10 (math/log 10))
-
-(defn- log10 [x] (/ (math/log x) ln10))
-
-(defn- net-tier [peak]
-  (var result (last net-tiers))
-  (each t net-tiers
-    (when (>= t peak)
-      (set result t)
-      (break)))
-  result)
-
-(defn- log-normalize [values tier]
-  "Log10-normalize bytes/sec values into 0-1."
-  (def log-floor (log10 net-floor))
-  (def log-ceil (log10 tier))
-  (def range (- log-ceil log-floor))
-  (if (<= range 0)
-    (array/new-filled (length values) 0)
-    (map |(max 0 (min 1 (/ (- (log10 (max $ net-floor)) log-floor) range)))
-         values)))
+(defn- get-link-speed [iface]
+  "Get link speed in bytes/sec from sysfs. Returns nil on failure."
+  (try
+    (do
+      (def mbps (scan-number (string/trim (slurp (string "/sys/class/net/" iface "/speed")))))
+      (when (and mbps (> mbps 0))
+        (* mbps 125000)))
+    ([_] nil)))
 
 (reg-event-handler :net/tick
   (fn [cofx event]
@@ -265,38 +241,32 @@
                       :tx (or (scan-number (get parts 8)) 0)})
             (break)))))
     (when now
-      (def prev (get (cofx :db) :net {}))
-      (def prev-rx (get prev :prev-rx 0))
-      (def prev-tx (get prev :prev-tx 0))
-      (def clock (os/clock :monotonic))
-      (def prev-clock (get prev :prev-clock 0))
-      (def dt (if (> prev-clock 0) (max 0.1 (- clock prev-clock)) 1.0))
-      (def rx-rate (if (> prev-rx 0) (max 0 (/ (- (now :rx) prev-rx) dt)) 0))
-      (def tx-rate (if (> prev-tx 0) (max 0 (/ (- (now :tx) prev-tx) dt)) 0))
-      (def tick-count (+ 1 (get prev :tick-count 0)))
-      (def update-ips (or (nil? (get prev :ipv4)) (= 0 (% tick-count 60))))
-      (def ipv4 (if update-ips (or (get-local-ipv4) "") (get prev :ipv4 "")))
-      # Flat circular buffers — raw bytes/sec, no smoothing
-      (def rx-history (push-history (get prev :rx-history (array/new-filled 61 0)) rx-rate 61))
-      (def tx-history (push-history (get prev :tx-history (array/new-filled 61 0)) tx-rate 61))
-      # Quantized log10 tier from visible peak
-      (var peak 0)
-      (each v rx-history (when (> v peak) (set peak v)))
-      (each v tx-history (when (> v peak) (set peak v)))
-      (def tier (net-tier peak))
-      {:db (put (cofx :db) :net {:rx-rate rx-rate
-                                  :tx-rate tx-rate
-                                  :prev-rx (now :rx)
-                                  :prev-tx (now :tx)
-                                  :prev-clock clock
-                                  :iface net-iface
-                                  :ipv4 ipv4
-                                  :tick-count tick-count
-                                  :rx-history rx-history
-                                  :tx-history tx-history
-                                  :rx-norm (log-normalize rx-history tier)
-                                  :tx-norm (log-normalize tx-history tier)
-                                  :tier tier})})))
+      (let [prev (get (cofx :db) :net {})
+            prev-rx (get prev :prev-rx 0)
+            prev-tx (get prev :prev-tx 0)
+            clock (os/clock :monotonic)
+            prev-clock (get prev :prev-clock 0)
+            dt (if (> prev-clock 0) (max 0.1 (- clock prev-clock)) 1.0)
+            rx-rate (if (> prev-rx 0) (max 0 (/ (- (now :rx) prev-rx) dt)) 0)
+            tx-rate (if (> prev-tx 0) (max 0 (/ (- (now :tx) prev-tx) dt)) 0)
+            tick-count (+ 1 (get prev :tick-count 0))
+            update-ips (or (nil? (get prev :ipv4)) (= 0 (% tick-count 60)))
+            ipv4 (if update-ips (or (get-local-ipv4) "") (get prev :ipv4 ""))
+            link-speed (or (get prev :link-speed)
+                           (get-link-speed net-iface))
+            samples (array/slice (or (get prev :samples) @[]))]
+        (array/push samples {:t clock :rx rx-rate :tx tx-rate})
+        (while (> (length samples) 60) (array/remove samples 0))
+        {:db (put (cofx :db) :net {:rx-rate rx-rate
+                                    :tx-rate tx-rate
+                                    :prev-rx (now :rx)
+                                    :prev-tx (now :tx)
+                                    :prev-clock clock
+                                    :iface net-iface
+                                    :ipv4 ipv4
+                                    :tick-count tick-count
+                                    :link-speed link-speed
+                                    :samples samples})}))))
 
 (reg-event-handler :init
   (fn [cofx event]
@@ -314,13 +284,13 @@
 
 (reg-event-handler :audio/read
   (fn [cofx event]
-    (def line (get event 1 ""))
-    (def parts (string/split " " line))
-    (when (>= (length parts) 2)
-      (def vol (or (scan-number (get parts 1 "0")) 0))
-      (def pct (math/round (* vol 100)))
-      (def muted (truthy? (string/find "[MUTED]" line)))
-      {:db (put (cofx :db) :audio {:percent pct :muted muted})})))
+    (let [line (get event 1 "")
+          parts (string/split " " line)]
+      (when (>= (length parts) 2)
+        (let [vol (or (scan-number (get parts 1 "0")) 0)
+              pct (math/round (* vol 100))
+              muted (truthy? (string/find "[MUTED]" line))]
+          {:db (put (cofx :db) :audio {:percent pct :muted muted})})))))
 
 (reg-event-handler :audio/subscribe-event
   (fn [cofx event]

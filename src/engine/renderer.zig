@@ -217,13 +217,13 @@ const frag_src: [*c]const u8 =
     \\    vec2 b = vec2(0.0, s.y);
     \\    vec2 cc = vec2(s.x, s.y);
     \\    vec2 ab = b - a;
-    \\    vec2 nab = normalize(vec2(ab.y, -ab.x));
+    \\    vec2 nab = normalize(vec2(-ab.y, ab.x));
     \\    float dab = dot(q - a, nab);
     \\    vec2 bc = cc - b;
-    \\    vec2 nbc = normalize(vec2(bc.y, -bc.x));
+    \\    vec2 nbc = normalize(vec2(-bc.y, bc.x));
     \\    float dbc = dot(q - b, nbc);
     \\    vec2 ca = a - cc;
-    \\    vec2 nca = normalize(vec2(ca.y, -ca.x));
+    \\    vec2 nca = normalize(vec2(-ca.y, ca.x));
     \\    float dca = dot(q - cc, nca);
     \\    return max(max(dab, dbc), dca);
     \\}
@@ -569,7 +569,6 @@ pub const Renderer = struct {
         color: [4]f32,
         dir: TriDir,
     ) void {
-        // Uniforms are set per-draw; flush before and after to bracket this call.
         self.flush();
         c.glUniform1i(self.u_tri_dir, @intFromEnum(dir));
         const no_radius = [4]f32{ 0, 0, 0, 0 };

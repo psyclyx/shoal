@@ -57,9 +57,7 @@
 
 (reg-sub :dmenu/results
   (fn [db]
-    (def items (get db :dmenu/items []))
-    (def query (get db :dmenu/query ""))
-    (filter-items items query)))
+    (filter-items (get db :dmenu/items []) (get db :dmenu/query ""))))
 
 # --- View ---
 
@@ -73,44 +71,47 @@
 (def- accent (theme :accent))
 
 (defn- result-item [idx label selected]
-  (def active (= idx selected))
-  [:row {:w :grow :h 32
-         :bg (if active overlay-color bg)
-         :radius 4 :pad [4 12] :align-y :center :gap 8}
-    [:row {:w 4 :h 16 :bg (if active accent [0 0 0 0]) :radius 2}]
-    [:text {:color (if active bright text-color) :size 14} label]])
+  (let [active (= idx selected)]
+    [:row {:id (string "result-" idx) :w :grow :h 32
+           :bg (if active overlay-color bg)
+           :radius 4 :pad [4 12] :align-y :center :gap 8}
+      [:row {:w 4 :h 16 :bg (if active accent [0 0 0 0]) :radius 2}]
+      [:text {:color (if active bright text-color) :size 14} label]]))
 
 (defn dmenu-view []
-  (def query (sub :dmenu/query))
-  (def prompt (sub :dmenu/prompt))
-  (def results (sub :dmenu/results))
-  (def selected (sub :dmenu/selected))
-  (def reveal (anim :dmenu/reveal))
-  (def max-visible 12)
-  (def total (length results))
-  (def scroll-off (max 0 (min (- selected (- max-visible 1))
-                               (- total max-visible))))
-  (def visible-end (min total (+ scroll-off max-visible)))
-  (def alpha (math/floor (* reveal 255)))
+  (let [query (sub :dmenu/query)
+        prompt (sub :dmenu/prompt)
+        results (sub :dmenu/results)
+        selected (sub :dmenu/selected)
+        reveal (anim :dmenu/reveal)
+        max-visible 24
+        total (length results)
+        scroll-off (max 0 (min (- selected (- max-visible 1))
+                                (- total max-visible)))
+        visible-end (min total (+ scroll-off max-visible))
+        alpha (math/floor (* reveal 255))]
 
-  [:col {:w 600 :h :grow :bg [(bg 0) (bg 1) (bg 2) alpha] :radius 8 :pad 12
-         :align-x :center}
-    # Input field
-    [:row {:h 40 :w :grow
-           :bg [(surface-color 0) (surface-color 1) (surface-color 2) alpha]
-           :radius 6 :pad [8 12] :align-y :center :gap 8}
-      [:text {:color muted :size 14} prompt]
-      [:text {:color text-color :size 16}
-        (string query "│")]]
-    # Results list
-    [:col {:w :grow :h :grow :gap 2 :pad [8 0 0 0]}
-      ;(seq [i :range [scroll-off visible-end]
-             :let [item (results i)]]
-         (result-item i item selected))]
-    # Footer
-    [:row {:h 20 :w :grow :align-x :center :align-y :center}
-      [:text {:color subtle :size 11}
-        (string (length results) " / " (sub :dmenu/total))]]])
+    [:col {:w 1200 :h :grow :bg [(bg 0) (bg 1) (bg 2) alpha] :radius 8 :pad 12
+           :align-x :center}
+      # Input field
+      [:row {:h 48 :w :grow
+             :bg [(surface-color 0) (surface-color 1) (surface-color 2) alpha]
+             :radius 6 :pad [8 16] :align-y :center :gap 8}
+        [:text {:color muted :size 16} prompt]
+        [:text {:color text-color :size 18}
+          (string query "│")]]
+      # Results list
+      [:col {:w :grow :h :grow :gap 2 :pad [8 0 0 0]}
+        ;(seq [i :range [scroll-off visible-end]
+               :let [item (results i)]]
+           (result-item i item selected))]
+      # Footer with count and keybind reference
+      [:row {:h 28 :w :grow :align-y :center :pad [0 8] :gap 16}
+        [:text {:color subtle :size 11}
+          (string (length results) " / " (sub :dmenu/total))]
+        [:row {:w :grow}]
+        [:text {:color subtle :size 11}
+          "Ret select  Esc cancel  C-w word  C-u clear  Up/C-k  Down/C-j"]]]))
 
 (reg-view dmenu-view)
 
@@ -120,18 +121,23 @@
   (fn [cofx event]
     {:anim {:id :dmenu/reveal :to 1 :duration 0.15 :easing :ease-out-cubic}}))
 
+# Close on keyboard focus loss (compositor sends this on click-outside)
+(reg-event-handler :keyboard-leave
+  (fn [cofx event]
+    {:exit 1}))
+
 (reg-event-handler :key
   (fn [cofx event]
-    (def db (cofx :db))
-    (def info (event 1))
-    (when (info :pressed)
-      (def sym (info :sym))
-      (def text (info :text))
-      (def query (get db :dmenu/query ""))
-      (def items (get db :dmenu/items []))
-      (def selected (get db :dmenu/selected 0))
-      (def results (filter-items items query))
-      (def result-count (length results))
+    (let [db (cofx :db)
+          info (event 1)]
+      (when (info :pressed)
+        (let [sym (info :sym)
+              text (info :text)
+              query (get db :dmenu/query "")
+              items (get db :dmenu/items [])
+              selected (get db :dmenu/selected 0)
+              results (filter-items items query)
+              result-count (length results)]
 
       (cond
         (= sym "Escape")
@@ -186,4 +192,33 @@
           {:db (-> db
                    (put :dmenu/query new-query)
                    (put :dmenu/selected (clamp selected 0
-                                          (max 0 (- (length new-results) 1)))))})))))
+                                          (max 0 (- (length new-results) 1)))))})))))))))
+
+# --- Pointer handling ---
+
+(reg-event-handler :click
+  (fn [cofx event]
+    (let [db (cofx :db)
+          id (get event 1 "")
+          items (get db :dmenu/items [])
+          query (get db :dmenu/query "")
+          results (filter-items items query)]
+      (when (string/has-prefix? "result-" id)
+        (when-let [idx (scan-number (string/slice id 7))]
+          (when (< idx (length results))
+            {:stdout (results idx) :exit 0}))))))
+
+(reg-event-handler :scroll
+  (fn [cofx event]
+    (let [db (cofx :db)
+          dir (get event 1 "")
+          selected (get db :dmenu/selected 0)
+          items (get db :dmenu/items [])
+          query (get db :dmenu/query "")
+          result-count (length (filter-items items query))]
+      (cond
+        (= dir "up")
+        {:db (put db :dmenu/selected (max 0 (- selected 1)))}
+        (= dir "down")
+        {:db (put db :dmenu/selected (min (max 0 (- result-count 1))
+                                           (+ selected 1)))}))))
