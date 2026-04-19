@@ -81,9 +81,9 @@ pub fn load(backing_allocator: std.mem.Allocator) LoadResult {
         config.layer = .overlay;
         config.anchor = .{ .top = true, .left = true, .right = true };
         config.width = 0;
-        config.height = 920;
+        config.height = 1400;
         config.exclusive_zone = 0;
-        config.margin = .{ .top = 100, .left = 0, .right = 0, .bottom = 0 };
+        config.margin = .{ .top = 60, .left = 0, .right = 0, .bottom = 0 };
         config.namespace = "shoal-dmenu";
         config.keyboard_interactivity = .exclusive;
     }

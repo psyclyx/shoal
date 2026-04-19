@@ -93,19 +93,17 @@
 
 # --- Reactive volume watcher ---
 # Compares current audio state to previous snapshot each time sysinfo
-# updates. Shows OSD when volume or mute state changes.
+# updates. Shows OSD only when volume or mute state actually changes.
 
 (reg-event-handler :audio/read
   (fn [cofx event]
-    (def db (cofx :db))
-    (def audio (get db :audio {}))
-    (def prev (get db :osd/prev-audio {}))
-    (def pct (get audio :percent 0))
-    (def muted (get audio :muted false))
-    (def prev-pct (get prev :percent 0))
-    (def prev-muted (get prev :muted false))
-    # Only show OSD after the first read (prev exists) and something changed
-    (if (and (not (empty? prev))
-             (or (not= pct prev-pct) (not= muted prev-muted)))
-      (osd/show (put db :osd/prev-audio audio) "Volume" pct muted)
-      {:db (put db :osd/prev-audio audio)})))
+    (let [db (cofx :db)
+          audio (get db :audio {})
+          prev (get db :osd/prev-audio {})
+          pct (get audio :percent 0)
+          muted (get audio :muted false)]
+      (if (and (not (empty? prev))
+               (or (not= pct (get prev :percent 0))
+                   (not= muted (get prev :muted false))))
+        (osd/show (put db :osd/prev-audio audio) "Volume" pct muted)
+        {:db (put db :osd/prev-audio audio)}))))

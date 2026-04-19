@@ -120,52 +120,9 @@
 (def- N-BARS 15)
 (def- SBAR-W 4)
 (def- SBAR-GAP 2)
-(def- ln10 (math/log 10))
-
-(defn- log10 [x] (/ (math/log x) ln10))
-
-(defn- catmull-rom [p0 p1 p2 p3 t]
-  "Catmull-Rom spline interpolation between p1 and p2 at parameter t."
-  (let [t2 (* t t)
-        t3 (* t2 t)]
-    (* 0.5
-       (+ (* 2 p1)
-          (* (+ (- p0) p2) t)
-          (* (+ (* 2 p0) (* -5 p1) (* 4 p2) (- p3)) t2)
-          (* (+ (- p0) (* 3 p1) (* -3 p2) p3) t3)))))
-
-(defn- sample-curve [samples t key]
-  "Sample the smooth curve at time t using Catmull-Rom interpolation."
-  (let [n (length samples)]
-    (when (= n 0) (break 0))
-    (when (= n 1) (break (get (samples 0) key 0)))
-    # Find i1: rightmost sample with t_sample <= t
-    (var i1 0)
-    (for i 0 n
-      (when (<= (get (samples i) :t 0) t)
-        (set i1 i)))
-    (let [i0 (max 0 (- i1 1))
-          i2 (min (- n 1) (+ i1 1))
-          i3 (min (- n 1) (+ i1 2))
-          s1 (samples i1)
-          s2 (samples i2)
-          dt (- (get s2 :t 0) (get s1 :t 0))
-          frac (if (> dt 0.001)
-                 (max 0 (min 1 (/ (- t (get s1 :t 0)) dt)))
-                 0)]
-      (max 0 (catmull-rom
-        (get (samples i0) key 0)
-        (get s1 key 0)
-        (get s2 key 0)
-        (get (samples i3) key 0)
-        frac)))))
-
-(defn- sparkline-values [samples now window key]
-  "Compute N-BARS values by sampling the smooth curve across a time window."
-  (let [step (/ window (- N-BARS 1))]
-    (seq [i :range [0 N-BARS]
-          :let [t (- now (* (- (- N-BARS 1) i) step))]]
-      (sample-curve samples t key))))
+(def- HALF-H (math/floor (/ SEC-H 2)))
+(def- SKEW-PAD (math/ceil (* SLANT SEC-H)))
+(def- MIRROR-OFFSET (math/ceil (* SLANT HALF-H)))
 
 (defn- lerp-color [c1 c2 t]
   [(math/floor (+ (* (c1 0) (- 1 t)) (* (c2 0) t)))
@@ -173,13 +130,35 @@
    (math/floor (+ (* (c1 2) (- 1 t)) (* (c2 2) t)))
    (math/floor (+ (* (get c1 3 255) (- 1 t)) (* (get c2 3 255) t)))])
 
+(defn- scroll-bars [bars f]
+  "Interpolate N-BARS values from N+1 buffer with fractional scroll offset f."
+  (seq [i :range [0 N-BARS]
+        :let [a (get bars i 0)
+              b (get bars (+ i 1) 0)]]
+    (+ (* (- 1 f) a) (* f b))))
+
 (defn- sparkline-bars [values color-fn]
   "Render N-BARS parallelogram bars with varying heights and colors."
-  [:row {:h SEC-H :align-y :bottom :gap SBAR-GAP}
+  [:row {:h SEC-H :align-y :bottom :gap SBAR-GAP :pad [0 SKEW-PAD 0 0]}
     ;(seq [i :range [0 N-BARS]
            :let [v (max 0 (min 1 (get values i 0)))
                  h (max MIN-BAR-H (math/round (* SEC-H v)))]]
       [:row {:w SBAR-W :h h :bg (color-fn v) :skew SLANT}])])
+
+(defn- sparkline-mirror [rx-vals tx-vals rx-color-fn tx-color-fn]
+  "Mirrored parallelogram bars: rx grows up from center, tx grows down.
+   Per-bar column sized to fit the / offset, rx padded right like minimap."
+  [:row {:h SEC-H :gap SBAR-GAP :pad [0 SKEW-PAD 0 MIRROR-OFFSET]}
+    ;(seq [i :range [0 N-BARS]
+           :let [rv (max 0 (min 1 (get rx-vals i 0)))
+                 tv (max 0 (min 1 (get tx-vals i 0)))
+                 rx-h (max MIN-BAR-H (math/round (* HALF-H rv)))
+                 tx-h (max MIN-BAR-H (math/round (* HALF-H tv)))
+                 rx-offset (math/floor (* SLANT tx-h))]]
+      [:col {:w (+ SBAR-W rx-offset) :h SEC-H :align-y :center}
+        [:row {:pad [0 0 0 rx-offset]}
+          [:row {:w SBAR-W :h rx-h :bg (rx-color-fn rv) :skew SLANT}]]
+        [:row {:w SBAR-W :h tx-h :bg (tx-color-fn tv) :skew SLANT}]])])
 
 # -- Icons --
 # All shapes lean with the / via skew to match the section aesthetic.
@@ -347,14 +326,13 @@
   (tint (pct-color (* v 100)) 200))
 
 (defn- cpu-view []
-  (let [pct (sub :cpu/percent)
-        cpu (sub :cpu)
-        samples (or (get cpu :samples) @[])
-        now (os/clock :monotonic)
-        values (sparkline-values samples now 60 :v)]
+  (let [cpu (sub :cpu)
+        bars (or (get cpu :bars) @[])
+        f (min 0.99 (max 0 (/ (- (os/clock :monotonic) (get cpu :tick-clock 0)) 2.0)))
+        values (scroll-bars bars f)]
     (section cpu-bg
       (sparkline-bars values cpu-bar-color)
-      (icon-cpu (pct-color pct)))))
+      (icon-cpu (pct-color (sub :cpu/percent))))))
 
 (defn- mem-view []
   (let [pct (get (sub :mem) :percent 0)]
@@ -368,33 +346,24 @@
       (fill-bar orange pct)
       (icon-disk orange))))
 
-(defn- net-log-val [bps link-speed]
-  "Log10-normalize bytes/sec to 0-1 range."
-  (let [floor-bps 1024
-        ceil-bps (or link-speed 1250000000)]
-    (if (<= bps floor-bps) 0
-      (min 1 (/ (- (log10 bps) (log10 floor-bps))
-                (- (log10 ceil-bps) (log10 floor-bps)))))))
+(defn- rx-bar-color [v]
+  "Download bar: green → bright, cubic ramp."
+  (lerp-color (tint green 180) (tint bright 255) (* v v v)))
 
-(defn- net-bar-color [v]
-  "Inverted contrast: compressed color at low end, rich change at high end."
+(defn- tx-bar-color [v]
+  "Upload bar: cyan → bright, cubic ramp."
   (lerp-color (tint cyan 180) (tint bright 255) (* v v v)))
 
 (defn- net-view []
   (let [net (sub :net)
-        rx (get net :rx-rate 0)
-        tx (get net :tx-rate 0)
-        samples (or (get net :samples) @[])
-        link-speed (get net :link-speed)
-        now (os/clock :monotonic)
-        rx-vals (sparkline-values samples now 30 :rx)
-        tx-vals (sparkline-values samples now 30 :tx)
-        values (map |(net-log-val (max $0 $1) link-speed) rx-vals tx-vals)]
+        f (min 0.99 (max 0 (/ (- (os/clock :monotonic) (get net :tick-clock 0)) 1.0)))
+        rx-vals (scroll-bars (or (get net :rx-bars) @[]) f)
+        tx-vals (scroll-bars (or (get net :tx-bars) @[]) f)]
     (section net-bg
-      (sparkline-bars values net-bar-color)
+      (sparkline-mirror rx-vals tx-vals rx-bar-color tx-bar-color)
       [:col {:gap 1}
-        [:text {:color green :size 13} (string "↓" (fmt-rate rx))]
-        [:text {:color cyan :size 13} (string "↑" (fmt-rate tx))]])))
+        [:text {:color green :size 13} (string "↓" (fmt-rate (get net :rx-rate 0)))]
+        [:text {:color cyan :size 13} (string "↑" (fmt-rate (get net :tx-rate 0)))]])))
 
 (defn- audio-view []
   (def audio (sub :audio))

@@ -72,11 +72,11 @@
 
 (defn- result-item [idx label selected]
   (let [active (= idx selected)]
-    [:row {:id (string "result-" idx) :w :grow :h 32
+    [:row {:id (string "result-" idx) :w :grow :h 64
            :bg (if active overlay-color bg)
-           :radius 4 :pad [4 12] :align-y :center :gap 8}
-      [:row {:w 4 :h 16 :bg (if active accent [0 0 0 0]) :radius 2}]
-      [:text {:color (if active bright text-color) :size 14} label]]))
+           :radius 8 :pad [8 24] :align-y :center :gap 16}
+      [:row {:w 8 :h 32 :bg (if active accent [0 0 0 0]) :radius 4}]
+      [:text {:color (if active bright text-color) :size 28} label]]))
 
 (defn dmenu-view []
   (let [query (sub :dmenu/query)
@@ -84,34 +84,34 @@
         results (sub :dmenu/results)
         selected (sub :dmenu/selected)
         reveal (anim :dmenu/reveal)
-        max-visible 24
+        max-visible 16
         total (length results)
         scroll-off (max 0 (min (- selected (- max-visible 1))
                                 (- total max-visible)))
         visible-end (min total (+ scroll-off max-visible))
         alpha (math/floor (* reveal 255))]
 
-    [:col {:w 1200 :h :grow :bg [(bg 0) (bg 1) (bg 2) alpha] :radius 8 :pad 12
+    [:col {:w 1600 :h :grow :bg [(bg 0) (bg 1) (bg 2) alpha] :radius 16 :pad 24
            :align-x :center}
       # Input field
-      [:row {:h 48 :w :grow
+      [:row {:h 96 :w :grow
              :bg [(surface-color 0) (surface-color 1) (surface-color 2) alpha]
-             :radius 6 :pad [8 16] :align-y :center :gap 8}
-        [:text {:color muted :size 16} prompt]
-        [:text {:color text-color :size 18}
+             :radius 12 :pad [16 32] :align-y :center :gap 16}
+        [:text {:color muted :size 32} prompt]
+        [:text {:color text-color :size 36}
           (string query "│")]]
       # Results list
-      [:col {:w :grow :h :grow :gap 2 :pad [8 0 0 0]}
+      [:col {:w :grow :h :grow :gap 4 :pad [16 0 0 0]}
         ;(seq [i :range [scroll-off visible-end]
                :let [item (results i)]]
            (result-item i item selected))]
       # Footer with count and keybind reference
-      [:row {:h 28 :w :grow :align-y :center :pad [0 8] :gap 16}
-        [:text {:color subtle :size 11}
+      [:row {:h 56 :w :grow :align-y :center :pad [0 16] :gap 32}
+        [:text {:color subtle :size 22}
           (string (length results) " / " (sub :dmenu/total))]
         [:row {:w :grow}]
-        [:text {:color subtle :size 11}
-          "Ret select  Esc cancel  C-w word  C-u clear  Up/C-k  Down/C-j"]]]))
+        [:text {:color subtle :size 22}
+          "Ret select · S-Ret literal · Esc cancel · C-w word · C-u clear · ↑↓ nav"]]]))
 
 (reg-view dmenu-view)
 
@@ -143,10 +143,15 @@
         (= sym "Escape")
         {:exit 1}
 
+        # Shift+Return: submit raw query text, ignoring autocomplete selection
+        (and (= sym "Return") (info :shift))
+        (if (> (length query) 0)
+          {:stdout query :exit 0}
+          {:exit 1})
+
         (= sym "Return")
         (if (and (> result-count 0) (<= selected (- result-count 1)))
           {:stdout (results selected) :exit 0}
-          # If no results but query has text, output the query itself
           (if (> (length query) 0)
             {:stdout query :exit 0}
             {:exit 1}))

@@ -5,6 +5,9 @@
 
 # -- CPU --
 
+(def- N-BARS 15)
+(def- CPU-SMOOTH 0.3)
+
 (reg-event-handler :cpu/tick
   (fn [cofx event]
     {:async-slurp {:path "/proc/stat" :event :cpu/read}}))
@@ -24,22 +27,23 @@
           (each v vals (set total (+ total v)))
           (let [idle (+ (get vals 3 0) (get vals 4 0))
                 prev (get (cofx :db) :cpu {})
-                prev-idle (get prev :prev-idle 0)
-                prev-total (get prev :prev-total 0)
-                dt (- total prev-total)
-                di (- idle prev-idle)
+                dt (- total (get prev :prev-total 0))
+                di (- idle (get prev :prev-idle 0))
                 pct (if (> dt 0)
                       (math/round (* 100 (/ (- dt di) dt)))
                       0)
                 normalized (/ pct 100)
                 clock (os/clock :monotonic)
-                samples (array/slice (or (get prev :samples) @[]))]
-            (array/push samples {:t clock :v normalized})
-            (while (> (length samples) 40) (array/remove samples 0))
+                bars (or (get prev :bars) (array/new-filled (+ N-BARS 1) 0))
+                smoothed (+ (* CPU-SMOOTH normalized)
+                            (* (- 1 CPU-SMOOTH) (or (last bars) 0)))
+                new-bars (array/slice bars 1)]
+            (array/push new-bars smoothed)
             {:db (put (cofx :db) :cpu {:percent pct
                                         :prev-idle idle
                                         :prev-total total
-                                        :samples samples})}))))))
+                                        :bars new-bars
+                                        :tick-clock clock})}))))))
 
 (reg-event-handler :init
   (fn [cofx event]
@@ -210,6 +214,19 @@
 
 (var- net-iface nil)
 
+(def- ln10 (math/log 10))
+(defn- log10 [x] (/ (math/log x) ln10))
+
+(def- NET-SMOOTH 0.25)
+
+(defn- net-log-val [bps link-speed]
+  "Log10-normalize bytes/sec to 0-1 range."
+  (let [floor-bps 1024
+        ceil-bps (or link-speed 1250000000)]
+    (if (<= bps floor-bps) 0
+      (min 1 (/ (- (log10 bps) (log10 floor-bps))
+                (- (log10 ceil-bps) (log10 floor-bps)))))))
+
 (defn- get-link-speed [iface]
   "Get link speed in bytes/sec from sysfs. Returns nil on failure."
   (try
@@ -254,19 +271,29 @@
             ipv4 (if update-ips (or (get-local-ipv4) "") (get prev :ipv4 ""))
             link-speed (or (get prev :link-speed)
                            (get-link-speed net-iface))
-            samples (array/slice (or (get prev :samples) @[]))]
-        (array/push samples {:t clock :rx rx-rate :tx tx-rate})
-        (while (> (length samples) 60) (array/remove samples 0))
+            # Log-normalize and smooth into bar histories
+            log-rx (net-log-val rx-rate link-speed)
+            log-tx (net-log-val tx-rate link-speed)
+            rx-bars (or (get prev :rx-bars) (array/new-filled (+ N-BARS 1) 0))
+            tx-bars (or (get prev :tx-bars) (array/new-filled (+ N-BARS 1) 0))
+            sm-rx (+ (* NET-SMOOTH log-rx) (* (- 1 NET-SMOOTH) (or (last rx-bars) 0)))
+            sm-tx (+ (* NET-SMOOTH log-tx) (* (- 1 NET-SMOOTH) (or (last tx-bars) 0)))
+            new-rx-bars (array/slice rx-bars 1)
+            new-tx-bars (array/slice tx-bars 1)]
+        (array/push new-rx-bars sm-rx)
+        (array/push new-tx-bars sm-tx)
         {:db (put (cofx :db) :net {:rx-rate rx-rate
                                     :tx-rate tx-rate
                                     :prev-rx (now :rx)
                                     :prev-tx (now :tx)
                                     :prev-clock clock
+                                    :tick-clock clock
                                     :iface net-iface
                                     :ipv4 ipv4
                                     :tick-count tick-count
                                     :link-speed link-speed
-                                    :samples samples})}))))
+                                    :rx-bars new-rx-bars
+                                    :tx-bars new-tx-bars})}))))
 
 (reg-event-handler :init
   (fn [cofx event]
