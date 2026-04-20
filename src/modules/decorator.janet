@@ -88,7 +88,7 @@
 # -- SHM path helper --
 
 (defn- shm-path [id]
-  (string (os/getenv "XDG_RUNTIME_DIR") "/shoal-deco-" id))
+  (string "/dev/shm/shoal-deco-" id))
 
 # -- Event handlers --
 
