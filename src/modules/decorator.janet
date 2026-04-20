@@ -152,18 +152,16 @@
     (def spec (get event 1))
     (when spec
       # Extract the decoration ID from the view name (:deco-N → N)
-      (def view-name (get spec "view"))
+      (def view-name (get spec :view))
       (when (nil? view-name) (break))
-      (def view-str (if (keyword? view-name) (string view-name)
-                       (if (string? view-name) view-name nil)))
-      (when (nil? view-str) (break))
+      (def view-str (string view-name))
       (when (not (string/has-prefix? "deco-" view-str)) (break))
       (def id-str (string/slice view-str 5))
       (def id (scan-number id-str))
       (when (nil? id) (break))
-      (def width (get spec "width" 0))
-      (def height (get spec "height" 0))
-      (def path (get spec "path" ""))
+      (def width (get spec :width 0))
+      (def height (get spec :height 0))
+      (def path (get spec :path ""))
       {:ipc {:send {:name :tidepool
                     :data (string (json/encode
                             {"jsonrpc" "2.0" "id" 0
