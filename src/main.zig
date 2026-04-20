@@ -754,36 +754,26 @@ fn renderSingleShm(spec: janet.Janet) void {
     };
     defer std.posix.munmap(mapped);
 
-    // Read pixels directly into mmap, then fix up in-place
-    c.glReadPixels(0, 0, @intCast(width), @intCast(height), c.GL_RGBA, c.GL_UNSIGNED_BYTE, mapped.ptr);
-
-    // Flip rows in-place (GL is bottom-up, Wayland is top-down)
-    const row_buf = std.heap.page_allocator.alloc(u8, stride) catch {
+    // Read into temp buffer (some GL drivers don't like writing to mmap)
+    const pixels = std.heap.page_allocator.alloc(u8, size) catch {
         c.glDeleteFramebuffers(1, &fbo);
         c.glDeleteRenderbuffers(1, &rbo);
         return;
     };
-    defer std.heap.page_allocator.free(row_buf);
-    {
-        var top: usize = 0;
-        var bot: usize = height - 1;
-        while (top < bot) : ({
-            top += 1;
-            bot -= 1;
-        }) {
-            @memcpy(row_buf, mapped[top * stride .. top * stride + stride]);
-            @memcpy(mapped[top * stride .. top * stride + stride], mapped[bot * stride .. bot * stride + stride]);
-            @memcpy(mapped[bot * stride .. bot * stride + stride], row_buf);
-        }
-    }
+    defer std.heap.page_allocator.free(pixels);
+    c.glReadPixels(0, 0, @intCast(width), @intCast(height), c.GL_RGBA, c.GL_UNSIGNED_BYTE, pixels.ptr);
 
-    // Convert RGBA → BGRA (Wayland ARGB8888 = BGRA in memory)
-    {
-        var i: usize = 0;
-        while (i < size) : (i += 4) {
-            const tmp = mapped[i]; // R
-            mapped[i] = mapped[i + 2]; // B
-            mapped[i + 2] = tmp; // R
+    // Copy to mmap with row flip (GL bottom-up → Wayland top-down)
+    // and RGBA → BGRA conversion (Wayland ARGB8888 = BGRA in memory)
+    for (0..height) |row| {
+        const src_row = (height - 1 - row) * stride;
+        const dst_row = row * stride;
+        var col: usize = 0;
+        while (col < stride) : (col += 4) {
+            mapped[dst_row + col + 0] = pixels[src_row + col + 2]; // B
+            mapped[dst_row + col + 1] = pixels[src_row + col + 1]; // G
+            mapped[dst_row + col + 2] = pixels[src_row + col + 0]; // R
+            mapped[dst_row + col + 3] = pixels[src_row + col + 3]; // A
         }
     }
 
