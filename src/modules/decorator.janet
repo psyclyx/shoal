@@ -85,12 +85,14 @@
         (deco-tab-bar w h (get tree "children" []) (get tree "active" 0) focused)
         (deco-title-bar w h (active-leaf-title tree) focused)))))
 
-# -- SHM path helper --
-
-(defn- shm-path [id]
-  (string "/dev/shm/shoal-deco-" id))
-
 # -- Event handlers --
+
+(defn- render-decoration [id params]
+  "Trigger FBO render into the shared mmap buffer."
+  {:render-to-shm {:view (keyword (string "deco-" id))
+                    :width (get params "width" 100)
+                    :height (get params "height" DECO-H)
+                    :path (get params "shm-path" "")}})
 
 (reg-event-handler :decoration/create
   (fn [cofx event]
@@ -98,15 +100,10 @@
     (def id (get params "id"))
     (def db (cofx :db))
     (def decos (get db :decorations {}))
-    # Store decoration state
     (def new-decos (merge decos {id params}))
-    # Register a named view for this decoration
     (reg-view (keyword (string "deco-" id)) (deco-view-for id))
-    {:db (put db :decorations new-decos)
-     :render-to-shm {:view (keyword (string "deco-" id))
-                      :width (get params "width" 100)
-                      :height (get params "height" DECO-H)
-                      :path (shm-path id)}}))
+    (merge {:db (put db :decorations new-decos)}
+           (render-decoration id params))))
 
 (reg-event-handler :decoration/update
   (fn [cofx event]
@@ -116,11 +113,8 @@
     (def decos (get db :decorations {}))
     (when-let [existing (get decos id)]
       (def updated (merge existing params))
-      {:db (put db :decorations (merge decos {id updated}))
-       :render-to-shm {:view (keyword (string "deco-" id))
-                        :width (get updated "width" 100)
-                        :height (get updated "height" DECO-H)
-                        :path (shm-path id)}})))
+      (merge {:db (put db :decorations (merge decos {id updated}))}
+             (render-decoration id updated)))))
 
 (reg-event-handler :decoration/resize
   (fn [cofx event]
@@ -129,12 +123,11 @@
     (def db (cofx :db))
     (def decos (get db :decorations {}))
     (when-let [existing (get decos id)]
+      # Resize changes the shared buffer — tidepool recreates the memfd.
+      # The new shm-path comes in the resize params.
       (def updated (merge existing params))
-      {:db (put db :decorations (merge decos {id updated}))
-       :render-to-shm {:view (keyword (string "deco-" id))
-                        :width (get params "width" 100)
-                        :height (get params "height" DECO-H)
-                        :path (shm-path id)}})))
+      (merge {:db (put db :decorations (merge decos {id updated}))}
+             (render-decoration id updated)))))
 
 (reg-event-handler :decoration/destroy
   (fn [cofx event]
@@ -146,12 +139,11 @@
     (put new-decos id nil)
     {:db (put db :decorations new-decos)}))
 
-# After FBO render completes, send the buffer to tidepool
+# After FBO render completes, signal tidepool to re-commit the surface
 (reg-event-handler :shm-rendered
   (fn [cofx event]
     (def spec (get event 1))
     (when spec
-      # Extract the decoration ID from the view name (:deco-N → N)
       (def view-name (get spec :view))
       (when (nil? view-name) (break))
       (def view-str (string view-name))
@@ -159,17 +151,9 @@
       (def id-str (string/slice view-str 5))
       (def id (scan-number id-str))
       (when (nil? id) (break))
-      (def width (get spec :width 0))
-      (def height (get spec :height 0))
-      (def path (get spec :path ""))
       {:ipc {:send {:name :tidepool
                     :data (string (json/encode
                             {"jsonrpc" "2.0" "id" 0
-                             "method" "decoration:buffer"
-                             "params" {"id" id
-                                       "shm-path" path
-                                       "width" width
-                                       "height" height
-                                       "stride" (* width 4)
-                                       "format" "argb8888"}})
+                             "method" "decoration:ready"
+                             "params" {"id" id}})
                           "\n")}}})))

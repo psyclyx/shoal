@@ -778,17 +778,22 @@ fn renderSingleShm(spec: janet.Janet) void {
         pixels[i + 3] = a;
     }
 
-    // Write to file
-    const file = std.fs.createFileAbsolute(path, .{ .truncate = true }) catch |err| {
+    // Write directly into the shared mmap buffer
+    const fd = std.posix.open(path, .{ .ACCMODE = .RDWR }, 0) catch |err| {
         log.warn("render-to-shm: open {s}: {}", .{ path, err });
         c.glDeleteFramebuffers(1, &fbo);
         c.glDeleteRenderbuffers(1, &rbo);
         return;
     };
-    defer file.close();
-    file.writeAll(pixels) catch |err| {
-        log.warn("render-to-shm: write {s}: {}", .{ path, err });
+    defer std.posix.close(fd);
+    const mapped = std.posix.mmap(null, size, std.posix.PROT.WRITE, .{ .TYPE = .SHARED }, fd, 0) catch |err| {
+        log.warn("render-to-shm: mmap: {}", .{err});
+        c.glDeleteFramebuffers(1, &fbo);
+        c.glDeleteRenderbuffers(1, &rbo);
+        return;
     };
+    defer std.posix.munmap(mapped);
+    @memcpy(mapped[0..size], pixels);
 
     // Cleanup
     c.glDeleteFramebuffers(1, &fbo);
