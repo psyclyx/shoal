@@ -61,6 +61,15 @@
     "focus:changed" (tp/apply-title db params)
     db))
 
+(defn- tp/handle-decoration-event [method params]
+  "Dispatch decoration events to the decorator module."
+  (case method
+    "decoration:create"  {:dispatch [:decoration/create params]}
+    "decoration:update"  {:dispatch [:decoration/update params]}
+    "decoration:resize"  {:dispatch [:decoration/resize params]}
+    "decoration:destroy" {:dispatch [:decoration/destroy params]}
+    nil))
+
 # -- IPC connection --
 
 (reg-event-handler :init
@@ -83,9 +92,8 @@
               (merge (get (cofx :db) :wm {}) {:connected true}))
      :ipc {:send {:name :tidepool
                   :data (string (json/encode {"jsonrpc" "2.0" "id" 1
-                                              "method" "watch"
-                                              "params" {"events" ["state" "focus:changed"
-                                                                  "window:new" "window:closed"]}})
+                                              "method" "register-decorator"
+                                              "params" {}})
                                 "\n")}}}))
 
 (reg-event-handler :tp/disconnected
@@ -97,6 +105,7 @@
     (def payload (get event 1))
     (when payload
       (var db (cofx :db))
+      (var extra-fx nil)
       (try
         (do
           (def data (json/decode payload))
@@ -104,10 +113,15 @@
             (def method (get data "method"))
             (def params (get data "params"))
             (when (and method params)
-              (set db (tp/handle-notification db method params)))))
+              # Decoration events dispatch to the decorator module
+              (if (string/has-prefix? "decoration:" method)
+                (set extra-fx (tp/handle-decoration-event method params))
+                (set db (tp/handle-notification db method params))))))
         ([err]
           (eprintf "tidepool: recv error: %s" (string err))))
-      {:db db})))
+      (if extra-fx
+        (merge {:db db} extra-fx)
+        {:db db}))))
 
 # -- Action dispatch --
 

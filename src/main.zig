@@ -416,6 +416,7 @@ pub fn main() !void {
 
         // Process surface lifecycle requests from Janet
         processSurfaceRequests();
+        processShmRenderRequests();
 
         if (dispatch.render_dirty) {
             dispatch.render_dirty = false;
@@ -644,6 +645,158 @@ fn destroyDynamicSurface(name_val: janet.Janet) void {
     }
 
     log.warn("surface destroy: '{s}' not found", .{name_str});
+}
+
+// ---------------------------------------------------------------------------
+// Render-to-SHM: off-screen FBO rendering for decoration buffers
+// ---------------------------------------------------------------------------
+
+fn processShmRenderRequests() void {
+    const requests = dispatch.drainShmRenderRequests();
+    if (requests.len == 0) return;
+
+    // Need an EGL context for GL calls. Use the first surface's context.
+    if (surface_count == 0) {
+        for (requests) |req| _ = janet.c.janet_gcunroot(req);
+        return;
+    }
+    if (!surfaces[0].makeCurrent()) {
+        for (requests) |req| _ = janet.c.janet_gcunroot(req);
+        return;
+    }
+
+    for (requests) |req| {
+        defer _ = janet.c.janet_gcunroot(req);
+        renderSingleShm(req);
+    }
+
+    // Rebind default framebuffer
+    c.glBindFramebuffer(c.GL_FRAMEBUFFER, 0);
+}
+
+fn renderSingleShm(spec: janet.Janet) void {
+    const jc = janet.c;
+    if (jc.janet_checktype(spec, jc.JANET_TABLE) == 0 and
+        jc.janet_checktype(spec, jc.JANET_STRUCT) == 0)
+    {
+        log.warn("render-to-shm: expected table spec", .{});
+        return;
+    }
+
+    // Parse spec: {:view :deco-1 :width 800 :height 28 :path "/run/user/.../deco-1"}
+    const view_val = janet.janetGet(spec, janet.kw("view"));
+    const path_val = janet.janetGet(spec, janet.kw("path"));
+    const width = parseJanetUint(spec, "width") orelse return;
+    const height = parseJanetUint(spec, "height") orelse return;
+
+    if (jc.janet_checktype(path_val, jc.JANET_STRING) == 0) {
+        log.warn("render-to-shm: missing :path", .{});
+        return;
+    }
+    const path_len: usize = @intCast(jc.janet_string_length(jc.janet_unwrap_string(path_val)));
+    const path_ptr: [*]const u8 = jc.janet_unwrap_string(path_val);
+    const path = path_ptr[0..path_len];
+
+    if (width == 0 or height == 0) return;
+
+    // Create FBO
+    var fbo: c.GLuint = 0;
+    var rbo: c.GLuint = 0;
+    c.glGenFramebuffers(1, &fbo);
+    c.glGenRenderbuffers(1, &rbo);
+    c.glBindFramebuffer(c.GL_FRAMEBUFFER, fbo);
+    c.glBindRenderbuffer(c.GL_RENDERBUFFER, rbo);
+    c.glRenderbufferStorage(c.GL_RENDERBUFFER, c.GL_RGBA8, @intCast(width), @intCast(height));
+    c.glFramebufferRenderbuffer(c.GL_FRAMEBUFFER, c.GL_COLOR_ATTACHMENT0, c.GL_RENDERBUFFER, rbo);
+
+    if (c.glCheckFramebufferStatus(c.GL_FRAMEBUFFER) != c.GL_FRAMEBUFFER_COMPLETE) {
+        log.warn("render-to-shm: framebuffer incomplete", .{});
+        c.glDeleteFramebuffers(1, &fbo);
+        c.glDeleteRenderbuffers(1, &rbo);
+        return;
+    }
+
+    // Render
+    const w: f32 = @floatFromInt(width);
+    const h: f32 = @floatFromInt(height);
+
+    c.glActiveTexture(c.GL_TEXTURE0);
+    c.glBindTexture(c.GL_TEXTURE_2D, text_renderer.getAtlasTexture());
+
+    Layout.setPointerState(.{ -1, -1 }, false);
+    renderer.begin(w, h);
+    layout.setDimensions(w, h);
+    layout.beginLayout();
+    dispatch.prepareRender("");
+    hiccup_mod.beginPass();
+    _ = dispatch.renderView(view_val);
+    layout.endLayout();
+    hiccup_mod.endPass();
+    renderer.end();
+
+    // Read pixels
+    const stride = width * 4;
+    const size = stride * height;
+    const pixels = std.heap.page_allocator.alloc(u8, size) catch {
+        log.warn("render-to-shm: alloc failed", .{});
+        c.glDeleteFramebuffers(1, &fbo);
+        c.glDeleteRenderbuffers(1, &rbo);
+        return;
+    };
+    defer std.heap.page_allocator.free(pixels);
+
+    c.glReadPixels(0, 0, @intCast(width), @intCast(height), c.GL_RGBA, c.GL_UNSIGNED_BYTE, pixels.ptr);
+
+    // GL renders bottom-up, SHM/Wayland expects top-down. Flip rows.
+    const row_buf = std.heap.page_allocator.alloc(u8, stride) catch {
+        c.glDeleteFramebuffers(1, &fbo);
+        c.glDeleteRenderbuffers(1, &rbo);
+        return;
+    };
+    defer std.heap.page_allocator.free(row_buf);
+    var top: usize = 0;
+    var bot: usize = height - 1;
+    while (top < bot) : ({
+        top += 1;
+        bot -= 1;
+    }) {
+        @memcpy(row_buf, pixels[top * stride .. top * stride + stride]);
+        @memcpy(pixels[top * stride .. top * stride + stride], pixels[bot * stride .. bot * stride + stride]);
+        @memcpy(pixels[bot * stride .. bot * stride + stride], row_buf);
+    }
+
+    // Also convert RGBA → ARGB (Wayland SHM expects ARGB8888)
+    var i: usize = 0;
+    while (i < size) : (i += 4) {
+        const r = pixels[i];
+        const g = pixels[i + 1];
+        const b = pixels[i + 2];
+        const a = pixels[i + 3];
+        pixels[i] = b;
+        pixels[i + 1] = g;
+        pixels[i + 2] = r;
+        pixels[i + 3] = a;
+    }
+
+    // Write to file
+    const file = std.fs.createFileAbsolute(path, .{ .truncate = true }) catch |err| {
+        log.warn("render-to-shm: open {s}: {}", .{ path, err });
+        c.glDeleteFramebuffers(1, &fbo);
+        c.glDeleteRenderbuffers(1, &rbo);
+        return;
+    };
+    defer file.close();
+    file.writeAll(pixels) catch |err| {
+        log.warn("render-to-shm: write {s}: {}", .{ path, err });
+    };
+
+    // Cleanup
+    c.glDeleteFramebuffers(1, &fbo);
+    c.glDeleteRenderbuffers(1, &rbo);
+
+    // Emit completion event so Janet can send the buffer to tidepool
+    const event = janet.makeEventArgs("shm-rendered", &.{spec});
+    dispatch.enqueue(event);
 }
 
 // --- Janet spec parsers for surface creation ---

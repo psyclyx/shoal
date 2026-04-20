@@ -7,6 +7,7 @@ pub const modules = .{
     .{ .name = "bar.janet", .source = @embedFile("../modules/bar.janet") },
     .{ .name = "launcher.janet", .source = @embedFile("../modules/launcher.janet") },
     .{ .name = "osd.janet", .source = @embedFile("../modules/osd.janet") },
+    .{ .name = "decorator.janet", .source = @embedFile("../modules/decorator.janet") },
 };
 
 pub const dmenu_source = @embedFile("../modules/dmenu.janet");

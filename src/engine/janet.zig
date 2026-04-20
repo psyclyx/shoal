@@ -81,6 +81,7 @@ const fx_order = [_][:0]const u8{
     "async-slurp",
     "ipc",
     "surface",
+    "render-to-shm",
     "stdout",
     "exit",
     "render",
@@ -141,6 +142,10 @@ pub const Dispatch = struct {
     // Surface lifecycle requests (processed by main.zig)
     surface_requests: [MAX_SURFACE_REQUESTS]Janet = undefined,
     surface_request_count: usize = 0,
+
+    // Render-to-SHM requests (processed by main.zig after surface rendering)
+    shm_render_requests: [MAX_SURFACE_REQUESTS]Janet = undefined,
+    shm_render_request_count: usize = 0,
 
     // Cached function references (set by initBoot)
     fn_get_handler: Janet = undefined,
@@ -357,6 +362,8 @@ pub const Dispatch = struct {
                 self.handleAsyncSlurpFx(fx_val);
             } else if (std.mem.eql(u8, fx_name, "surface")) {
                 self.enqueueSurfaceRequest(fx_val);
+            } else if (std.mem.eql(u8, fx_name, "render-to-shm")) {
+                self.enqueueShmRenderRequest(fx_val);
             } else if (std.mem.eql(u8, fx_name, "stdout")) {
                 handleStdoutFx(fx_val);
             } else if (std.mem.eql(u8, fx_name, "exit")) {
@@ -856,6 +863,23 @@ pub const Dispatch = struct {
         c.janet_gcroot(val);
         self.surface_requests[self.surface_request_count] = val;
         self.surface_request_count += 1;
+    }
+
+    fn enqueueShmRenderRequest(self: *Dispatch, val: Janet) void {
+        if (self.shm_render_request_count >= MAX_SURFACE_REQUESTS) {
+            log.warn("render-to-shm request queue full", .{});
+            return;
+        }
+        c.janet_gcroot(val);
+        self.shm_render_requests[self.shm_render_request_count] = val;
+        self.shm_render_request_count += 1;
+    }
+
+    pub fn drainShmRenderRequests(self: *Dispatch) []const Janet {
+        const count = self.shm_render_request_count;
+        if (count == 0) return &.{};
+        self.shm_render_request_count = 0;
+        return self.shm_render_requests[0..count];
     }
 
     /// Drain surface requests. Returns a slice of GC-rooted Janet values.
