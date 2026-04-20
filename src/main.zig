@@ -734,51 +734,11 @@ fn renderSingleShm(spec: janet.Janet) void {
     hiccup_mod.endPass();
     renderer.end();
 
-    // Read pixels
+    // Read pixels into shared buffer
     const stride = width * 4;
     const size = stride * height;
-    const pixels = std.heap.page_allocator.alloc(u8, size) catch {
-        log.warn("render-to-shm: alloc failed", .{});
-        c.glDeleteFramebuffers(1, &fbo);
-        c.glDeleteRenderbuffers(1, &rbo);
-        return;
-    };
-    defer std.heap.page_allocator.free(pixels);
 
-    c.glReadPixels(0, 0, @intCast(width), @intCast(height), c.GL_RGBA, c.GL_UNSIGNED_BYTE, pixels.ptr);
-
-    // GL renders bottom-up, SHM/Wayland expects top-down. Flip rows.
-    const row_buf = std.heap.page_allocator.alloc(u8, stride) catch {
-        c.glDeleteFramebuffers(1, &fbo);
-        c.glDeleteRenderbuffers(1, &rbo);
-        return;
-    };
-    defer std.heap.page_allocator.free(row_buf);
-    var top: usize = 0;
-    var bot: usize = height - 1;
-    while (top < bot) : ({
-        top += 1;
-        bot -= 1;
-    }) {
-        @memcpy(row_buf, pixels[top * stride .. top * stride + stride]);
-        @memcpy(pixels[top * stride .. top * stride + stride], pixels[bot * stride .. bot * stride + stride]);
-        @memcpy(pixels[bot * stride .. bot * stride + stride], row_buf);
-    }
-
-    // Also convert RGBA → ARGB (Wayland SHM expects ARGB8888)
-    var i: usize = 0;
-    while (i < size) : (i += 4) {
-        const r = pixels[i];
-        const g = pixels[i + 1];
-        const b = pixels[i + 2];
-        const a = pixels[i + 3];
-        pixels[i] = b;
-        pixels[i + 1] = g;
-        pixels[i + 2] = r;
-        pixels[i + 3] = a;
-    }
-
-    // Write directly into the shared mmap buffer
+    // Open shared buffer and mmap it read-write
     const file = std.fs.openFileAbsolute(path, .{ .mode = .read_write }) catch |err| {
         log.warn("render-to-shm: open {s}: {}", .{ path, err });
         c.glDeleteFramebuffers(1, &fbo);
@@ -786,14 +746,46 @@ fn renderSingleShm(spec: janet.Janet) void {
         return;
     };
     defer file.close();
-    const mapped = std.posix.mmap(null, size, std.posix.PROT.WRITE, .{ .TYPE = .SHARED }, file.handle, 0) catch |err| {
+    const mapped = std.posix.mmap(null, size, std.posix.PROT.READ | std.posix.PROT.WRITE, .{ .TYPE = .SHARED }, file.handle, 0) catch |err| {
         log.warn("render-to-shm: mmap: {}", .{err});
         c.glDeleteFramebuffers(1, &fbo);
         c.glDeleteRenderbuffers(1, &rbo);
         return;
     };
     defer std.posix.munmap(mapped);
-    @memcpy(mapped[0..size], pixels);
+
+    // Read pixels directly into mmap, then fix up in-place
+    c.glReadPixels(0, 0, @intCast(width), @intCast(height), c.GL_RGBA, c.GL_UNSIGNED_BYTE, mapped.ptr);
+
+    // Flip rows in-place (GL is bottom-up, Wayland is top-down)
+    const row_buf = std.heap.page_allocator.alloc(u8, stride) catch {
+        c.glDeleteFramebuffers(1, &fbo);
+        c.glDeleteRenderbuffers(1, &rbo);
+        return;
+    };
+    defer std.heap.page_allocator.free(row_buf);
+    {
+        var top: usize = 0;
+        var bot: usize = height - 1;
+        while (top < bot) : ({
+            top += 1;
+            bot -= 1;
+        }) {
+            @memcpy(row_buf, mapped[top * stride .. top * stride + stride]);
+            @memcpy(mapped[top * stride .. top * stride + stride], mapped[bot * stride .. bot * stride + stride]);
+            @memcpy(mapped[bot * stride .. bot * stride + stride], row_buf);
+        }
+    }
+
+    // Convert RGBA → BGRA (Wayland ARGB8888 = BGRA in memory)
+    {
+        var i: usize = 0;
+        while (i < size) : (i += 4) {
+            const tmp = mapped[i]; // R
+            mapped[i] = mapped[i + 2]; // B
+            mapped[i + 2] = tmp; // R
+        }
+    }
 
     // Cleanup
     c.glDeleteFramebuffers(1, &fbo);
