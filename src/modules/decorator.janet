@@ -47,26 +47,35 @@
 
 # -- Decoration views --
 
+(def- sep-w (math/ceil (* SLANT DECO-H)))
+
 (defn- deco-title-bar [w h title focused]
-  [:row {:w w :h h :bg (if focused focused-bg normal-bg) :skew SLANT
-         :align-y :center :pad [0 12 0 6]}
+  [:row {:w w :h h :bg (if focused focused-bg normal-bg)
+         :align-y :center :pad [0 12 0 8]}
     [:text {:color (if focused bright text-color) :size 14}
       (or title "")]])
 
 (defn- deco-tab-bar [w h children active focused]
   (def n (length children))
-  (def tab-w (if (> n 0) (math/floor (/ w n)) w))
-  [:row {:w w :h h :gap 0}
-    ;(seq [i :range [0 n]
-           :let [is-active (= i active)
-                 child (children i)]]
-      [:row {:w tab-w :h h :skew SLANT
+  (def total-seps (* sep-w (max 0 (- n 1))))
+  (def tab-w (if (> n 0) (math/floor (/ (- w total-seps) n)) w))
+  (def elements @[])
+  (for i 0 n
+    (def is-active (= i active))
+    (def child (children i))
+    # Slanted separator between tabs
+    (when (> i 0)
+      (array/push elements
+        [:row {:w sep-w :h h :bg (blend-bg muted 40) :skew SLANT}]))
+    (array/push elements
+      [:row {:w tab-w :h h
              :bg (cond is-active focused-bg
                        focused tab-bg
                        normal-bg)
-             :align-y :center :pad [0 8 0 4]}
-        [:text {:color (if is-active bright text-color) :size 13 :clip true}
-          (or (active-leaf-title child) "")]])])
+             :align-y :center :pad [0 8 0 6]}
+        [:text {:color (if is-active bright text-color) :size 13}
+          (or (active-leaf-title child) "")]]))
+  [:row {:w w :h h :gap 0} ;elements])
 
 (defn- deco-view-for [id]
   "Return a view function for a specific decoration."
