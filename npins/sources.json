@@ -5,6 +5,19 @@
       "name": "nixos-unstable",
       "url": "https://releases.nixos.org/nixos/unstable/nixos-26.05pre964859.b40629efe5d6/nixexprs.tar.xz",
       "hash": "sha256-p0tPeJJbg+PKaH741F1CWa9Bf9vf6g02HK9V/g4TkHo="
+    },
+    "snail": {
+      "type": "Git",
+      "repository": {
+        "type": "GitHub",
+        "owner": "psyclyx",
+        "repo": "snail"
+      },
+      "branch": "main",
+      "submodules": false,
+      "revision": "d655dcba2a85198dfe12b99138b612d4bef7b899",
+      "url": "https://github.com/psyclyx/snail/archive/d655dcba2a85198dfe12b99138b612d4bef7b899.tar.gz",
+      "hash": "sha256-Agc+QtTm8Fed+hFkwdk7RSDCfNwGozvQ3SagysGZpV0="
     }
   },
   "version": 7

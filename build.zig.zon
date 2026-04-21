@@ -12,6 +12,10 @@
             .url = "git+https://github.com/johan0A/clay-zig-bindings?ref=main#6247096649f547a55e90dcdc1e821c72186f6d09",
             .hash = "zclay-0.2.2-Ej1rkPDRAADuk7U5Y1YjpoFfE5Puvf5JIDyyjtnz3aVc",
         },
+        .snail = .{
+            .url = "https://github.com/psyclyx/snail/archive/d655dcba2a85198dfe12b99138b612d4bef7b899.tar.gz",
+            .hash = "snail-0.0.1-vw75SHDqUwCCEUXoBB6JfR3kuh-JN3dkI71uzzF5KpPI",
+        },
     },
     .fingerprint = 0xfdab4966dbf31d14,
 }

@@ -4,6 +4,7 @@
 {
   linkFarm,
   fetchgit,
+  snail-src,
 }:
 
 linkFarm "zig-packages" [
@@ -24,6 +25,11 @@ linkFarm "zig-packages" [
       rev = "6247096649f547a55e90dcdc1e821c72186f6d09";
       hash = "sha256-qfiJdzb5gUe/N6H2u1ejFhw9ooSjRHM4gqWdjaJtOLE=";
     };
+  }
+  # snail (GPU renderer)
+  {
+    name = "snail-0.0.1-vw75SHDqUwCCEUXoBB6JfR3kuh-JN3dkI71uzzF5KpPI";
+    path = snail-src;
   }
 
   # --- Transitive dependencies ---

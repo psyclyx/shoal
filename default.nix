@@ -1,2 +1,7 @@
-{ pkgs ? import (import ./npins).nixpkgs {} }:
-pkgs.callPackage ./package.nix {}
+let
+  sources = import ./npins;
+  pkgs = import sources.nixpkgs {};
+in
+pkgs.callPackage ./package.nix {
+  snail-src = sources.snail;
+}

@@ -13,6 +13,7 @@
   libxkbcommon,
   janet,
   zig_0_15,
+  snail-src ? null,
 }:
 
 stdenv.mkDerivation (finalAttrs: {
@@ -21,7 +22,9 @@ stdenv.mkDerivation (finalAttrs: {
 
   src = ./.;
 
-  deps = callPackage ./build.zig.zon.nix {};
+  deps = callPackage ./build.zig.zon.nix {
+    inherit snail-src;
+  };
 
   nativeBuildInputs = [
     pkg-config
