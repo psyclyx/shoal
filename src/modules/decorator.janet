@@ -92,6 +92,7 @@
   {:render-to-shm {:view (keyword (string "deco-" id))
                     :width (get params "width" 100)
                     :height (get params "height" DECO-H)
+                    :stride (get params "stride")
                     :path (get params "shm-path" "")}})
 
 (reg-event-handler :decoration/create

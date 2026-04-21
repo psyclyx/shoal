@@ -683,11 +683,12 @@ fn renderSingleShm(spec: janet.Janet) void {
         return;
     }
 
-    // Parse spec: {:view :deco-1 :width 800 :height 28 :path "/run/user/.../deco-1"}
+    // Parse spec: {:view :deco-1 :width 800 :height 28 :stride 3216 :path "/run/user/.../deco-1"}
     const view_val = janet.janetGet(spec, janet.kw("view"));
     const path_val = janet.janetGet(spec, janet.kw("path"));
     const width = parseJanetUint(spec, "width") orelse return;
     const height = parseJanetUint(spec, "height") orelse return;
+    const stride = parseJanetUint(spec, "stride") orelse (width * 4);
 
     if (jc.janet_checktype(path_val, jc.JANET_STRING) == 0) {
         log.warn("render-to-shm: missing :path", .{});
@@ -698,6 +699,12 @@ fn renderSingleShm(spec: janet.Janet) void {
     const path = path_ptr[0..path_len];
 
     if (width == 0 or height == 0) return;
+    const src_stride: usize = @as(usize, width) * 4;
+    const dst_stride: usize = stride;
+    if (dst_stride < src_stride) {
+        log.warn("render-to-shm: stride {} smaller than width {}", .{ stride, width });
+        return;
+    }
 
     // Create FBO
     var fbo: c.GLuint = 0;
@@ -734,9 +741,9 @@ fn renderSingleShm(spec: janet.Janet) void {
     hiccup_mod.endPass();
     renderer.end();
 
-    // Read pixels into shared buffer
-    const stride = width * 4;
-    const size = stride * height;
+    // GL readback is tightly packed; the shared buffer may have wider rows.
+    const pixel_size = src_stride * @as(usize, height);
+    const size = dst_stride * @as(usize, height);
 
     // Open shared buffer and mmap it read-write
     const file = std.fs.openFileAbsolute(path, .{ .mode = .read_write }) catch |err| {
@@ -755,7 +762,7 @@ fn renderSingleShm(spec: janet.Janet) void {
     defer std.posix.munmap(mapped);
 
     // Read into temp buffer (some GL drivers don't like writing to mmap)
-    const pixels = std.heap.page_allocator.alloc(u8, size) catch {
+    const pixels = std.heap.page_allocator.alloc(u8, pixel_size) catch {
         c.glDeleteFramebuffers(1, &fbo);
         c.glDeleteRenderbuffers(1, &rbo);
         return;
@@ -766,10 +773,10 @@ fn renderSingleShm(spec: janet.Janet) void {
     // Copy to mmap with row flip (GL bottom-up → Wayland top-down)
     // and RGBA → BGRA conversion (Wayland ARGB8888 = BGRA in memory)
     for (0..height) |row| {
-        const src_row = (height - 1 - row) * stride;
-        const dst_row = row * stride;
+        const src_row = (@as(usize, height) - 1 - row) * src_stride;
+        const dst_row = row * dst_stride;
         var col: usize = 0;
-        while (col < stride) : (col += 4) {
+        while (col < src_stride) : (col += 4) {
             mapped[dst_row + col + 0] = pixels[src_row + col + 2]; // B
             mapped[dst_row + col + 1] = pixels[src_row + col + 1]; // G
             mapped[dst_row + col + 2] = pixels[src_row + col + 0]; // R
