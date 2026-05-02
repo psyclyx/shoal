@@ -21,9 +21,12 @@ pub const makeEventArgs = jutil.makeEventArgs;
 pub const janetIndexedView = jutil.janetIndexedView;
 pub const IndexedView = jutil.IndexedView;
 
-const boot_source = @embedFile("../framework/shoal.janet");
-const json_source = @embedFile("../framework/json.janet");
-const preset = @import("../presets/tidepool.zig");
+// Core framework - always embedded
+const framework_source = @embedFile("../lib/core/framework.janet");
+const json_source = @embedFile("../lib/core/json.janet");
+
+// Dmenu mode - embedded for standalone operation
+const dmenu_source = @embedFile("../lib/module/dmenu.janet");
 
 /// Initialize the Janet VM. Must be called before any other Janet operations.
 pub fn init() !void {
@@ -155,8 +158,10 @@ pub const Dispatch = struct {
     fn_set_current_db: Janet = undefined,
     fn_set_current_output: Janet = undefined,
     fn_get_view_fn: Janet = undefined,
+    fn_get_all_surface_configs: Janet = undefined,
+    fn_set_theme: Janet = undefined,
 
-    /// Load the shoal boot file into a fresh environment. Sets up registries.
+    /// Load the shoal framework into a fresh environment. Sets up registries.
     pub fn initBoot(self: *Dispatch, theme: theme_mod.Theme, dmenu_mode: bool) !void {
         // Set global dispatch pointer for Janet C functions
         global_dispatch = self;
@@ -168,12 +173,12 @@ pub const Dispatch = struct {
         // Register C functions before evaluating boot source
         c.janet_cfuns(self.env, null, &anim_cfun);
 
-        // Evaluate boot source
+        // Evaluate framework source
         var out: Janet = undefined;
         const status = c.janet_dostring(
             self.env,
-            boot_source.ptr,
-            "shoal.janet",
+            framework_source.ptr,
+            "framework.janet",
             &out,
         );
         if (status != 0) return error.BootFailed;
@@ -193,9 +198,6 @@ pub const Dispatch = struct {
 
         if (dmenu_mode) {
             self.loadDmenuModule();
-        } else {
-            // Load modules: user config dir takes precedence over embedded defaults.
-            self.loadModules();
         }
 
         // Cache lookup functions from the environment
@@ -206,11 +208,13 @@ pub const Dispatch = struct {
         self.fn_set_current_db = envLookup(self.env, "set-current-db") orelse return error.BootMissingSetCurrentDb;
         self.fn_set_current_output = envLookup(self.env, "set-current-output") orelse return error.BootMissingSetCurrentOutput;
         self.fn_get_view_fn = envLookup(self.env, "get-view-fn") orelse return error.BootMissingGetViewFn;
+        self.fn_get_all_surface_configs = envLookup(self.env, "get-all-surface-configs") orelse return error.BootMissingGetSurfaceConfigs;
+        self.fn_set_theme = envLookup(self.env, "set-theme") orelse return error.BootMissingSetTheme;
 
         // Initialize the hiccup walker (pre-intern keywords)
         hiccup.init();
 
-        log.info("shoal boot loaded, dispatch ready", .{});
+        log.info("shoal framework loaded, dispatch ready", .{});
     }
 
     /// Enqueue an event for processing. The event is GC-rooted until dequeued.
@@ -1065,7 +1069,7 @@ pub const Dispatch = struct {
     }
 
     /// Try to load a Janet file from disk. Returns true if loaded successfully.
-    fn loadFileFromDisk(self: *Dispatch, path: []const u8) bool {
+    pub fn loadFileFromDisk(self: *Dispatch, path: []const u8) bool {
         if (path.len == 0 or path.len >= 4095) return false;
 
         var path_z: [4096]u8 = undefined;
@@ -1091,28 +1095,111 @@ pub const Dispatch = struct {
         return true;
     }
 
-    /// Load modules: user config dir overrides embedded defaults.
-    ///
-    /// If ~/.config/shoal/ contains .janet files, those are loaded alphabetically
-    /// and no embedded modules load. This gives the user full control.
-    ///
-    /// If the config dir is empty or absent, embedded defaults load:
-    /// the embedded preset modules.
-    fn loadModules(self: *Dispatch) void {
-        // Try to find and load user modules
-        const config_dir = self.resolveAndLoadUserModules();
-        if (config_dir) return;
+    /// Set up the Janet load path: config dirs first, then sholib.
+    /// Called by main.zig after initBoot.
+    pub fn setupLoadPath(self: *Dispatch, config_paths: []const []const u8) void {
+        // Build load path array in Janet
+        const load_path_arr = c.janet_array(8);
 
-        // No user modules — load embedded preset
-        log.info("no user modules found, loading embedded defaults ({s})", .{preset.name});
-        inline for (preset.modules) |mod| {
-            _ = self.loadSource(mod.source.ptr, mod.name);
+        // Add config file directories (in reverse order so first is highest priority)
+        for (config_paths) |path| {
+            // Extract directory from path
+            if (std.fs.path.dirname(path)) |dir| {
+                const dir_janet = c.janet_string(@ptrCast(dir.ptr), @intCast(dir.len));
+                c.janet_array_push(load_path_arr, c.janet_wrap_string(dir_janet));
+            }
         }
+
+        // Add user config dir
+        if (std.posix.getenv("XDG_CONFIG_HOME")) |xdg| {
+            var buf: [512]u8 = undefined;
+            if (std.fmt.bufPrint(&buf, "{s}/shoal", .{xdg})) |config_dir| {
+                const dir_janet = c.janet_string(@ptrCast(config_dir.ptr), @intCast(config_dir.len));
+                c.janet_array_push(load_path_arr, c.janet_wrap_string(dir_janet));
+            } else |_| {}
+        } else if (std.posix.getenv("HOME")) |home| {
+            var buf: [512]u8 = undefined;
+            if (std.fmt.bufPrint(&buf, "{s}/.config/shoal", .{home})) |config_dir| {
+                const dir_janet = c.janet_string(@ptrCast(config_dir.ptr), @intCast(config_dir.len));
+                c.janet_array_push(load_path_arr, c.janet_wrap_string(dir_janet));
+            } else |_| {}
+        }
+
+        // Add sholib (installed stdlib)
+        const sholib = "/usr/share/shoal/lib";
+        const sholib_janet = c.janet_string(@ptrCast(sholib.ptr), @intCast(sholib.len));
+        c.janet_array_push(load_path_arr, c.janet_wrap_string(sholib_janet));
+
+        // Call (set-load-path) in Janet
+        const set_load_path_fn = envLookup(self.env, "set-load-path") orelse {
+            log.warn("set-load-path not found in environment", .{});
+            return;
+        };
+        _ = self.pcall(set_load_path_fn, &.{c.janet_wrap_array(load_path_arr)});
+
+        log.info("load path configured", .{});
+    }
+
+    /// Load user config files from ~/.config/shoal/ (auto-discovered).
+    /// Returns number of files loaded.
+    pub fn loadUserConfig(self: *Dispatch) usize {
+        var dir_path_buf: [4096]u8 = undefined;
+        const dir_path = blk: {
+            if (std.posix.getenv("XDG_CONFIG_HOME")) |xdg| {
+                break :blk std.fmt.bufPrint(&dir_path_buf, "{s}/shoal", .{xdg}) catch return 0;
+            }
+            if (std.posix.getenv("HOME")) |home| {
+                break :blk std.fmt.bufPrint(&dir_path_buf, "{s}/.config/shoal", .{home}) catch return 0;
+            }
+            return 0;
+        };
+
+        // Open the directory
+        var dir = std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch return 0;
+        defer dir.close();
+
+        // Collect .janet filenames, sort alphabetically
+        var names: [64][]const u8 = undefined;
+        var name_storage: [64][256]u8 = undefined;
+        var count: usize = 0;
+
+        var iter = dir.iterate();
+        while (iter.next() catch null) |entry| {
+            if (entry.kind != .file) continue;
+            if (!std.mem.endsWith(u8, entry.name, ".janet")) continue;
+            if (count >= 64) break;
+            const len = @min(entry.name.len, 255);
+            @memcpy(name_storage[count][0..len], entry.name[0..len]);
+            names[count] = name_storage[count][0..len];
+            count += 1;
+        }
+
+        if (count == 0) return 0;
+
+        // Sort alphabetically
+        std.mem.sortUnstable([]const u8, names[0..count], {}, struct {
+            fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+                return std.mem.order(u8, a, b) == .lt;
+            }
+        }.lessThan);
+
+        // Load each file
+        var path_buf: [4096]u8 = undefined;
+        var loaded: usize = 0;
+        for (names[0..count]) |name| {
+            const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, name }) catch continue;
+            if (self.loadFileFromDisk(full_path)) {
+                loaded += 1;
+            }
+        }
+
+        log.info("loaded {d} user config file(s) from {s}", .{ loaded, dir_path });
+        return loaded;
     }
 
     /// Load only the dmenu module (skips all other modules).
     pub fn loadDmenuModule(self: *Dispatch) void {
-        _ = self.loadSource(preset.dmenu_source.ptr, "dmenu.janet");
+        _ = self.loadSource(dmenu_source.ptr, "dmenu.janet");
     }
 
     /// Inject items into the Janet db for dmenu mode.
@@ -1132,59 +1219,17 @@ pub const Dispatch = struct {
         }
     }
 
-    /// Try to open the user config dir and load all .janet files.
-    /// Returns true if any user modules were loaded.
-    fn resolveAndLoadUserModules(self: *Dispatch) bool {
-        // Resolve config dir path
-        var dir_path_buf: [4096]u8 = undefined;
-        const dir_path = blk: {
-            if (std.posix.getenv("XDG_CONFIG_HOME")) |xdg| {
-                break :blk std.fmt.bufPrint(&dir_path_buf, "{s}/shoal", .{xdg}) catch return false;
-            }
-            if (std.posix.getenv("HOME")) |home| {
-                break :blk std.fmt.bufPrint(&dir_path_buf, "{s}/.config/shoal", .{home}) catch return false;
-            }
-            return false;
-        };
+    /// Get all registered surface configs from Janet.
+    /// Returns an array of surface config tables.
+    pub fn getSurfaceConfigs(self: *Dispatch) ?Janet {
+        return self.pcall(self.fn_get_all_surface_configs, &.{});
+    }
 
-        // Open the directory
-        var dir = std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch return false;
-        defer dir.close();
-
-        // Collect .janet filenames, sort alphabetically
-        var names: [64][]const u8 = undefined;
-        var name_storage: [64][256]u8 = undefined;
-        var count: usize = 0;
-
-        var iter = dir.iterate();
-        while (iter.next() catch null) |entry| {
-            if (entry.kind != .file) continue;
-            if (!std.mem.endsWith(u8, entry.name, ".janet")) continue;
-            if (count >= 64) break;
-            const len = @min(entry.name.len, 255);
-            @memcpy(name_storage[count][0..len], entry.name[0..len]);
-            names[count] = name_storage[count][0..len];
-            count += 1;
-        }
-
-        if (count == 0) return false;
-
-        // Sort alphabetically
-        std.mem.sortUnstable([]const u8, names[0..count], {}, struct {
-            fn lessThan(_: void, a: []const u8, b: []const u8) bool {
-                return std.mem.order(u8, a, b) == .lt;
-            }
-        }.lessThan);
-
-        // Load each file
-        var path_buf: [4096]u8 = undefined;
-        for (names[0..count]) |name| {
-            const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, name }) catch continue;
-            _ = self.loadFileFromDisk(full_path);
-        }
-
-        log.info("loaded {d} user module(s) from {s}", .{ count, dir_path });
-        return true;
+    /// Get the view function for a surface by name (or default if nil).
+    pub fn getSurfaceViewFn(self: *Dispatch, name: ?Janet) ?Janet {
+        const view_fn = self.pcall(self.fn_get_view_fn, &.{if (name) |n| n else c.janet_wrap_nil()}) orelse return null;
+        if (c.janet_checktype(view_fn, c.JANET_NIL) != 0) return null;
+        return view_fn;
     }
 
     pub fn deinitDispatch(self: *Dispatch) void {

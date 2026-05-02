@@ -5,6 +5,7 @@ let
 
   hasStylix = (config ? stylix) && (config.stylix.enable or false);
 
+  # Build config.json for a single config (theme + surfaces)
   surfaceType = lib.types.submodule {
     options = {
       layer = lib.mkOption {
@@ -65,18 +66,146 @@ let
     };
   };
 
-  # Build config JSON from theme + surfaces
-  surfaceList = lib.mapAttrsToList (_: surf: {
-    inherit (surf)
-      layer width height exclusive_zone margin namespace
-      keyboard_interactivity;
-    anchor = lib.filterAttrs (_: v: v) surf.anchor;
-  }) cfg.surfaces;
+  systemdUnitType = lib.types.submodule {
+    options = {
+      enable = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = "Whether to create and start the systemd service.";
+      };
 
-  configJson = builtins.toJSON (
-    { surfaces = surfaceList; }
-    // lib.optionalAttrs (cfg.theme != {}) { theme = cfg.theme; }
-  );
+      after = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [ "graphical-session.target" ];
+        description = "Units to start after.";
+      };
+
+      partOf = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [ "graphical-session.target" ];
+        description = "Units this is part of.";
+      };
+
+      wants = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [ "graphical-session.target" ];
+        description = "Units to want.";
+      };
+
+      requisite = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [];
+        description = "Units required to be running.";
+      };
+
+      environment = lib.mkOption {
+        type = lib.types.attrsOf lib.types.str;
+        default = {};
+        description = "Environment variables for the service.";
+      };
+
+      restart = lib.mkOption {
+        type = lib.types.enum [ "no" "on-success" "on-failure" "on-abnormal" "on-abort" "always" ];
+        default = "on-failure";
+      };
+
+      restartSec = lib.mkOption {
+        type = lib.types.ints.unsigned;
+        default = 2;
+        description = "Seconds to wait before restarting.";
+      };
+    };
+  };
+
+  configType = lib.types.submodule ({ name, ... }: {
+    options = {
+      enable = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = "Whether to enable this shoal config.";
+      };
+
+      modules = lib.mkOption {
+        type = lib.types.attrsOf lib.types.lines;
+        default = {};
+        description = ''
+          Janet modules to write to ~/.config/shoal/<name>/.
+          Each key becomes a filename (e.g. "bar" → bar.janet).
+          Files are loaded alphabetically.
+        '';
+        example = {
+          "10-compositor" = "(use /compositor/sway)";
+          "20-bar" = "(reg-view (fn [] [:row ...]))";
+        };
+      };
+
+      theme = lib.mkOption {
+        type = lib.types.attrsOf (lib.types.either lib.types.str lib.types.ints.positive);
+        default = {};
+        description = "Base16 theme colors and font config.";
+      };
+
+      surfaces = lib.mkOption {
+        type = lib.types.attrsOf surfaceType;
+        default = {};
+        description = "Named surfaces. Each surface creates a layer-shell surface on all outputs.";
+      };
+
+      systemd = lib.mkOption {
+        type = systemdUnitType;
+        default = {};
+        description = "Systemd unit configuration.";
+      };
+    };
+  });
+
+  # Generate the xdg.configFile entries for a single config
+  mkConfigFiles = name: conf: let
+    configDir = "shoal/${name}";
+  in lib.mkMerge [
+    # Janet modules
+    (lib.mkIf (conf.modules != {}) (lib.mapAttrs' (modName: text:
+      lib.nameValuePair "${configDir}/${modName}.janet" {
+        inherit text;
+        onChange = "systemctl restart --user shoal-${name}.service || true";
+      }
+    ) conf.modules))
+
+    # config.json for theme/surfaces
+    (lib.mkIf (conf.surfaces != {} || conf.theme != {}) {
+      "${configDir}/config.json".text = let
+        surfaceList = lib.mapAttrsToList (_: surf: {
+          inherit (surf)
+            layer width height exclusive_zone margin namespace
+            keyboard_interactivity;
+          anchor = lib.filterAttrs (_: v: v) surf.anchor;
+        }) conf.surfaces;
+      in builtins.toJSON (
+        { surfaces = surfaceList; }
+        // lib.optionalAttrs (conf.theme != {}) { theme = conf.theme; }
+      );
+    })
+  ];
+
+  # Generate systemd service for a config
+  mkSystemService = name: conf: lib.nameValuePair "shoal-${name}" {
+    Unit = {
+      Description = "Shoal - ${name}";
+      PartOf = conf.systemd.partOf;
+      After = conf.systemd.after ++ (lib.optional (name != "default" && config.programs.shoal.configs ? default) "shoal-default.service");
+      Wants = conf.systemd.wants;
+      Requisite = conf.systemd.requisite;
+    };
+
+    Service = {
+      ExecStart = "${lib.getExe cfg.package} ${config.xdg.configHome}/shoal/${name}/main.janet";
+      Environment = lib.mapAttrsToList (k: v: "${k}=${v}") conf.systemd.environment;
+      Restart = conf.systemd.restart;
+      RestartSec = conf.systemd.restartSec;
+    };
+
+    Install.WantedBy = lib.mkIf conf.systemd.enable [ "graphical-session.target" ];
+  };
 
 in {
   options.programs.shoal = {
@@ -86,75 +215,75 @@ in {
       default = pkgs.shoal;
     };
 
-    surfaces = lib.mkOption {
-      type = lib.types.attrsOf surfaceType;
+    configs = lib.mkOption {
+      type = lib.types.attrsOf configType;
       default = {};
-      description = "Named surfaces. Each surface creates a layer-shell surface on all outputs.";
+      description = ''
+        Named shoal configurations. Each config gets:
+        - ~/.config/shoal/<name>/ directory with modules
+        - systemd user service: shoal-<name>.service
+
+        Use the "default" config name for the main bar.
+      '';
+      example = {
+        default = {
+          modules.bar = "(reg-view (fn [] [:row ...]))";
+        };
+        osd = {
+          modules.osd = "(reg-surface :osd ...)";
+          systemd.after = [ "graphical-session.target" "shoal-default.service" ];
+        };
+      };
+    };
+
+    # Legacy options for backwards compatibility
+    modules = lib.mkOption {
+      type = lib.types.attrsOf lib.types.lines;
+      default = {};
+      description = "Legacy: Janet modules for default config. Use configs.default.modules instead.";
     };
 
     theme = lib.mkOption {
       type = lib.types.attrsOf (lib.types.either lib.types.str lib.types.ints.positive);
       default = {};
-      description = "Base16 theme colors and font config.";
+      description = "Legacy: Theme for default config. Use configs.default.theme instead.";
     };
 
-    modules = lib.mkOption {
-      type = lib.types.attrsOf lib.types.lines;
+    surfaces = lib.mkOption {
+      type = lib.types.attrsOf surfaceType;
       default = {};
-      description = ''
-        Janet modules to write to ~/.config/shoal/.
-        Each key becomes a filename (e.g. "bar" → bar.janet).
-        When any modules are present, embedded defaults do not load —
-        the user has full control. Files are loaded alphabetically.
-      '';
-      example = {
-        "10-tidepool" = "(reg-event-handler :init ...)";
-        "20-bar" = "(reg-view (fn [] [:row ...]))";
-      };
+      description = "Legacy: Surfaces for default config. Use configs.default.surfaces instead.";
     };
   };
 
   config = lib.mkIf cfg.enable (lib.mkMerge [
     {
       home.packages = [ cfg.package ];
-
-      systemd.user.services.shoal = {
-        Unit = {
-          Description = "Shoal wayland shell";
-          PartOf = [ "graphical-session.target" ];
-          After = [ "graphical-session.target" "tidepool.service" ];
-        };
-        Service = {
-          ExecStart = lib.getExe cfg.package;
-          Restart = "on-failure";
-          RestartSec = 2;
-        };
-        Install.WantedBy = [ "graphical-session.target" ];
-      };
-
     }
 
-    # Generate config file when surfaces or theme are configured
-    (lib.mkIf (cfg.surfaces != {} || cfg.theme != {}) {
-      xdg.configFile."shoal/config.json" = {
-        text = configJson;
-        onChange = "systemctl restart --user shoal.service || true";
+    # Legacy support: merge into configs.default
+    (lib.mkIf (cfg.modules != {} || cfg.theme != {} || cfg.surfaces != {}) {
+      programs.shoal.configs.default = {
+        modules = cfg.modules;
+        theme = cfg.theme;
+        surfaces = cfg.surfaces;
       };
     })
 
-    # Generate user Janet modules
-    (lib.mkIf (cfg.modules != {}) {
-      xdg.configFile = lib.mapAttrs' (name: text:
-        lib.nameValuePair "shoal/${name}.janet" {
-          inherit text;
-          onChange = "systemctl restart --user shoal.service || true";
-        }
-      ) cfg.modules;
-    })
+    # Generate config files for all configs
+    {
+      xdg.configFile = lib.mkMerge (lib.mapAttrsToList mkConfigFiles cfg.configs);
+    }
 
-    # Stylix integration
+    # Generate systemd services for enabled configs
+    {
+      systemd.user.services = lib.mapAttrs' mkSystemService
+        (lib.filterAttrs (_: conf: conf.enable && conf.systemd.enable) cfg.configs);
+    }
+
+    # Stylix integration (applies to default config)
     (lib.mkIf hasStylix {
-      programs.shoal.theme = let
+      programs.shoal.configs.default.theme = let
         colors = config.lib.stylix.colors;
         fonts = config.stylix.fonts;
         opacity = config.stylix.opacity.desktop;

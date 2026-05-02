@@ -4,6 +4,7 @@ const zwlr = @import("wayland").client.zwlr;
 const clay = @import("clay");
 const config_mod = @import("engine/config.zig");
 const Config = config_mod.Config;
+const theme_mod = @import("engine/theme.zig");
 const Renderer = @import("engine/renderer.zig").Renderer;
 const TextRenderer = @import("engine/text.zig").TextRenderer;
 const Layout = @import("engine/layout.zig").Layout;
@@ -27,6 +28,40 @@ const log = std.log.scoped(.shoal);
 
 const MAX_OUTPUTS = 8;
 const MAX_SURFACES = 16; // MAX_OUTPUTS static + dynamic
+
+// CLI args
+const Args = struct {
+    config_paths: []const []const u8,
+    dmenu: bool = false,
+    dmenu_prompt: []const u8 = "",
+};
+
+fn parseArgs(allocator: std.mem.Allocator) !Args {
+    var args = try std.process.argsWithAllocator(allocator);
+    defer args.deinit();
+
+    var config_paths = try std.ArrayList([]const u8).initCapacity(allocator, 8);
+    var dmenu = false;
+    var dmenu_prompt: []const u8 = "";
+
+    _ = args.skip(); // skip program name
+
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--dmenu")) {
+            dmenu = true;
+        } else if (std.mem.eql(u8, arg, "-p")) {
+            dmenu_prompt = args.next() orelse "";
+        } else if (!std.mem.startsWith(u8, arg, "-")) {
+            try config_paths.append(allocator, arg);
+        }
+    }
+
+    return .{
+        .config_paths = try config_paths.toOwnedSlice(allocator),
+        .dmenu = dmenu,
+        .dmenu_prompt = dmenu_prompt,
+    };
+}
 
 // ---------------------------------------------------------------------------
 // Surface — per-output layer shell surface with its own EGL window
@@ -140,7 +175,6 @@ var egl_context: c.EGLContext = c.EGL_NO_CONTEXT;
 var egl_config: c.EGLConfig = null;
 
 var running = true;
-var cfg: Config = .{};
 
 // Subsystems
 var renderer: Renderer = undefined;
@@ -149,26 +183,56 @@ var layout: Layout = undefined;
 var frame_clock: animation.FrameClock = animation.FrameClock.init();
 var dispatch: janet.Dispatch = undefined;
 
+// Default surface config (for dmenu mode or when no surfaces registered)
+const DefaultSurfaceConfig = struct {
+    layer: config_mod.Config.Layer = .top,
+    anchor: config_mod.Config.Anchor = .{ .bottom = true, .left = true, .right = true },
+    width: u32 = 0,
+    height: u32 = 0,
+    exclusive_zone: i32 = 0,
+    margin: config_mod.Config.Margin = .{},
+    namespace: [:0]const u8 = "shoal",
+    keyboard_interactivity: config_mod.Config.KeyboardInteractivity = .none,
+};
+var default_surface_config: DefaultSurfaceConfig = .{};
+
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
 
-    var config_result = config_mod.load(allocator);
-    defer config_result.deinit();
-    cfg = config_result.config;
-    const dmenu = config_result.dmenu;
+    // Parse CLI args
+    const cli_args = parseArgs(allocator) catch |err| {
+        log.err("failed to parse args: {}", .{err});
+        return err;
+    };
 
     // Initialize the Janet VM and reactive dispatch
     try janet.init();
     defer janet.deinit();
 
     dispatch = janet.createDispatch();
-    try dispatch.initBoot(cfg.theme, dmenu.enabled);
+    try dispatch.initBoot(theme_mod.default(), cli_args.dmenu);
     dispatch.initFileReader();
     defer dispatch.deinitFileReader();
     defer dispatch.deinitDispatch();
 
+    // Set up load path: config dirs, then sholib
+    dispatch.setupLoadPath(cli_args.config_paths);
+
+    // Load config files
+    if (cli_args.dmenu) {
+        dispatch.loadDmenuModule();
+    } else if (cli_args.config_paths.len > 0) {
+        // Load specified config files
+        for (cli_args.config_paths) |path| {
+            _ = dispatch.loadFileFromDisk(path);
+        }
+    } else {
+        // Auto-discover config files in ~/.config/shoal/
+        _ = dispatch.loadUserConfig();
+    }
+
     // In dmenu mode: read stdin items and inject into db
-    if (dmenu.enabled) {
+    if (cli_args.dmenu) {
         var stdin_buf: [65536]u8 = undefined;
         const bytes = std.fs.File.stdin().readAll(&stdin_buf) catch 0;
         const content = stdin_buf[0..bytes];
@@ -184,12 +248,21 @@ pub fn main() !void {
             }
         }
 
-        dispatch.injectDmenuItems(item_ptrs[0..item_count], dmenu.prompt);
+        dispatch.injectDmenuItems(item_ptrs[0..item_count], cli_args.dmenu_prompt);
     }
 
     // Dispatch :init — all modules register :init handlers (composed automatically)
     dispatch.enqueue(janet.makeEvent("init"));
     _ = dispatch.processQueue();
+
+    // Get surface configs from Janet
+    const surface_configs = dispatch.getSurfaceConfigs();
+    const has_surfaces = surface_configs != null and janet.c.janet_checktype(surface_configs.?, janet.c.JANET_ARRAY) != 0;
+
+    // If no surfaces registered and not dmenu mode, create a default surface
+    if (!has_surfaces and !cli_args.dmenu) {
+        log.info("no surfaces registered, creating default surface", .{});
+    }
 
     const display = try wl.Display.connect(null);
     defer display.disconnect();
@@ -209,34 +282,49 @@ pub fn main() !void {
 
     if (surface_count == 0) return error.NoOutputs;
 
-    if (dmenu.enabled) {
+    // Create surfaces
+    if (cli_args.dmenu) {
         // dmenu mode: single surface, compositor picks the focused output
         surfaces[0] = .{};
         surface_count = 1;
-    }
+        createLayerSurface(&surfaces[0], comp, ls, null, default_surface_config);
+    } else if (has_surfaces) {
+        // Create surfaces from Janet registry
+        const configs_arr = janet.c.janet_unwrap_array(surface_configs.?);
+        const count = configs_arr.*.count;
+        for (0..@as(usize, @intCast(count))) |i| {
+            if (surface_count >= MAX_SURFACES) break;
+            const cfg_val = configs_arr.*.data[@intCast(i)];
+            if (janet.c.janet_checktype(cfg_val, janet.c.JANET_TABLE) == 0) continue;
 
-    // Create layer surfaces for each output
-    for (surfaces[0..surface_count]) |*surf| {
-        surf.wl_surface = try comp.createSurface();
-        surf.layer_surface = try ls.getLayerSurface(
-            surf.wl_surface.?,
-            if (dmenu.enabled) null else surf.output,
-            wlLayer(cfg.layer),
-            cfg.namespace,
-        );
+            // Parse config from Janet
+            const surf_cfg = parseJanetSurfaceConfig(cfg_val);
 
-        const ls_surf = surf.layer_surface.?;
-        // height=0 means auto-size, but layer shell rejects 0 unless
-        // anchored to both edges. Use a reasonable initial height.
-        const initial_h: u32 = if (cfg.height == 0) 48 else cfg.height;
-        ls_surf.setSize(cfg.width, initial_h);
-        ls_surf.setAnchor(wlAnchor(cfg.anchor));
-        ls_surf.setExclusiveZone(cfg.exclusive_zone);
-        ls_surf.setMargin(cfg.margin.top, cfg.margin.right, cfg.margin.bottom, cfg.margin.left);
-        ls_surf.setKeyboardInteractivity(wlKeyboardInteractivity(cfg.keyboard_interactivity));
-        ls_surf.setListener(*Surface, layerSurfaceListener, surf);
+            // For :default surface, create on all outputs
+            if (janet.c.janet_checktype(janet.janetGet(cfg_val, janet.kw("name")), janet.c.JANET_KEYWORD) != 0) {
+                const name = janet.c.janet_unwrap_keyword(janet.janetGet(cfg_val, janet.kw("name")));
+                const name_str = std.mem.span(name);
+                if (std.mem.eql(u8, name_str, "default")) {
+                    // Create on all outputs
+                    for (surfaces[0..surface_count]) |*surf| {
+                        if (surf.output != null) {
+                            createLayerSurface(surf, comp, ls, surf.output, surf_cfg);
+                        }
+                    }
+                    continue;
+                }
+            }
 
-        surf.wl_surface.?.commit();
+            // Named surface: single output (compositor chooses)
+            surfaces[surface_count] = .{};
+            createLayerSurface(&surfaces[surface_count], comp, ls, null, surf_cfg);
+            surface_count += 1;
+        }
+    } else {
+        // Default surface on all outputs
+        for (surfaces[0..surface_count]) |*surf| {
+            createLayerSurface(surf, comp, ls, surf.output, default_surface_config);
+        }
     }
 
     // Initialize EGL
@@ -313,9 +401,10 @@ pub fn main() !void {
     text_renderer = try TextRenderer.init(allocator);
     defer text_renderer.deinit();
 
-    _ = text_renderer.loadFont(cfg.theme.font_family, cfg.theme.font_size) catch |err| blk: {
-        log.warn("failed to load font \"{s}\": {}, falling back to monospace", .{ cfg.theme.font_family, err });
-        break :blk text_renderer.loadFont("monospace", cfg.theme.font_size) catch return error.FontLoadFailed;
+    // Load default font (theme can be customized in Janet)
+    _ = text_renderer.loadFont("monospace", 14) catch |err| {
+        log.err("failed to load font: {}", .{err});
+        return error.FontLoadFailed;
     };
 
     layout = try Layout.init(allocator, &text_renderer, &renderer);
@@ -584,7 +673,7 @@ fn createDynamicSurface(spec: janet.Janet) void {
         wl_surface,
         null, // compositor chooses output
         wlLayer(layer),
-        cfg.namespace,
+        "shoal",
     ) catch {
         log.warn("surface create: get_layer_surface failed", .{});
         wl_surface.destroy();
@@ -864,6 +953,45 @@ fn janetIntField(collection: janet.Janet, key: [:0]const u8) i32 {
     return @intFromFloat(janet.c.janet_unwrap_number(val));
 }
 
+fn parseJanetSurfaceConfig(spec: janet.Janet) DefaultSurfaceConfig {
+    return .{
+        .layer = parseJanetLayer(spec) orelse .top,
+        .anchor = parseJanetAnchor(spec),
+        .width = parseJanetUint(spec, "width") orelse 0,
+        .height = parseJanetUint(spec, "height") orelse 0,
+        .exclusive_zone = parseJanetInt(spec, "exclusive-zone") orelse 0,
+        .margin = parseJanetMargin(spec),
+        .keyboard_interactivity = parseJanetKI(spec) orelse .none,
+    };
+}
+
+fn createLayerSurface(
+    surf: *Surface,
+    comp: *wl.Compositor,
+    ls: *zwlr.LayerShellV1,
+    output: ?*wl.Output,
+    cfg: DefaultSurfaceConfig,
+) void {
+    surf.wl_surface = comp.createSurface() catch return;
+    surf.layer_surface = ls.getLayerSurface(
+        surf.wl_surface.?,
+        output,
+        wlLayer(cfg.layer),
+        cfg.namespace,
+    ) catch return;
+
+    const ls_surf = surf.layer_surface.?;
+    const initial_h: u32 = if (cfg.height == 0) 48 else cfg.height;
+    ls_surf.setSize(cfg.width, initial_h);
+    ls_surf.setAnchor(wlAnchor(cfg.anchor));
+    ls_surf.setExclusiveZone(cfg.exclusive_zone);
+    ls_surf.setMargin(cfg.margin.top, cfg.margin.right, cfg.margin.bottom, cfg.margin.left);
+    ls_surf.setKeyboardInteractivity(wlKeyboardInteractivity(cfg.keyboard_interactivity));
+    ls_surf.setListener(*Surface, layerSurfaceListener, surf);
+
+    surf.wl_surface.?.commit();
+}
+
 /// Render a frame for a surface. Returns true on success, false on failure.
 fn renderSurface(surf: *Surface) bool {
     if (!surf.configured or surf.egl_surface == c.EGL_NO_SURFACE) return false;
@@ -960,14 +1088,14 @@ fn renderSurface(surf: *Surface) bool {
     renderer.end();
     _ = c.eglSwapBuffers(egl_display, surf.egl_surface);
 
-    // Auto-size: ensure surface fits content. Config height acts as a minimum.
+    // Auto-size: ensure surface fits content.
     if (!surf.is_dynamic) {
         const content_h = @as(u32, @intFromFloat(@ceil(layout.content_height)));
-        const target_h = @max(content_h, cfg.height);
+        const target_h = @max(content_h, default_surface_config.height);
         if (target_h > 0 and target_h != surf.height) {
             if (surf.layer_surface) |ls_surf| {
                 ls_surf.setSize(surf.width, target_h);
-                const margin_v: u32 = @intCast(@max(0, cfg.margin.top) + @max(0, cfg.margin.bottom));
+                const margin_v: u32 = @intCast(@max(0, default_surface_config.margin.top) + @max(0, default_surface_config.margin.bottom));
                 ls_surf.setExclusiveZone(@intCast(target_h + margin_v));
                 surf.wl_surface.?.commit();
             }

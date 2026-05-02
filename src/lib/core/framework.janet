@@ -1,7 +1,43 @@
-# shoal — reactive event loop registration API
+# shoal — reactive surface runtime
 #
-# Registries: event handlers, cofx injectors, fx executors, subscriptions.
+# Core primitives for building Wayland surfaces with Janet.
+# Registries: event handlers, cofx injectors, fx executors, subscriptions, surfaces.
 # All tables are module-level. Zig reads these directly to dispatch events.
+
+# --- Load path ---
+
+# Search path for (use). Each entry is a directory.
+# Populated by Zig runtime with config dir + user dir + sholib dir.
+(var load-path @[])
+
+(defn set-load-path
+  "Called by Zig to set the module search path."
+  [path]
+  (set load-path path))
+
+(defn add-load-path
+  "Add a directory to the load path (front = highest priority)."
+  [dir]
+  (array/insert load-path 0 dir))
+
+(defn use
+  "Load a module from the load path.
+   (use /compositor/sway) → searches load-path for compositor/sway.janet"
+  [name]
+  (def rel-path (string name ".janet"))
+  (var result nil)
+  (var found false)
+  (each dir load-path
+    (def full-path (string dir rel-path))
+    (try
+      (do
+        (set result (dofile full-path))
+        (set found true)
+        (break))
+      ([err] nil)))
+  (unless found
+    (error (string "use: module not found: " name)))
+  result)
 
 (def- handlers
   "Registry: event-id keyword → handler-fn or {:fn handler-fn :cofx [...keys]}"
@@ -220,3 +256,144 @@
 (reg-event-handler :_ipc-reconnect
   (fn [cofx event]
     {:ipc {:connect (event 1)}}))
+
+# --- Surfaces ---
+
+(def- surface-registry
+  "Registry: keyword → {:view fn :config table}"
+  @{})
+
+(defn reg-surface
+  "Register a surface with its view function and layer shell config.
+
+   Two arities:
+     (reg-surface :name view-fn) — named surface with defaults
+     (reg-surface :name {:layer :overlay :anchor {:top true} ...} view-fn)
+
+   Config options:
+     :layer                 — :background, :bottom, :top, :overlay (default: :top)
+     :anchor                — {:top true :left true ...} (default: all false = compositor chooses)
+     :width                 — Width in pixels (default: 0 = full output width)
+     :height                — Height in pixels (default: auto-sized from content)
+     :margin                — {:top 0 :right 0 :bottom 0 :left 0}
+     :exclusive-zone        — Exclusive zone for panel stacking (default: auto from height + margins)
+     :keyboard-interactivity — :none, :exclusive, :on-demand (default: :none)
+
+   The view-fn returns hiccup for this surface each frame.
+   Call (reg-surface) during config load; Zig creates surfaces on :init."
+  [name & args]
+  (def [config view-fn] (match args
+                          [vf]              [{} vf]
+                          [cfg vf]          [cfg vf]))
+  (put surface-registry name {:view view-fn :config config}))
+
+(defn get-surface
+  "Get surface registration by name. Returns {:view :config} or nil."
+  [name]
+  (get surface-registry name))
+
+(defn list-surfaces
+  "List all registered surface names."
+  []
+  (keys surface-registry))
+
+(defn get-surface-config
+  "Get surface config for Zig. Returns config table with defaults applied.
+   Special name :default uses reg-view's default view if no surface registered."
+  [name]
+  (def entry (get surface-registry name))
+  (if entry
+    # Merge defaults with user config
+    (let [cfg (entry :config)]
+      {:layer (get cfg :layer :top)
+       :anchor (get cfg :anchor {})
+       :width (get cfg :width 0)
+       :height (get cfg :height 0)
+       :margin (get cfg :margin {})
+       :exclusive-zone (get cfg :exclusive-zone 0)
+       :keyboard-interactivity (get cfg :keyboard-interactivity :none)
+       :namespace (get cfg :namespace "shoal")
+       :view (entry :view)})
+    # Default surface: use reg-view's default view
+    (when (= name :default)
+      {:layer :top
+       :anchor {:bottom true :left true :right true}
+       :width 0
+       :height 0
+       :margin {}
+       :exclusive-zone 0
+       :keyboard-interactivity :none
+       :namespace "shoal"
+       :view *view-fn*})))
+
+(defn has-surface?
+  "Check if a surface is registered (or :default has a view)."
+  [name]
+  (if (get surface-registry name)
+    true
+    (and (= name :default) *view-fn*)))
+
+(defn get-all-surface-configs
+  "Get all surface configs for init. Returns array of {:name :layer :anchor ...}.
+   Always includes :default if a default view is registered."
+  []
+  (def result @[])
+  # Check for default view
+  (when *view-fn*
+    (array/push result (merge {:name :default} (get-surface-config :default))))
+  # Add all named surfaces
+  (each name (keys surface-registry)
+    (unless (= name :default)
+      (array/push result (merge {:name name} (get-surface-config name)))))
+  result)
+
+# --- Theme ---
+
+# Theme colors. Set by Zig from config or defaults.
+# Default theme is Dracula dark.
+(var- theme-data
+  @{:bg [40 42 54 255]
+    :surface [50 52 64 255]
+    :overlay [60 62 74 255]
+    :muted [98 114 164 255]
+    :subtle [80 90 110 255]
+    :text [248 248 242 255]
+    :bright [255 255 255 255]
+    :accent [139 233 253 255]
+    :green [80 250 123 255]
+    :yellow [241 250 140 255]
+    :red [255 85 85 255]
+    :orange [255 184 108 255]
+    :cyan [139 233 253 255]
+    :blue [189 147 249 255]
+    :purple [189 147 249 255]
+    :base02 [40 42 54 255]
+    :base08 [255 85 85 255]
+    :base09 [255 184 108 255]
+    :base0A [241 250 140 255]
+    :base0B [80 250 123 255]
+    :base0C [139 233 253 255]
+    :base0D [139 233 253 255]
+    :base0E [189 147 249 255]})
+
+(defn set-theme
+  "Override theme colors. Called by Zig from config."
+  [theme]
+  (merge-into theme-data theme))
+
+(defn theme
+  "Get a theme color by key. Returns [r g b a]."
+  [key]
+  (get theme-data key (theme-data :text)))
+
+# --- DB ---
+
+(defn db
+  "Get the current db value. Useful in event handlers."
+  []
+  *current-db*)
+
+(defn db-get
+  "Get a key from the db. Returns nil if key doesn't exist."
+  [key]
+  (get *current-db* key))

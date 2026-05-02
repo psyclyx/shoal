@@ -1,0 +1,183 @@
+# widgets — High-level drawing primitives for shoal surfaces
+#
+# Powerline-style sections, sparkline charts, fill bars, and icons.
+# All shapes use :skew for consistent /-slant aesthetic.
+#
+# Requires: core/framework (theme), stdlib/util (tint, blend-bg, lerp-color)
+
+# --- Constants ---
+
+(def SLANT 0.30)        # Horizontal shift per unit height
+(def MIN-BAR-H 2)       # Minimum bar height in pixels
+(def N-SPARKLINE 15)    # Number of sparkline bars
+(def SPARKLINE-W 4)     # Sparkline bar width
+(def SPARKLINE-GAP 2)   # Gap between sparkline bars
+
+# --- Section ---
+
+(defn section
+  "Powerline section: parallelogram bg with /-slanted edges.
+   Minimal left padding so fill-bars can sit at the left edge.
+   Optional :height key in opts overrides default 38px."
+  [color opts & children]
+  (def h (get opts :height 38))
+  [:row {:h h :pad [0 12 0 2] :align-y :center :gap 8
+         :bg color :skew SLANT}
+    ;children])
+
+# --- Fill bar ---
+
+(defn fill-bar
+  "Left-edge fill indicator. Wraps with bright color above 100%."
+  [color pct &opt h]
+  (default h (or (dyn :section-height) 38))
+  (def clamped (max 0 pct))
+  (def wrapped (> clamped 100))
+  (def bar-pct (if wrapped (% clamped 100) clamped))
+  (def bar-pct (if (and wrapped (= bar-pct 0)) 100 bar-pct))
+  (def bar-color (if wrapped (theme :bright) color))
+  (def fill-h (max MIN-BAR-H (math/round (* h (/ (min 100 bar-pct) 100)))))
+  [:row {:w 8 :h h :align-y :bottom}
+    [:row {:w 8 :h fill-h :bg bar-color :skew SLANT}]])
+
+# --- Sparkline helpers ---
+
+(defn scroll-bars
+  "Interpolate N-SPARKLINE values from N+1 buffer with fractional scroll offset f."
+  [bars f]
+  (seq [i :range [0 N-SPARKLINE]
+        :let [a (get bars i 0)
+              b (get bars (+ i 1) 0)]]
+    (+ (* (- 1 f) a) (* f b))))
+
+(defn sparkline-bars
+  "Render N-SPARKLINE parallelogram bars with varying heights and colors.
+   opts can include :height (default 38)."
+  [values color-fn &opt opts]
+  (def h (get opts :height 38))
+  (def skew-pad (math/ceil (* SLANT h)))
+  [:row {:h h :align-y :bottom :gap SPARKLINE-GAP :pad [0 skew-pad 0 0]}
+    ;(seq [i :range [0 N-SPARKLINE]
+           :let [v (max 0 (min 1 (get values i 0)))
+                 bar-h (max MIN-BAR-H (math/round (* h v)))]]
+      [:row {:w SPARKLINE-W :h bar-h :bg (color-fn v) :skew SLANT}])])
+
+(defn sparkline-mirror
+  "Mirrored parallelogram bars: rx grows up from center, tx grows down.
+   Per-bar column sized to fit the / offset.
+   opts can include :height (default 38)."
+  [rx-vals tx-vals rx-color-fn tx-color-fn &opt opts]
+  (def h (get opts :height 38))
+  (def half-h (math/floor (/ h 2)))
+  (def skew-pad (math/ceil (* SLANT h)))
+  (def mirror-offset (math/ceil (* SLANT half-h)))
+  [:row {:h h :gap SPARKLINE-GAP :pad [0 skew-pad 0 mirror-offset]}
+    ;(seq [i :range [0 N-SPARKLINE]
+           :let [rv (max 0 (min 1 (get rx-vals i 0)))
+                 tv (max 0 (min 1 (get tx-vals i 0)))
+                 rx-h (max MIN-BAR-H (math/round (* half-h rv)))
+                 tx-h (max MIN-BAR-H (math/round (* half-h tv)))
+                 rx-offset (math/floor (* SLANT tx-h))]]
+      [:col {:w (+ SPARKLINE-W rx-offset) :h h :align-y :center}
+        [:row {:pad [0 0 0 rx-offset]}
+          [:row {:w SPARKLINE-W :h rx-h :bg (rx-color-fn rv) :skew SLANT}]]
+        [:row {:w SPARKLINE-W :h tx-h :bg (tx-color-fn tv) :skew SLANT}]])])
+
+# --- Icons ---
+# All shapes lean with the / via skew to match the section aesthetic.
+
+(defn icon-cpu
+  "Chip: angled outline with die."
+  [color]
+  (def offset (math/floor (* SLANT 16 0.5)))
+  [:row {:w 16 :h 16 :bg (tint color 60) :skew SLANT
+         :align-x :center :align-y :center :pad [0 0 0 offset]}
+    [:row {:w 6 :h 6 :bg color}]])
+
+(defn icon-mem
+  "RAM DIMMs: two skewed bars, staggered height."
+  [color]
+  [:row {:gap 2 :align-y :bottom}
+    [:row {:w 6 :h 16 :bg color :skew SLANT}]
+    [:row {:w 6 :h 12 :bg (tint color 160) :skew SLANT}]])
+
+(defn icon-disk
+  "Drive: angled body with indicator."
+  [color]
+  [:row {:w 16 :h 12 :bg (tint color 60) :skew SLANT
+         :pad [0 0 0 3] :align-y :bottom}
+    [:row {:w 3 :h 3 :bg color :radius 2}]])
+
+(defn icon-battery
+  "Battery: angled body with terminal nub."
+  [color]
+  [:row {:gap 0 :align-y :center}
+    [:row {:w 16 :h 10 :bg (tint color 60) :skew SLANT}]
+    [:row {:w 3 :h 5 :bg color}]])
+
+(defn icon-net-rx
+  "Download: arrow with angled shaft."
+  [color]
+  [:col {:gap 1 :align-x :center}
+    [:tri {:w 10 :h 6 :dir :up :color color}]
+    [:row {:w 3 :h 6 :bg color :skew SLANT}]])
+
+(defn icon-net-tx
+  "Upload: angled shaft with arrow."
+  [color]
+  [:col {:gap 1 :align-x :center}
+    [:row {:w 3 :h 6 :bg color :skew SLANT}]
+    [:tri {:w 10 :h 6 :dir :down :color color}]])
+
+(defn icon-audio
+  "Speaker: skewed driver + skewed cone flaring right."
+  [color]
+  [:row {:gap 0 :align-y :center :skew SLANT}
+    [:row {:w 4 :h 8 :bg color}]
+    [:tri {:w 7 :h 13 :dir :left :color color}]])
+
+(defn icon-launcher
+  "Grid: 2x2 angled dots."
+  [color]
+  [:col {:gap 3}
+    [:row {:gap 3}
+      [:row {:w 5 :h 5 :bg color :skew SLANT}]
+      [:row {:w 5 :h 5 :bg color :skew SLANT}]]
+    [:row {:gap 3}
+      [:row {:w 5 :h 5 :bg color :skew SLANT}]
+      [:row {:w 5 :h 5 :bg color :skew SLANT}]]])
+
+# --- Minimap ---
+
+(defn minimap-tree
+  "Render a tree node as skewed rectangles."
+  [node w h &opt focused-color unfocused-color]
+  (default focused-color (theme :accent))
+  (default unfocused-color (theme :overlay))
+  (def focused (get node "focused" false))
+  (def color (if focused focused-color unfocused-color))
+  (if (= (get node "type" "leaf") "leaf")
+    [:row {:w w :h h :bg color :skew SLANT}]
+    (let [children (get node "children" [])
+          n (length children)
+          vertical (= (get node "orientation" "vertical") "vertical")
+          gap 2
+          avail (- (if vertical h w) (* gap (max 0 (- n 1))))
+          csz (max 2 (math/floor (/ avail (max 1 n))))]
+      (if vertical
+        (do
+          (def total-below @[])
+          (var acc 0)
+          (for i 0 n
+            (array/push total-below acc)
+            (set acc (+ acc csz gap)))
+          (def offsets (reverse (array/slice total-below)))
+          [:col {:gap gap :w (+ w (math/floor (* SLANT (- h csz)))) :h h}
+            ;(seq [i :range [0 n]
+                   :let [c (children i)
+                         pad-l (math/floor (* SLANT (offsets i)))]]
+              [:row {:pad [0 0 0 pad-l]}
+                (minimap-tree c w csz focused-color unfocused-color)])])
+        [:row {:gap gap :w w :h h}
+          ;(seq [c :in children]
+             (minimap-tree c csz h focused-color unfocused-color))]))))

@@ -48,6 +48,10 @@ stdenv.mkDerivation (finalAttrs: {
     "${finalAttrs.deps}"
   ];
 
+  postInstall = ''
+    cp -r $src/lib $out/share/shoal/lib
+  '';
+
   meta = {
     description = "Wayland surface renderer and desktop shell toolkit";
     license = lib.licenses.gpl3Only;
