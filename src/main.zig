@@ -222,9 +222,19 @@ pub fn main() !void {
     if (cli_args.dmenu) {
         dispatch.loadDmenuModule();
     } else if (cli_args.config_paths.len > 0) {
-        // Load specified config files
+        // Load specified config files (resolve to absolute paths)
+        var cwd_buf: [4096]u8 = undefined;
+        const cwd = std.posix.getcwd(&cwd_buf) catch "/";
+        
         for (cli_args.config_paths) |path| {
-            _ = dispatch.loadFileFromDisk(path);
+            const abs_path = if (std.fs.path.isAbsolute(path))
+                path
+            else blk: {
+                // Resolve relative path to absolute
+                const parts = [_][]const u8{ cwd, path };
+                break :blk std.fs.path.resolve(allocator, &parts) catch path;
+            };
+            _ = dispatch.loadFileFromDisk(abs_path);
         }
     } else {
         // Auto-discover config files in ~/.config/shoal/

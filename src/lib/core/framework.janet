@@ -22,16 +22,19 @@
 
 (defn use
   "Load a module from the load path.
-   (use /compositor/sway) → searches load-path for compositor/sway.janet"
+   (use \"compositor/sway\") → searches load-path for compositor/sway.janet
+   Modules are loaded into the current environment, so they have access to
+   all bindings from core/framework.janet (theme, db, etc)."
   [name]
-  (def rel-path (string name ".janet"))
+  (def rel-path (string "/" name ".janet"))
+  (def env (fiber/getenv (fiber/current)))
   (var result nil)
   (var found false)
   (each dir load-path
     (def full-path (string dir rel-path))
     (try
       (do
-        (set result (dofile full-path))
+        (set result (dofile full-path :env env))
         (set found true)
         (break))
       ([err] nil)))

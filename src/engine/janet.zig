@@ -1110,6 +1110,20 @@ pub const Dispatch = struct {
             }
         }
 
+        // Add src/lib from cwd if it exists (development mode)
+        var cwd_buf: [4096]u8 = undefined;
+        if (std.posix.getcwd(&cwd_buf)) |cwd| {
+            var lib_buf: [4608]u8 = undefined;
+            if (std.fmt.bufPrint(&lib_buf, "{s}/src/lib", .{cwd})) |lib_path| {
+                var dir = std.fs.openDirAbsolute(lib_path, .{}) catch null;
+                if (dir) |*d| {
+                    d.close();
+                    const lib_janet = c.janet_string(@ptrCast(lib_path.ptr), @intCast(lib_path.len));
+                    c.janet_array_push(load_path_arr, c.janet_wrap_string(lib_janet));
+                }
+            } else |_| {}
+        } else |_| {}
+
         // Add user config dir
         if (std.posix.getenv("XDG_CONFIG_HOME")) |xdg| {
             var buf: [512]u8 = undefined;

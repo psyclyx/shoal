@@ -5,15 +5,15 @@
 # Run with: shoal bar.janet
 
 # Load compositor integration (detects sway/tidepool automatically)
-(use /compositor/sway)
+(use "compositor/sway")
 
 # Load data sources
-(use /module/clock)
-(use /module/sysinfo)
+(use "module/clock")
+(use "module/sysinfo")
 
 # Load drawing helpers
-(use /stdlib/util)
-(use /drawing/widgets)
+(use "stdlib/util")
+(use "drawing/widgets")
 
 # Theme shortcuts
 (def bg (theme :bg))
