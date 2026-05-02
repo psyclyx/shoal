@@ -58,7 +58,7 @@ fn parseArgs(allocator: std.mem.Allocator) !Args {
 
     _ = args.skip(); // skip program name
 
-    // First arg is subcommand
+    // First arg is subcommand (required)
     if (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "run")) {
             subcommand = .run;
@@ -67,9 +67,13 @@ fn parseArgs(allocator: std.mem.Allocator) !Args {
         } else if (std.mem.eql(u8, arg, "list")) {
             subcommand = .list;
         } else {
-            // No subcommand, treat as script path (legacy/default)
-            try config_paths.append(allocator, arg);
+            log.err("unknown subcommand: {s}", .{arg});
+            log.info("usage: shoal <run|signal|list> ...", .{});
+            return error.UnknownSubcommand;
         }
+    } else {
+        log.info("usage: shoal <run|signal|list> ...", .{});
+        return error.MissingSubcommand;
     }
 
     var after_double_dash = false;
