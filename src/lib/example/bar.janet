@@ -44,7 +44,7 @@
 
 (defn cpu-view []
   (let [pct (sub :cpu/percent)]
-    (section (blend-bg (theme :yellow)) {}
+    (section (blend-bg (theme :yellow) 200) {}
       (fill-bar green pct)
       [:text {:color text-color :size 14} (string "CPU " pct "%")])))
 
@@ -53,13 +53,13 @@
         used (get mem :used-mb 0)
         total (get mem :total-mb 0)
         pct (get mem :percent 0)]
-    (section (blend-bg green) {}
+    (section (blend-bg green 200) {}
       (fill-bar green pct)
       [:text {:color text-color :size 14}
         (string (fmt-mem used) "/" (fmt-mem total))])))
 
 (defn clock-view []
-  (section (blend-bg (theme :blue)) {}
+  (section (blend-bg (theme :blue) 200) {}
     [:col {:align-x :right :gap 1 :pad [0 14 0 0]}
       [:text {:color (theme :bright) :size 17} (sub :clock/time)]
       [:text {:color muted :size 12} (sub :clock/date)]]))
