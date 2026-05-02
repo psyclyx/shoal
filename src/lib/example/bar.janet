@@ -2,10 +2,17 @@
 # bar.janet — Example status bar
 #
 # A simple status bar with workspace indicators, system stats, and clock.
-# Run with: shoal bar.janet
+# Run with: shoal bar.janet [compositor]
+#   compositor: "sway" or "tidepool" (default: "tidepool")
 
-# Load compositor integration (detects sway/tidepool automatically)
-(use "compositor/sway")
+# Get compositor from args (default: tidepool)
+(def compositor (or (script-args 0) "tidepool"))
+
+# Load compositor integration
+(case compositor
+  "sway" (use "compositor/sway")
+  "tidepool" (use "compositor/tidepool")
+  (error (string "unknown compositor: " compositor)))
 
 # Load data sources
 (use "module/clock")

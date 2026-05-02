@@ -29,11 +29,18 @@ const log = std.log.scoped(.shoal);
 const MAX_OUTPUTS = 8;
 const MAX_SURFACES = 16; // MAX_OUTPUTS static + dynamic
 
+const Subcommand = enum { run, signal, list };
+
 // CLI args
 const Args = struct {
+    subcommand: Subcommand,
     config_paths: []const []const u8,
+    script_args: []const []const u8,
     dmenu: bool = false,
     dmenu_prompt: []const u8 = "",
+    instance_name: ?[]const u8 = null,
+    signal_target: ?[]const u8 = null,
+    signal_event: ?[]const u8 = null,
 };
 
 fn parseArgs(allocator: std.mem.Allocator) !Args {
@@ -41,25 +48,64 @@ fn parseArgs(allocator: std.mem.Allocator) !Args {
     defer args.deinit();
 
     var config_paths = try std.ArrayList([]const u8).initCapacity(allocator, 8);
+    var script_args = try std.ArrayList([]const u8).initCapacity(allocator, 8);
+    var subcommand: Subcommand = .run;
     var dmenu = false;
     var dmenu_prompt: []const u8 = "";
+    var instance_name: ?[]const u8 = null;
+    var signal_target: ?[]const u8 = null;
+    var signal_event: ?[]const u8 = null;
 
     _ = args.skip(); // skip program name
 
+    // First arg is subcommand
+    if (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "run")) {
+            subcommand = .run;
+        } else if (std.mem.eql(u8, arg, "signal")) {
+            subcommand = .signal;
+        } else if (std.mem.eql(u8, arg, "list")) {
+            subcommand = .list;
+        } else {
+            // No subcommand, treat as script path (legacy/default)
+            try config_paths.append(allocator, arg);
+        }
+    }
+
+    var after_double_dash = false;
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--dmenu")) {
             dmenu = true;
         } else if (std.mem.eql(u8, arg, "-p")) {
             dmenu_prompt = args.next() orelse "";
+        } else if (std.mem.eql(u8, arg, "-n")) {
+            instance_name = args.next() orelse "";
+        } else if (std.mem.eql(u8, arg, "--")) {
+            after_double_dash = true;
+        } else if (after_double_dash) {
+            try script_args.append(allocator, arg);
+        } else if (subcommand == .signal and signal_target == null) {
+            signal_target = arg;
+        } else if (subcommand == .signal and signal_event == null) {
+            signal_event = arg;
         } else if (!std.mem.startsWith(u8, arg, "-")) {
-            try config_paths.append(allocator, arg);
+            if (subcommand == .run and config_paths.items.len == 0) {
+                try config_paths.append(allocator, arg);
+            } else {
+                try script_args.append(allocator, arg);
+            }
         }
     }
 
     return .{
+        .subcommand = subcommand,
         .config_paths = try config_paths.toOwnedSlice(allocator),
+        .script_args = try script_args.toOwnedSlice(allocator),
         .dmenu = dmenu,
         .dmenu_prompt = dmenu_prompt,
+        .instance_name = instance_name,
+        .signal_target = signal_target,
+        .signal_event = signal_event,
     };
 }
 
@@ -211,6 +257,7 @@ pub fn main() !void {
 
     dispatch = janet.createDispatch();
     try dispatch.initBoot(theme_mod.default(), cli_args.dmenu);
+    dispatch.setScriptArgs(cli_args.script_args);
     dispatch.initFileReader();
     defer dispatch.deinitFileReader();
     defer dispatch.deinitDispatch();

@@ -217,6 +217,17 @@ pub const Dispatch = struct {
         log.info("shoal framework loaded, dispatch ready", .{});
     }
 
+    /// Define script-args in environment (accessible as script-args)
+    pub fn setScriptArgs(self: *Dispatch, args: []const []const u8) void {
+        if (args.len == 0) return;
+        const arr = c.janet_array(@intCast(args.len));
+        for (args) |arg| {
+            const s = c.janet_string(@ptrCast(arg.ptr), @intCast(arg.len));
+            c.janet_array_push(arr, c.janet_wrap_string(s));
+        }
+        c.janet_def(self.env, "script-args", c.janet_wrap_array(arr), null);
+    }
+
     /// Enqueue an event for processing. The event is GC-rooted until dequeued.
     pub fn enqueue(self: *Dispatch, event: Janet) void {
         if (self.queue_count >= MAX_QUEUED_EVENTS) {
