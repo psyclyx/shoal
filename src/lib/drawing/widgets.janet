@@ -12,7 +12,7 @@
 (def N-SPARKLINE 15)    # Number of sparkline bars
 (def SPARKLINE-W 4)     # Sparkline bar width
 (def SPARKLINE-GAP 2)   # Gap between sparkline bars
-(def N-NET-SPARK 15)    # 30s network window sampled at visible bar midpoints
+(def N-NET-SPARK 15)    # 15s network window sampled at visible bar midpoints
 (def NET-SPARK-HEADROOM 0.78) # Bars fade from this line to the edge
 
 # --- Section ---

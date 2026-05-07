@@ -222,7 +222,7 @@
 (var- net-iface nil)
 
 (def- NET-SAMPLE-SEC 1.5)
-(def- NET-DISPLAY-SEC 30.0)
+(def- NET-DISPLAY-SEC 15.0)
 (def- NET-SPARK-LAG 2.0)
 (def- NET-HISTORY-SEC 45.0)
 (def- NET-ZOOM-HOLD-SEC (+ NET-SPARK-LAG (/ NET-DISPLAY-SEC 2)))

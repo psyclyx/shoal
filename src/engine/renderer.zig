@@ -37,6 +37,17 @@ const PreparedCacheEntry = struct {
     last_used: u64,
 };
 
+const NetSparkPictureEntry = struct {
+    color_key: u32,
+    picture: *snail.PathPicture,
+};
+
+const NetSparkInstanceBucket = struct {
+    color_key: u32,
+    color: [4]f32,
+    instances: std.ArrayListUnmanaged(snail.Override) = .empty,
+};
+
 const RectOp = struct {
     x: f32,
     y: f32,
@@ -118,7 +129,7 @@ pub const Renderer = struct {
     transient_path_pictures: std.ArrayListUnmanaged(*snail.PathPicture),
     path_ops: std.ArrayListUnmanaged(PathOp),
     path_cache: std.AutoHashMapUnmanaged(u64, PathCacheEntry),
-    net_spark_picture: ?*snail.PathPicture,
+    net_spark_pictures: std.ArrayListUnmanaged(NetSparkPictureEntry),
     prepared_cache: std.AutoHashMapUnmanaged(u64, PreparedCacheEntry),
     resource_entries: std.ArrayListUnmanaged(snail.ResourceSet.Entry),
     draw_words: std.ArrayListUnmanaged(u32),
@@ -141,7 +152,7 @@ pub const Renderer = struct {
             .transient_path_pictures = .empty,
             .path_ops = .empty,
             .path_cache = .empty,
-            .net_spark_picture = null,
+            .net_spark_pictures = .empty,
             .prepared_cache = .empty,
             .resource_entries = .empty,
             .draw_words = .empty,
@@ -157,11 +168,11 @@ pub const Renderer = struct {
         self.path_ops.deinit(self.allocator);
         self.clearPathCache();
         self.path_cache.deinit(self.allocator);
-        if (self.net_spark_picture) |picture| {
-            picture.deinit();
-            self.allocator.destroy(picture);
+        for (self.net_spark_pictures.items) |entry| {
+            entry.picture.deinit();
+            self.allocator.destroy(entry.picture);
         }
-        self.net_spark_picture = null;
+        self.net_spark_pictures.deinit(self.allocator);
         self.frame_arena.deinit();
         self.clearPreparedCache();
         self.prepared_cache.deinit(self.allocator);
@@ -567,8 +578,11 @@ pub const Renderer = struct {
         try self.scene.addText(.{ .blob = ptr });
     }
 
-    fn ensureNetSparkPicture(self: *Renderer) !*snail.PathPicture {
-        if (self.net_spark_picture) |picture| return picture;
+    fn ensureNetSparkPicture(self: *Renderer, color: [4]f32) !*snail.PathPicture {
+        const key = colorKey(color);
+        for (self.net_spark_pictures.items) |entry| {
+            if (entry.color_key == key) return entry.picture;
+        }
 
         var path = snail.Path.init(self.allocator);
         defer path.deinit();
@@ -580,30 +594,34 @@ pub const Renderer = struct {
 
         var builder = snail.PathPictureBuilder.init(self.allocator);
         defer builder.deinit();
-        try builder.addFilledPath(&path, .{ .color = .{ 1, 1, 1, 1 } }, .identity);
+        try builder.addFilledPath(&path, .{ .color = color }, .identity);
 
         const picture = try self.allocator.create(snail.PathPicture);
         errdefer self.allocator.destroy(picture);
         picture.* = try builder.freeze(self.allocator);
-        self.net_spark_picture = picture;
+        errdefer picture.deinit();
+        try self.net_spark_pictures.append(self.allocator, .{
+            .color_key = key,
+            .picture = picture,
+        });
         return picture;
     }
 
     fn addNetSparkInstances(self: *Renderer, op: NetSparkOp) !void {
         try self.flushPathRun();
 
-        const picture = try self.ensureNetSparkPicture();
         const frame_allocator = self.frame_arena.allocator();
-        var instances: std.ArrayListUnmanaged(snail.Override) = .empty;
-        defer instances.deinit(frame_allocator);
-        try buildNetSparkInstances(frame_allocator, &instances, op);
-        if (instances.items.len == 0) return;
+        var buckets: std.ArrayListUnmanaged(NetSparkInstanceBucket) = .empty;
+        try buildNetSparkInstances(frame_allocator, &buckets, op);
 
-        const slice = try instances.toOwnedSlice(frame_allocator);
-        try self.scene.addPath(.{
-            .picture = picture,
-            .instances = slice,
-        });
+        for (buckets.items) |bucket| {
+            if (bucket.instances.items.len == 0) continue;
+            const picture = try self.ensureNetSparkPicture(bucket.color);
+            try self.scene.addPath(.{
+                .picture = picture,
+                .instances = bucket.instances.items,
+            });
+        }
     }
 
     fn queuePathOp(self: *Renderer, op: PathOp) void {
@@ -940,7 +958,7 @@ fn addCurveOp(builder: *snail.PathPictureBuilder, op: CurveOp) !void {
 
 fn buildNetSparkInstances(
     allocator: std.mem.Allocator,
-    instances: *std.ArrayListUnmanaged(snail.Override),
+    buckets: *std.ArrayListUnmanaged(NetSparkInstanceBucket),
     op: NetSparkOp,
 ) !void {
     const count1: usize = @min(@as(usize, @intCast(op.value_count)), op.values.len);
@@ -964,7 +982,7 @@ fn buildNetSparkInstances(
         if (i < count2) {
             try appendNetSparkHalfInstances(
                 allocator,
-                instances,
+                buckets,
                 center_x,
                 center_y,
                 bar_w,
@@ -980,7 +998,7 @@ fn buildNetSparkInstances(
         if (i < count1) {
             try appendNetSparkHalfInstances(
                 allocator,
-                instances,
+                buckets,
                 center_x,
                 center_y,
                 bar_w,
@@ -998,7 +1016,7 @@ fn buildNetSparkInstances(
 
 fn appendNetSparkHalfInstances(
     allocator: std.mem.Allocator,
-    instances: *std.ArrayListUnmanaged(snail.Override),
+    buckets: *std.ArrayListUnmanaged(NetSparkInstanceBucket),
     center_x: f32,
     center_y: f32,
     bar_w: f32,
@@ -1017,7 +1035,7 @@ fn appendNetSparkHalfInstances(
     const solid_h = @min(bar_h, fade_start_px);
 
     if (solid_h > 0) {
-        try appendNetSparkSliceInstance(allocator, instances, center_x, center_y, bar_w, 0, solid_h, skew, upper, color);
+        try appendNetSparkSliceInstance(allocator, buckets, center_x, center_y, bar_w, 0, solid_h, skew, upper, color);
     }
 
     const fade_limit = @min(bar_h, half_h);
@@ -1037,13 +1055,13 @@ fn appendNetSparkHalfInstances(
 
         var faded = color;
         faded[3] *= alpha;
-        try appendNetSparkSliceInstance(allocator, instances, center_x, center_y, bar_w, d0, d1, skew, upper, faded);
+        try appendNetSparkSliceInstance(allocator, buckets, center_x, center_y, bar_w, d0, d1, skew, upper, faded);
     }
 }
 
 fn appendNetSparkSliceInstance(
     allocator: std.mem.Allocator,
-    instances: *std.ArrayListUnmanaged(snail.Override),
+    buckets: *std.ArrayListUnmanaged(NetSparkInstanceBucket),
     center_x: f32,
     center_y: f32,
     bar_w: f32,
@@ -1075,10 +1093,38 @@ fn appendNetSparkSliceInstance(
             .ty = center_y + d0,
         };
 
-    try instances.append(allocator, .{
+    const bucket = try netSparkBucket(allocator, buckets, color);
+    try bucket.instances.append(allocator, .{
         .transform = transform,
-        .tint = color,
     });
+}
+
+fn netSparkBucket(
+    allocator: std.mem.Allocator,
+    buckets: *std.ArrayListUnmanaged(NetSparkInstanceBucket),
+    color: [4]f32,
+) !*NetSparkInstanceBucket {
+    const key = colorKey(color);
+    for (buckets.items) |*bucket| {
+        if (bucket.color_key == key) return bucket;
+    }
+    try buckets.append(allocator, .{
+        .color_key = key,
+        .color = color,
+    });
+    return &buckets.items[buckets.items.len - 1];
+}
+
+fn colorKey(color: [4]f32) u32 {
+    return (@as(u32, unorm8(color[0])) << 24) |
+        (@as(u32, unorm8(color[1])) << 16) |
+        (@as(u32, unorm8(color[2])) << 8) |
+        @as(u32, unorm8(color[3]));
+}
+
+fn unorm8(value: f32) u8 {
+    const clamped = std.math.clamp(value, 0.0, 1.0);
+    return @intFromFloat(@round(clamped * 255.0));
 }
 
 fn pathOpCacheable(op: PathOp) bool {
