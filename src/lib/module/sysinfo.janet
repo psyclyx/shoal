@@ -301,6 +301,23 @@
      :rx (interval-coeffs samples idx :rx)
      :tx (interval-coeffs samples idx :tx)}))
 
+(defn- build-net-intervals [samples]
+  (def intervals @[])
+  (for i 0 (max 0 (- (length samples) 1))
+    (array/push intervals (finalized-net-interval samples i)))
+  intervals)
+
+(defn- seed-net-samples [clock rx tx]
+  (let [samples @[]
+        start (- clock (+ NET-DISPLAY-SEC NET-SPARK-LAG))
+        steps (max 2 (math/ceil (/ (- clock start) NET-SAMPLE-SEC)))]
+    (for i 0 steps
+      (let [t (+ start (* i NET-SAMPLE-SEC))]
+        (when (< t clock)
+          (array/push samples {:t t :dt NET-SAMPLE-SEC :rx rx :tx tx}))))
+    (array/push samples {:t clock :dt NET-SAMPLE-SEC :rx rx :tx tx})
+    samples))
+
 (defn- net-zoom-at [net now]
   (let [from (get net :zoom-from NET-ZOOM-FLOOR)
         to (get net :zoom-to NET-ZOOM-FLOOR)
@@ -422,11 +439,17 @@
                     (smooth-rate (last-sample :tx) tx-rate dt)
                     tx-rate)
             sample {:t clock :dt dt :rx sm-rx :tx sm-tx}
-            samples (array/slice old-samples 0)
-            intervals (array/slice old-intervals 0)]
-        (array/push samples sample)
-        (when (>= (length samples) 2)
-          (array/push intervals (finalized-net-interval samples (- (length samples) 2))))
+            seed-history (and (> prev-clock 0) (<= (length old-samples) 1))
+            samples (if seed-history
+                      (seed-net-samples clock sm-rx sm-tx)
+                      (array/slice old-samples 0))
+            intervals (if seed-history
+                        (build-net-intervals samples)
+                        (array/slice old-intervals 0))]
+        (unless seed-history
+          (array/push samples sample)
+          (when (>= (length samples) 2)
+            (array/push intervals (finalized-net-interval samples (- (length samples) 2)))))
         (let [cutoff (- clock NET-HISTORY-SEC)
               samples (prune-timed samples cutoff :t)
               intervals (prune-timed intervals cutoff :t1)
