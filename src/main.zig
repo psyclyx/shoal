@@ -11,11 +11,14 @@ const Layout = @import("engine/layout.zig").Layout;
 const animation = @import("engine/animation.zig");
 const janet = @import("engine/janet.zig");
 const hiccup_mod = @import("engine/hiccup.zig");
+const trace = @import("engine/trace.zig");
 
 const c = @cImport({
+    @cDefine("GL_GLEXT_PROTOTYPES", "1");
     @cInclude("wayland-egl.h");
     @cInclude("EGL/egl.h");
-    @cInclude("GLES3/gl3.h");
+    @cInclude("GL/gl.h");
+    @cInclude("GL/glext.h");
 });
 
 const xkb = @cImport({
@@ -43,8 +46,8 @@ const Args = struct {
     signal_event: ?[]const u8 = null,
 };
 
-fn parseArgs(allocator: std.mem.Allocator) !Args {
-    var args = try std.process.argsWithAllocator(allocator);
+fn parseArgs(allocator: std.mem.Allocator, process_args: std.process.Args) !Args {
+    var args = try std.process.Args.Iterator.initAllocator(process_args, allocator);
     defer args.deinit();
 
     var config_paths = try std.ArrayList([]const u8).initCapacity(allocator, 8);
@@ -134,6 +137,8 @@ const Surface = struct {
     output_y: i32 = 0,
     output_name: [64]u8 = undefined,
     output_name_len: usize = 0,
+    output_name_val: janet.Janet = undefined,
+    output_name_val_valid: bool = false,
     // View dispatch — null means default view, keyword string selects a named view
     view_name_str: ?[:0]const u8 = null,
     // Dynamic surfaces are created/destroyed from Janet via :surface fx
@@ -173,6 +178,13 @@ const Surface = struct {
         if (self.egl_window) |win| {
             c.wl_egl_window_destroy(win);
             self.egl_window = null;
+        }
+    }
+
+    fn deinitJanet(self: *Surface) void {
+        if (self.output_name_val_valid) {
+            _ = janet.c.janet_gcunroot(self.output_name_val);
+            self.output_name_val_valid = false;
         }
     }
 
@@ -235,6 +247,8 @@ var dispatch: janet.Dispatch = undefined;
 
 // Default surface config (for dmenu mode or when no surfaces registered)
 const DefaultSurfaceConfig = struct {
+    const InputRegion = enum { default, empty };
+
     layer: config_mod.Config.Layer = .top,
     anchor: config_mod.Config.Anchor = .{ .bottom = true, .left = true, .right = true },
     width: u32 = 0,
@@ -243,14 +257,20 @@ const DefaultSurfaceConfig = struct {
     margin: config_mod.Config.Margin = .{},
     namespace: [:0]const u8 = "shoal",
     keyboard_interactivity: config_mod.Config.KeyboardInteractivity = .none,
+    input_region: InputRegion = .default,
 };
 var default_surface_config: DefaultSurfaceConfig = .{};
 
-pub fn main() !void {
+fn monotonicMillis(io: std.Io) i64 {
+    const ns = std.Io.Clock.awake.now(io).nanoseconds;
+    return std.math.cast(i64, @divTrunc(ns, std.time.ns_per_ms)) orelse 0;
+}
+
+pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.page_allocator;
 
     // Parse CLI args
-    const cli_args = parseArgs(allocator) catch |err| {
+    const cli_args = parseArgs(allocator, init.minimal.args) catch |err| {
         log.err("failed to parse args: {}", .{err});
         return err;
     };
@@ -260,9 +280,9 @@ pub fn main() !void {
     defer janet.deinit();
 
     dispatch = janet.createDispatch();
-    try dispatch.initBoot(theme_mod.default(), cli_args.dmenu);
+    try dispatch.initBoot(init.io, init.environ_map, theme_mod.default(), cli_args.dmenu);
     dispatch.setScriptArgs(cli_args.script_args);
-    dispatch.initFileReader();
+    dispatch.initFileReader(init.io);
     defer dispatch.deinitFileReader();
     defer dispatch.deinitDispatch();
 
@@ -275,8 +295,9 @@ pub fn main() !void {
     } else if (cli_args.config_paths.len > 0) {
         // Load specified config files (resolve to absolute paths)
         var cwd_buf: [4096]u8 = undefined;
-        const cwd = std.posix.getcwd(&cwd_buf) catch "/";
-        
+        const cwd_len = std.process.currentPath(init.io, &cwd_buf) catch 0;
+        const cwd: []const u8 = if (cwd_len > 0) cwd_buf[0..cwd_len] else "/";
+
         for (cli_args.config_paths) |path| {
             const abs_path = if (std.fs.path.isAbsolute(path))
                 path
@@ -295,7 +316,18 @@ pub fn main() !void {
     // In dmenu mode: read stdin items and inject into db
     if (cli_args.dmenu) {
         var stdin_buf: [65536]u8 = undefined;
-        const bytes = std.fs.File.stdin().readAll(&stdin_buf) catch 0;
+        var bytes: usize = 0;
+        while (bytes < stdin_buf.len) {
+            const n = std.Io.File.stdin().readStreaming(init.io, &.{stdin_buf[bytes..]}) catch |err| {
+                switch (err) {
+                    error.EndOfStream => {},
+                    else => {},
+                }
+                break;
+            };
+            if (n == 0) break;
+            bytes += n;
+        }
         const content = stdin_buf[0..bytes];
 
         // Collect line slices (pointing into stdin_buf)
@@ -400,7 +432,7 @@ pub fn main() !void {
 
     log.info("EGL {}.{}", .{ egl_major, egl_minor });
 
-    if (c.eglBindAPI(c.EGL_OPENGL_ES_API) != c.EGL_TRUE)
+    if (c.eglBindAPI(c.EGL_OPENGL_API) != c.EGL_TRUE)
         return error.EGLBindFailed;
 
     const config_attribs = [_]c.EGLint{
@@ -409,7 +441,7 @@ pub fn main() !void {
         c.EGL_GREEN_SIZE,      8,
         c.EGL_BLUE_SIZE,       8,
         c.EGL_ALPHA_SIZE,      8,
-        c.EGL_RENDERABLE_TYPE, c.EGL_OPENGL_ES3_BIT,
+        c.EGL_RENDERABLE_TYPE, c.EGL_OPENGL_BIT,
         c.EGL_NONE,
     };
 
@@ -419,7 +451,7 @@ pub fn main() !void {
 
     const context_attribs = [_]c.EGLint{
         c.EGL_CONTEXT_MAJOR_VERSION, 3,
-        c.EGL_CONTEXT_MINOR_VERSION, 0,
+        c.EGL_CONTEXT_MINOR_VERSION, 3,
         c.EGL_NONE,
     };
     egl_context = c.eglCreateContext(egl_display, egl_config, c.EGL_NO_CONTEXT, &context_attribs);
@@ -445,6 +477,7 @@ pub fn main() !void {
     defer {
         for (surfaces[0..surface_count]) |*surf| {
             surf.deinitEgl();
+            surf.deinitJanet();
             if (surf.is_dynamic) {
                 if (surf.layer_surface) |ls_surf| ls_surf.destroy();
                 if (surf.wl_surface) |ws| ws.destroy();
@@ -487,17 +520,39 @@ pub fn main() !void {
 
     const wl_fd = display.getFd();
 
+    var loop_count: u64 = 0;
     while (running) {
+        loop_count +%= 1;
+        const loop_start_ns = trace.nowNs();
+        if (trace.enabled()) std.debug.print("\n", .{});
+        trace.log("main.loop-start loop={d} queued={d} render_dirty={} render_requests={d} surfaces={d}", .{
+            loop_count,
+            dispatch.queue_count,
+            dispatch.render_dirty,
+            dispatch.render_request_count,
+            surface_count,
+        });
+
         // Dispatch any already-queued Wayland events before polling
+        const prepare_start_ns = trace.nowNs();
+        var pending_dispatches: u32 = 0;
         while (!display.prepareRead()) {
+            pending_dispatches += 1;
             if (display.dispatchPending() != .SUCCESS) {
                 running = false;
                 break;
             }
         }
         if (!running) break;
+        trace.log("main.prepare-read loop={d} pending_dispatches={d} dur_ms={d:.3}", .{
+            loop_count,
+            pending_dispatches,
+            trace.elapsedMs(prepare_start_ns),
+        });
 
+        const flush_start_ns = trace.nowNs();
         _ = display.flush();
+        trace.log("main.wayland-flush loop={d} dur_ms={d:.3}", .{ loop_count, trace.elapsedMs(flush_start_ns) });
 
         // Poll Wayland fd + spawn fds + IPC fds with timeout based on timers
         var poll_fds: [28]std.posix.pollfd = undefined;
@@ -518,38 +573,82 @@ pub fn main() !void {
             16 // ~60fps for active animations
         else
             dispatch.nextTimerTimeoutMs() orelse -1; // -1 = block until event
-        _ = std.posix.poll(poll_fds[0..nfds], poll_timeout) catch 0;
+        const poll_start_ns = trace.nowNs();
+        const poll_result = std.posix.poll(poll_fds[0..nfds], poll_timeout) catch |err| blk: {
+            trace.log("main.poll-error loop={d} err={}", .{ loop_count, err });
+            break :blk 0;
+        };
+        trace.log("main.poll loop={d} ret={d} timeout_ms={d} nfds={d} spawn_fds={d} ipc_fds={d} dur_ms={d:.3}", .{
+            loop_count,
+            poll_result,
+            poll_timeout,
+            nfds,
+            ipc_fd_start - spawn_fd_start,
+            nfds - ipc_fd_start,
+            trace.elapsedMs(poll_start_ns),
+        });
 
+        const wayland_read_start_ns = trace.nowNs();
         if (poll_fds[0].revents & std.posix.POLL.IN != 0) {
             if (display.readEvents() != .SUCCESS) break;
         } else {
             display.cancelRead();
         }
         if (display.dispatchPending() != .SUCCESS) break;
+        trace.log("main.wayland-dispatch loop={d} revents={d} dur_ms={d:.3}", .{
+            loop_count,
+            poll_fds[0].revents,
+            trace.elapsedMs(wayland_read_start_ns),
+        });
 
         // Process readable spawn fds
+        var spawn_ready: u32 = 0;
         for (poll_fds[spawn_fd_start..ipc_fd_start]) |pfd| {
             if (pfd.revents & (std.posix.POLL.IN | std.posix.POLL.HUP) != 0) {
+                spawn_ready += 1;
+                const start_ns = trace.nowNs();
                 dispatch.onSpawnReadable(pfd.fd);
+                trace.log("main.spawn-readable loop={d} fd={d} revents={d} dur_ms={d:.3}", .{
+                    loop_count,
+                    pfd.fd,
+                    pfd.revents,
+                    trace.elapsedMs(start_ns),
+                });
             }
         }
 
         // Process readable IPC fds
+        var ipc_ready: u32 = 0;
         for (poll_fds[ipc_fd_start..nfds]) |pfd| {
             if (pfd.revents & (std.posix.POLL.IN | std.posix.POLL.HUP) != 0) {
+                ipc_ready += 1;
+                const start_ns = trace.nowNs();
                 dispatch.onIpcReadable(pfd.fd);
+                trace.log("main.ipc-readable loop={d} fd={d} revents={d} dur_ms={d:.3}", .{
+                    loop_count,
+                    pfd.fd,
+                    pfd.revents,
+                    trace.elapsedMs(start_ns),
+                });
             }
         }
 
         // Process async file reader results
         if (fileio_fd_idx) |idx| {
             if (poll_fds[idx].revents & std.posix.POLL.IN != 0) {
+                const start_ns = trace.nowNs();
                 dispatch.onFileReaderReadable();
+                trace.log("main.fileio-readable loop={d} fd={d} revents={d} dur_ms={d:.3}", .{
+                    loop_count,
+                    poll_fds[idx].fd,
+                    poll_fds[idx].revents,
+                    trace.elapsedMs(start_ns),
+                });
             }
         }
 
         // Watchdog: reset stalled frame callbacks
-        const now_ms = std.time.milliTimestamp();
+        const now_ms = monotonicMillis(init.io);
         for (surfaces[0..surface_count]) |*surf| {
             if (surf.frame_pending and surf.needs_render and
                 (now_ms - surf.frame_requested_ms) > Surface.frame_watchdog_ms)
@@ -560,56 +659,103 @@ pub fn main() !void {
         }
 
         // Check timers, process event queue
+        const timers_start_ns = trace.nowNs();
         dispatch.checkTimers();
-        var db_changed = false;
-        _ = dispatch.processQueue();
+        trace.log("main.check-timers loop={d} queued={d} dur_ms={d:.3}", .{
+            loop_count,
+            dispatch.queue_count,
+            trace.elapsedMs(timers_start_ns),
+        });
+        const queue_start_ns = trace.nowNs();
+        const processed = dispatch.processQueue();
+        trace.log("main.process-queue loop={d} processed={} queued_after={d} dur_ms={d:.3}", .{
+            loop_count,
+            processed,
+            dispatch.queue_count,
+            trace.elapsedMs(queue_start_ns),
+        });
 
         // Process surface lifecycle requests from Janet
+        const surface_req_start_ns = trace.nowNs();
         processSurfaceRequests();
-        processShmRenderRequests();
+        trace.log("main.surface-requests loop={d} dur_ms={d:.3}", .{ loop_count, trace.elapsedMs(surface_req_start_ns) });
 
-        if (dispatch.render_dirty) {
-            dispatch.render_dirty = false;
-            db_changed = true;
-        }
+        const shm_req_start_ns = trace.nowNs();
+        processShmRenderRequests();
+        trace.log("main.shm-render-requests loop={d} dur_ms={d:.3}", .{ loop_count, trace.elapsedMs(shm_req_start_ns) });
 
         // Tick animations
-        const dt = frame_clock.tick();
+        const anim_start_ns = trace.nowNs();
+        const dt = frame_clock.tick(dispatch.io);
         const anim_active = dispatch.tickAnimations(dt);
+        trace.log("main.anim loop={d} dt={d:.4} active={} dur_ms={d:.3}", .{
+            loop_count,
+            dt,
+            anim_active,
+            trace.elapsedMs(anim_start_ns),
+        });
 
         // Process any completion events from finished animations
-        _ = dispatch.processQueue();
-        if (dispatch.render_dirty) {
-            dispatch.render_dirty = false;
-            db_changed = true;
-        }
-
-        if (db_changed or anim_active) {
-            markAllDirty();
-        }
+        const queue2_start_ns = trace.nowNs();
+        const processed2 = dispatch.processQueue();
+        trace.log("main.process-queue-post-anim loop={d} processed={} queued_after={d} dur_ms={d:.3}", .{
+            loop_count,
+            processed2,
+            dispatch.queue_count,
+            trace.elapsedMs(queue2_start_ns),
+        });
+        processSurfaceRequests();
+        processShmRenderRequests();
+        const invalidation_start_ns = trace.nowNs();
+        processRenderInvalidations();
+        trace.log("main.loop-end loop={d} spawn_ready={d} ipc_ready={d} total_ms={d:.3} invalidation_ms={d:.3}", .{
+            loop_count,
+            spawn_ready,
+            ipc_ready,
+            trace.elapsedMs(loop_start_ns),
+            trace.elapsedMs(invalidation_start_ns),
+        });
     }
 }
 
 fn requestFrame(surf: *Surface) void {
     if (surf.frame_pending) return;
+    const start_ns = trace.nowNs();
     const cb = surf.wl_surface.?.frame() catch return;
     cb.setListener(*Surface, frameListener, surf);
     surf.frame_pending = true;
-    surf.frame_requested_ms = std.time.milliTimestamp();
+    surf.frame_requested_ms = monotonicMillis(dispatch.io);
+    trace.log("surface.request-frame name={s} size={d}x{d} dur_ms={d:.3}", .{
+        surfaceTraceName(surf),
+        surf.width,
+        surf.height,
+        trace.elapsedMs(start_ns),
+    });
 }
 
 fn frameListener(_: *wl.Callback, event: wl.Callback.Event, surf: *Surface) void {
     switch (event) {
         .done => {
+            const start_ns = trace.nowNs();
             surf.frame_pending = false;
             // Surface may have been destroyed while this callback was pending.
             if (surf.wl_surface == null) return;
+            trace.log("surface.frame-callback name={s} needs_render={} size={d}x{d}", .{
+                surfaceTraceName(surf),
+                surf.needs_render,
+                surf.width,
+                surf.height,
+            });
             if (surf.needs_render) {
                 requestFrame(surf);
                 if (renderSurface(surf)) {
                     surf.needs_render = false;
                 }
             }
+            trace.log("surface.frame-callback-done name={s} dur_ms={d:.3}", .{
+                surfaceTraceName(surf),
+                trace.elapsedMs(start_ns),
+            });
         },
     }
 }
@@ -617,6 +763,11 @@ fn frameListener(_: *wl.Callback, event: wl.Callback.Event, surf: *Surface) void
 /// Mark a single surface dirty and kick off a render via frame callback.
 fn markSurfaceDirty(surf: *Surface) void {
     if (!surf.configured or surf.egl_surface == c.EGL_NO_SURFACE) return;
+    trace.log("surface.mark-dirty name={s} frame_pending={} needs_render={}", .{
+        surfaceTraceName(surf),
+        surf.frame_pending,
+        surf.needs_render,
+    });
     surf.needs_render = true;
     if (!surf.frame_pending) {
         // First change after idle — request frame callback BEFORE render
@@ -636,11 +787,65 @@ fn markAllDirty() void {
     }
 }
 
-/// Mark only dynamic surfaces dirty (for animation-only frames).
+fn markDefaultDirty() void {
+    for (surfaces[0..surface_count]) |*surf| {
+        if (surf.view_name_str == null) markSurfaceDirty(surf);
+    }
+}
+
 fn markDynamicDirty() void {
     for (surfaces[static_surface_count..surface_count]) |*surf| {
         markSurfaceDirty(surf);
     }
+}
+
+fn markNamedDirty(name: []const u8) void {
+    for (surfaces[0..surface_count]) |*surf| {
+        if (surf.view_name_str) |surface_name| {
+            if (std.mem.eql(u8, surface_name, name)) markSurfaceDirty(surf);
+        }
+    }
+}
+
+fn markRenderTarget(target: janet.Janet) void {
+    const name = janetNameSlice(target) orelse {
+        log.warn("render request: expected keyword, symbol, or string target", .{});
+        return;
+    };
+    if (std.mem.eql(u8, name, "all")) {
+        markAllDirty();
+    } else if (std.mem.eql(u8, name, "default")) {
+        markDefaultDirty();
+    } else if (std.mem.eql(u8, name, "dynamic")) {
+        markDynamicDirty();
+    } else {
+        markNamedDirty(name);
+    }
+}
+
+fn processRenderRequests() void {
+    const requests = dispatch.drainRenderRequests();
+    trace.log("render.requests-drain count={d}", .{requests.len});
+    for (requests) |req| {
+        defer _ = janet.c.janet_gcunroot(req);
+        markRenderTarget(req);
+    }
+}
+
+fn processRenderInvalidations() void {
+    trace.log("render.invalidations-start dirty={} targeted={d}", .{
+        dispatch.render_dirty,
+        dispatch.render_request_count,
+    });
+    if (dispatch.render_dirty) {
+        dispatch.render_dirty = false;
+        markAllDirty();
+    }
+    processRenderRequests();
+    trace.log("render.invalidations-end dirty={} targeted={d}", .{
+        dispatch.render_dirty,
+        dispatch.render_request_count,
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -649,6 +854,7 @@ fn markDynamicDirty() void {
 
 fn processSurfaceRequests() void {
     const requests = dispatch.drainSurfaceRequests();
+    trace.log("surface.requests-drain count={d}", .{requests.len});
     for (requests) |req| {
         defer _ = janet.c.janet_gcunroot(req);
         processSingleSurfaceRequest(req);
@@ -703,7 +909,8 @@ fn createDynamicSurface(spec: janet.Janet) void {
         if (existing.is_dynamic and existing.view_name_str != null) {
             const existing_name: []const u8 = existing.view_name_str.?;
             if (std.mem.eql(u8, existing_name, name_str)) {
-                log.warn("surface create: '{s}' already exists", .{name_str});
+                log.debug("surface create: '{s}' already exists", .{name_str});
+                markSurfaceDirty(existing);
                 return;
             }
         }
@@ -715,6 +922,7 @@ fn createDynamicSurface(spec: janet.Janet) void {
     const height = parseJanetUint(spec, "height") orelse 0;
     const exclusive_zone = parseJanetInt(spec, "exclusive-zone") orelse 0;
     const ki = parseJanetKI(spec) orelse .none;
+    const input_region = parseJanetInputRegion(spec) orelse .default;
     const anchor = parseJanetAnchor(spec);
     const margin = parseJanetMargin(spec);
     if (surface_count >= MAX_SURFACES) {
@@ -746,6 +954,7 @@ fn createDynamicSurface(spec: janet.Janet) void {
     layer_surface.setExclusiveZone(exclusive_zone);
     layer_surface.setMargin(margin.top, margin.right, margin.bottom, margin.left);
     layer_surface.setKeyboardInteractivity(wlKeyboardInteractivity(ki));
+    applyInputRegion(comp, wl_surface, input_region);
 
     const surf = &surfaces[surface_count];
     surf.* = .{
@@ -804,6 +1013,8 @@ fn destroyDynamicSurface(name_val: janet.Janet) void {
 fn processShmRenderRequests() void {
     const requests = dispatch.drainShmRenderRequests();
     if (requests.len == 0) return;
+    const start_ns = trace.nowNs();
+    trace.log("shm.requests-drain count={d}", .{requests.len});
 
     // Need an EGL context for GL calls. Use the first surface's context.
     if (surface_count == 0) {
@@ -822,9 +1033,14 @@ fn processShmRenderRequests() void {
 
     // Rebind default framebuffer
     c.glBindFramebuffer(c.GL_FRAMEBUFFER, 0);
+    trace.log("shm.requests-done count={d} dur_ms={d:.3}", .{
+        requests.len,
+        trace.elapsedMs(start_ns),
+    });
 }
 
 fn renderSingleShm(spec: janet.Janet) void {
+    const start_ns = trace.nowNs();
     const jc = janet.c;
     if (jc.janet_checktype(spec, jc.JANET_TABLE) == 0 and
         jc.janet_checktype(spec, jc.JANET_STRUCT) == 0)
@@ -876,15 +1092,14 @@ fn renderSingleShm(spec: janet.Janet) void {
     // Render
     const w: f32 = @floatFromInt(width);
     const h: f32 = @floatFromInt(height);
+    trace.log("shm.render-start size={d}x{d} stride={d}", .{ width, height, stride });
 
-    c.glActiveTexture(c.GL_TEXTURE0);
-    c.glBindTexture(c.GL_TEXTURE_2D, text_renderer.getAtlasTexture());
-
+    text_renderer.beginFrame();
     Layout.setPointerState(.{ -1, -1 }, false);
     renderer.begin(w, h);
     layout.setDimensions(w, h);
     layout.beginLayout();
-    dispatch.prepareRender("");
+    dispatch.prepareRender(janet.c.janet_wrap_nil(), "");
     hiccup_mod.beginPass();
     _ = dispatch.renderView(view_val);
     layout.endLayout();
@@ -895,21 +1110,25 @@ fn renderSingleShm(spec: janet.Janet) void {
     const pixel_size = src_stride * @as(usize, height);
     const size = dst_stride * @as(usize, height);
 
-    // Open shared buffer and mmap it read-write
-    const file = std.fs.openFileAbsolute(path, .{ .mode = .read_write }) catch |err| {
+    // Open shared buffer and map it read-write
+    var file = std.Io.Dir.cwd().openFile(dispatch.io, path, .{ .mode = .read_write }) catch |err| {
         log.warn("render-to-shm: open {s}: {}", .{ path, err });
         c.glDeleteFramebuffers(1, &fbo);
         c.glDeleteRenderbuffers(1, &rbo);
         return;
     };
-    defer file.close();
-    const mapped = std.posix.mmap(null, size, std.posix.PROT.READ | std.posix.PROT.WRITE, .{ .TYPE = .SHARED }, file.handle, 0) catch |err| {
-        log.warn("render-to-shm: mmap: {}", .{err});
+    defer file.close(dispatch.io);
+    var mapping = file.createMemoryMap(dispatch.io, .{
+        .len = size,
+        .protection = .{ .read = true, .write = true },
+    }) catch |err| {
+        log.warn("render-to-shm: map: {}", .{err});
         c.glDeleteFramebuffers(1, &fbo);
         c.glDeleteRenderbuffers(1, &rbo);
         return;
     };
-    defer std.posix.munmap(mapped);
+    defer mapping.destroy(dispatch.io);
+    const mapped = mapping.memory;
 
     // Read into temp buffer (some GL drivers don't like writing to mmap)
     const pixels = std.heap.page_allocator.alloc(u8, pixel_size) catch {
@@ -919,6 +1138,11 @@ fn renderSingleShm(spec: janet.Janet) void {
     };
     defer std.heap.page_allocator.free(pixels);
     c.glReadPixels(0, 0, @intCast(width), @intCast(height), c.GL_RGBA, c.GL_UNSIGNED_BYTE, pixels.ptr);
+    trace.log("shm.readpixels size={d} bytes={d} elapsed_ms={d:.3}", .{
+        width * height,
+        pixel_size,
+        trace.elapsedMs(start_ns),
+    });
 
     // Copy to mmap with row flip (GL bottom-up → Wayland top-down)
     // and RGBA → BGRA conversion (Wayland ARGB8888 = BGRA in memory)
@@ -933,6 +1157,9 @@ fn renderSingleShm(spec: janet.Janet) void {
             mapped[dst_row + col + 3] = pixels[src_row + col + 3]; // A
         }
     }
+    mapping.write(dispatch.io) catch |err| {
+        log.warn("render-to-shm: map sync: {}", .{err});
+    };
 
     // Cleanup
     c.glDeleteFramebuffers(1, &fbo);
@@ -941,9 +1168,29 @@ fn renderSingleShm(spec: janet.Janet) void {
     // Emit completion event so Janet can send the buffer to tidepool
     const event = janet.makeEventArgs("shm-rendered", &.{spec});
     dispatch.enqueue(event);
+    trace.log("shm.render-done size={d}x{d} total_ms={d:.3}", .{
+        width,
+        height,
+        trace.elapsedMs(start_ns),
+    });
 }
 
 // --- Janet spec parsers for surface creation ---
+
+fn janetNameSlice(val: janet.Janet) ?[]const u8 {
+    const jc = janet.c;
+    if (jc.janet_checktype(val, jc.JANET_KEYWORD) != 0) {
+        return std.mem.span(jc.janet_unwrap_keyword(val));
+    }
+    if (jc.janet_checktype(val, jc.JANET_SYMBOL) != 0) {
+        return std.mem.span(jc.janet_unwrap_symbol(val));
+    }
+    if (jc.janet_checktype(val, jc.JANET_STRING) != 0) {
+        const str = jc.janet_unwrap_string(val);
+        return str[0..@intCast(jc.janet_string_length(str))];
+    }
+    return null;
+}
 
 fn parseJanetLayer(spec: janet.Janet) ?Config.Layer {
     const val = janet.janetGet(spec, janet.kw("layer"));
@@ -973,6 +1220,15 @@ fn parseJanetKI(spec: janet.Janet) ?Config.KeyboardInteractivity {
     if (std.mem.eql(u8, name, "exclusive")) return .exclusive;
     if (std.mem.eql(u8, name, "on-demand")) return .on_demand;
     if (std.mem.eql(u8, name, "none")) return .none;
+    return null;
+}
+
+fn parseJanetInputRegion(spec: janet.Janet) ?DefaultSurfaceConfig.InputRegion {
+    const val = janet.janetGet(spec, janet.kw("input-region"));
+    if (janet.c.janet_checktype(val, janet.c.JANET_KEYWORD) == 0) return null;
+    const name = std.mem.span(janet.c.janet_unwrap_keyword(val));
+    if (std.mem.eql(u8, name, "default")) return .default;
+    if (std.mem.eql(u8, name, "empty")) return .empty;
     return null;
 }
 
@@ -1023,7 +1279,22 @@ fn parseJanetSurfaceConfig(spec: janet.Janet) DefaultSurfaceConfig {
         .exclusive_zone = parseJanetInt(spec, "exclusive-zone") orelse 0,
         .margin = parseJanetMargin(spec),
         .keyboard_interactivity = parseJanetKI(spec) orelse .none,
+        .input_region = parseJanetInputRegion(spec) orelse .default,
     };
+}
+
+fn applyInputRegion(comp: *wl.Compositor, wl_surface: *wl.Surface, input_region: DefaultSurfaceConfig.InputRegion) void {
+    switch (input_region) {
+        .default => {},
+        .empty => {
+            const region = comp.createRegion() catch {
+                log.warn("surface input-region: wl_compositor.create_region failed", .{});
+                return;
+            };
+            wl_surface.setInputRegion(region);
+            region.destroy();
+        },
+    }
 }
 
 fn createLayerSurface(
@@ -1048,23 +1319,41 @@ fn createLayerSurface(
     ls_surf.setExclusiveZone(cfg.exclusive_zone);
     ls_surf.setMargin(cfg.margin.top, cfg.margin.right, cfg.margin.bottom, cfg.margin.left);
     ls_surf.setKeyboardInteractivity(wlKeyboardInteractivity(cfg.keyboard_interactivity));
+    applyInputRegion(comp, surf.wl_surface.?, cfg.input_region);
     ls_surf.setListener(*Surface, layerSurfaceListener, surf);
 
     surf.wl_surface.?.commit();
 }
 
+fn surfaceTraceName(surf: *const Surface) []const u8 {
+    if (surf.view_name_str) |name| return name;
+    if (surf.output_name_len > 0) return surf.output_name[0..surf.output_name_len];
+    return "default";
+}
+
 /// Render a frame for a surface. Returns true on success, false on failure.
 fn renderSurface(surf: *Surface) bool {
+    const render_start_ns = trace.nowNs();
     if (!surf.configured or surf.egl_surface == c.EGL_NO_SURFACE) return false;
 
+    const make_current_start_ns = trace.nowNs();
     if (!surf.makeCurrent()) return false;
+    trace.log("render.make-current name={s} dur_ms={d:.3}", .{
+        surfaceTraceName(surf),
+        trace.elapsedMs(make_current_start_ns),
+    });
 
     const w: f32 = @floatFromInt(surf.width);
     const h: f32 = @floatFromInt(surf.height);
+    trace.log("render.start name={s} size={d}x{d} pointer_surface={} dynamic={}", .{
+        surfaceTraceName(surf),
+        surf.width,
+        surf.height,
+        pointer_surface != null and surf.wl_surface == pointer_surface,
+        surf.is_dynamic,
+    });
 
-    c.glActiveTexture(c.GL_TEXTURE0);
-    c.glBindTexture(c.GL_TEXTURE_2D, text_renderer.getAtlasTexture());
-
+    text_renderer.beginFrame();
     // Set pointer state for Clay hit testing — only the surface the pointer
     // is on gets valid coordinates, others get off-screen (-1, -1).
     const is_pointer_surface = pointer_surface != null and surf.wl_surface == pointer_surface;
@@ -1077,16 +1366,31 @@ fn renderSurface(surf: *Surface) bool {
     renderer.begin(w, h);
     layout.setDimensions(w, h);
 
+    const ui_start_ns = trace.nowNs();
     layout.beginLayout();
-    dispatch.prepareRender(surf.output_name[0..surf.output_name_len]);
+    const output_name = surf.output_name[0..surf.output_name_len];
+    const output_name_val = if (surf.output_name_val_valid) surf.output_name_val else janet.c.janet_wrap_nil();
+    dispatch.prepareRender(output_name_val, output_name);
     hiccup_mod.beginPass();
     const view_name = if (surf.view_name_str) |name| janet.kw(name) else janet.c.janet_wrap_nil();
-    _ = dispatch.renderView(view_name);
+    const view_start_ns = trace.nowNs();
+    const rendered_view = dispatch.renderView(view_name);
+    trace.log("render.view name={s} rendered={} dur_ms={d:.3}", .{
+        surfaceTraceName(surf),
+        rendered_view,
+        trace.elapsedMs(view_start_ns),
+    });
     layout.endLayout();
     hiccup_mod.endPass();
+    trace.log("render.ui-total name={s} content_h={d:.1} dur_ms={d:.3}", .{
+        surfaceTraceName(surf),
+        layout.content_height,
+        trace.elapsedMs(ui_start_ns),
+    });
 
     // After layout: track hover changes and check for clicks on pointer surface
     if (is_pointer_surface) {
+        const hover_start_ns = trace.nowNs();
         const over_ids = clay.getPointerOverIds();
 
         // Build current hover set from Clay's pointer-over elements
@@ -1144,10 +1448,26 @@ fn renderSurface(surf: *Surface) bool {
         prev_hover_count = curr_count;
 
         _ = dispatch.processQueue();
+        trace.log("render.hover name={s} hover_count={d} queued_after={d} dur_ms={d:.3}", .{
+            surfaceTraceName(surf),
+            prev_hover_count,
+            dispatch.queue_count,
+            trace.elapsedMs(hover_start_ns),
+        });
     }
 
+    const renderer_end_start_ns = trace.nowNs();
     renderer.end();
+    trace.log("render.renderer-end name={s} dur_ms={d:.3}", .{
+        surfaceTraceName(surf),
+        trace.elapsedMs(renderer_end_start_ns),
+    });
+    const swap_start_ns = trace.nowNs();
     _ = c.eglSwapBuffers(egl_display, surf.egl_surface);
+    trace.log("render.swap name={s} dur_ms={d:.3}", .{
+        surfaceTraceName(surf),
+        trace.elapsedMs(swap_start_ns),
+    });
 
     // Auto-size: ensure surface fits content.
     if (!surf.is_dynamic) {
@@ -1159,10 +1479,19 @@ fn renderSurface(surf: *Surface) bool {
                 const margin_v: u32 = @intCast(@max(0, default_surface_config.margin.top) + @max(0, default_surface_config.margin.bottom));
                 ls_surf.setExclusiveZone(@intCast(target_h + margin_v));
                 surf.wl_surface.?.commit();
+                trace.log("render.autosize name={s} old_h={d} target_h={d}", .{
+                    surfaceTraceName(surf),
+                    surf.height,
+                    target_h,
+                });
             }
         }
     }
 
+    trace.log("render.done name={s} total_ms={d:.3}", .{
+        surfaceTraceName(surf),
+        trace.elapsedMs(render_start_ns),
+    });
     return true;
 }
 
@@ -1231,6 +1560,14 @@ fn outputListener(_: *wl.Output, event: wl.Output.Event, surf: *Surface) void {
             const len = @min(name.len, surf.output_name.len);
             @memcpy(surf.output_name[0..len], name[0..len]);
             surf.output_name_len = len;
+            if (surf.output_name_val_valid) {
+                _ = janet.c.janet_gcunroot(surf.output_name_val);
+                surf.output_name_val_valid = false;
+            }
+            const name_str = janet.c.janet_string(name.ptr, @intCast(len));
+            surf.output_name_val = janet.c.janet_wrap_string(name_str);
+            janet.c.janet_gcroot(surf.output_name_val);
+            surf.output_name_val_valid = true;
             log.info("output name: {s} at ({d},{d})", .{ surf.output_name[0..surf.output_name_len], surf.output_x, surf.output_y });
         },
         else => {},
@@ -1316,7 +1653,7 @@ fn pointerListener(_: *wl.Pointer, event: wl.Pointer.Event, _: *const void) void
             pointer_y = @floatCast(ev.surface_y.toDouble());
             pointer_surface_changed = true;
         },
-        .leave => |_| {
+        .leave => {
             // Dispatch :pointer-leave for all previously hovered elements
             for (prev_hover_strs[0..prev_hover_count], prev_hover_lens[0..prev_hover_count]) |prev_str, prev_len| {
                 const str_val = janet.c.janet_stringv(&prev_str, @as(i32, @intCast(prev_len)));
@@ -1412,13 +1749,13 @@ fn pointerListener(_: *wl.Pointer, event: wl.Pointer.Event, _: *const void) void
 fn keyboardListener(_: *wl.Keyboard, event: wl.Keyboard.Event, _: *const void) void {
     switch (event) {
         .keymap => |km| {
-            defer std.posix.close(km.fd);
+            defer (std.Io.File{ .handle = km.fd, .flags = .{ .nonblocking = false } }).close(dispatch.io);
             if (km.format != .xkb_v1) return;
 
             const map_data = std.posix.mmap(
                 null,
                 km.size,
-                std.posix.PROT.READ,
+                .{ .READ = true },
                 .{ .TYPE = .SHARED },
                 km.fd,
                 0,
@@ -1449,7 +1786,7 @@ fn keyboardListener(_: *wl.Keyboard, event: wl.Keyboard.Event, _: *const void) v
             keyboard_focus_surface = ev.surface;
             dispatch.enqueue(janet.makeEvent("keyboard-enter"));
         },
-        .leave => |_| {
+        .leave => {
             keyboard_focus_surface = null;
             dispatch.enqueue(janet.makeEvent("keyboard-leave"));
         },

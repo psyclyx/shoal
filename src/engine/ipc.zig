@@ -1,5 +1,6 @@
 const std = @import("std");
 const jt = @import("jutil.zig");
+const trace = @import("trace.zig");
 const c = jt.c;
 const Janet = jt.Janet;
 const log = std.log.scoped(.ipc);
@@ -49,6 +50,7 @@ pub const IpcSlot = struct {
 };
 
 pub const IpcPool = struct {
+    io: std.Io = undefined,
     slots: [MAX_IPC_CONNS]IpcSlot = [_]IpcSlot{.{}} ** MAX_IPC_CONNS,
 
     /// Handle :ipc fx value. Dispatches to connect/send/disconnect.
@@ -78,6 +80,7 @@ pub const IpcPool = struct {
 
     /// Handle {:connect {:path "..." :name :id :framing :line/:netrepl :event :id ...}}
     fn handleConnect(self: *IpcPool, spec: Janet, sink: jt.EventSink) void {
+        const start_ns = trace.nowNs();
         if (c.janet_checktype(spec, c.JANET_TABLE) == 0 and
             c.janet_checktype(spec, c.JANET_STRUCT) == 0)
         {
@@ -137,8 +140,14 @@ pub const IpcPool = struct {
         self.disconnectByName(name_val, sink);
 
         // Create Unix socket and connect
-        const fd = socketConnect(path_str[0..path_len]) orelse {
+        const fd = self.socketConnect(path_str[0..path_len]) orelse {
             log.warn("ipc connect: failed to connect to {s}", .{path_str[0..path_len]});
+            trace.log("ipc.connect-failed name={s} path={s} reconnect={} dur_ms={d:.3}", .{
+                std.mem.span(c.janet_unwrap_keyword(name_val)),
+                path_str[0..path_len],
+                reconnect_delay > 0,
+                trace.elapsedMs(start_ns),
+            });
             // Schedule reconnect if configured — root spec first since
             // scheduleReconnect allocates (makeTuple) and spec is only on
             // the C stack (unrooted fx map value, invisible to GC).
@@ -194,10 +203,18 @@ pub const IpcPool = struct {
                     path_str[0..path_len],
                     std.mem.span(c.janet_unwrap_keyword(name_val)),
                 });
+                trace.log("ipc.connect name={s} path={s} fd={d} framing={s} active={d} dur_ms={d:.3}", .{
+                    std.mem.span(c.janet_unwrap_keyword(name_val)),
+                    path_str[0..path_len],
+                    fd,
+                    if (framing == .netrepl) "netrepl" else "line",
+                    self.activeCount(),
+                    trace.elapsedMs(start_ns),
+                });
 
                 // Send handshake if configured (netrepl: length-prefixed)
                 if (slot.handshake) |hs| {
-                    sendRaw(slot, hs);
+                    self.sendRaw(slot, hs);
                 }
 
                 // Enqueue connected event
@@ -210,57 +227,72 @@ pub const IpcPool = struct {
         }
 
         log.warn("ipc connect: no free slots", .{});
-        std.posix.close(fd);
+        trace.log("ipc.connect-drop name={s} reason=no-free active={d} dur_ms={d:.3}", .{
+            std.mem.span(c.janet_unwrap_keyword(name_val)),
+            self.activeCount(),
+            trace.elapsedMs(start_ns),
+        });
+        self.closeFd(fd);
     }
 
     /// Create a Unix socket and connect to the given path. Returns fd or null.
-    fn socketConnect(path: []const u8) ?std.posix.fd_t {
-        const fd = std.posix.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC, 0) catch {
-            return null;
+    fn socketConnect(self: *IpcPool, path: []const u8) ?std.posix.fd_t {
+        const socket_rc = std.posix.system.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC, 0);
+        const fd: std.posix.fd_t = switch (std.posix.errno(socket_rc)) {
+            .SUCCESS => @intCast(socket_rc),
+            else => return null,
         };
 
         var addr: std.posix.sockaddr.un = .{ .path = undefined };
         @memset(&addr.path, 0);
         if (path.len > addr.path.len) {
-            std.posix.close(fd);
+            self.closeFd(fd);
             return null;
         }
         @memcpy(addr.path[0..path.len], path);
 
-        std.posix.connect(
+        switch (std.posix.errno(std.posix.system.connect(
             fd,
             @ptrCast(&addr),
             @intCast(@sizeOf(std.posix.sockaddr.un)),
-        ) catch {
-            std.posix.close(fd);
-            return null;
-        };
+        ))) {
+            .SUCCESS => {},
+            else => {
+                self.closeFd(fd);
+                return null;
+            },
+        }
 
         return fd;
     }
 
     /// Send raw bytes on an IPC slot. For netrepl, prepends 4-byte LE length header.
-    fn sendRaw(slot: *IpcSlot, data: []const u8) void {
+    fn sendRaw(self: *IpcPool, slot: *IpcSlot, data: []const u8) void {
+        const start_ns = trace.nowNs();
         if (slot.framing == .netrepl) {
             // Netrepl: 4-byte LE length prefix
             const len: u32 = @intCast(data.len);
             const hdr = std.mem.toBytes(std.mem.nativeToLittle(u32, len));
-            writeAll(slot.fd, &hdr) catch {
+            self.writeAll(slot.fd, &hdr) catch {
                 log.warn("ipc send: write header failed", .{});
                 return;
             };
         }
-        writeAll(slot.fd, data) catch {
+        self.writeAll(slot.fd, data) catch {
             log.warn("ipc send: write failed", .{});
         };
+        trace.log("ipc.send name={s} fd={d} bytes={d} framing={s} dur_ms={d:.3}", .{
+            std.mem.span(c.janet_unwrap_keyword(slot.name)),
+            slot.fd,
+            data.len,
+            if (slot.framing == .netrepl) "netrepl" else "line",
+            trace.elapsedMs(start_ns),
+        });
     }
 
     /// Write all bytes to fd, retrying on partial writes.
-    fn writeAll(fd: std.posix.fd_t, data: []const u8) !void {
-        var remaining = data;
-        while (remaining.len > 0) {
-            remaining = remaining[std.posix.write(fd, remaining) catch |err| return err..];
-        }
+    fn writeAll(self: *IpcPool, fd: std.posix.fd_t, data: []const u8) !void {
+        try self.fdFile(fd).writeStreamingAll(self.io, data);
     }
 
     /// Handle {:send {:name :id :data "..."}}
@@ -288,7 +320,7 @@ pub const IpcPool = struct {
 
         for (&self.slots) |*slot| {
             if (slot.active and c.janet_equals(slot.name, name_val) != 0) {
-                sendRaw(slot, data_str[0..data_len]);
+                self.sendRaw(slot, data_str[0..data_len]);
                 return;
             }
         }
@@ -332,14 +364,21 @@ pub const IpcPool = struct {
 
     /// Close an IPC connection. If `reconnect` is true and the slot has reconnect
     /// configured, schedules a reconnect timer.
-    fn closeSlot(_: *IpcPool, slot: *IpcSlot, reconnect: bool, sink: jt.EventSink) void {
+    fn closeSlot(self: *IpcPool, slot: *IpcSlot, reconnect: bool, sink: jt.EventSink) void {
+        const start_ns = trace.nowNs();
         if (slot.fd >= 0) {
-            std.posix.close(slot.fd);
+            self.closeFd(slot.fd);
             slot.fd = -1;
         }
 
         log.info("ipc: disconnected :{s}", .{
             std.mem.span(c.janet_unwrap_keyword(slot.name)),
+        });
+        trace.log("ipc.disconnect name={s} reconnect={} active_before={d} dur_ms={d:.3}", .{
+            std.mem.span(c.janet_unwrap_keyword(slot.name)),
+            reconnect,
+            self.activeCount(),
+            trace.elapsedMs(start_ns),
         });
 
         // Enqueue disconnected event
@@ -429,20 +468,28 @@ pub const IpcPool = struct {
 
     /// Called from main loop when poll indicates an IPC fd is readable.
     pub fn onReadable(self: *IpcPool, fd: std.posix.fd_t, sink: jt.EventSink) void {
+        const start_ns = trace.nowNs();
         for (&self.slots) |*slot| {
             if (slot.active and slot.fd == fd) {
                 self.readSlot(slot, sink);
+                trace.log("ipc.readable fd={d} name={s} dur_ms={d:.3}", .{
+                    fd,
+                    std.mem.span(c.janet_unwrap_keyword(slot.name)),
+                    trace.elapsedMs(start_ns),
+                });
                 return;
             }
         }
+        trace.log("ipc.readable-miss fd={d} dur_ms={d:.3}", .{ fd, trace.elapsedMs(start_ns) });
     }
 
     fn readSlot(self: *IpcPool, slot: *IpcSlot, sink: jt.EventSink) void {
+        const start_ns = trace.nowNs();
         // If accumulating a large netrepl message, read directly into msg_buf
         if (slot.netrepl_msg_buf) |msg_buf| {
             const msg_len = slot.netrepl_msg_len.?;
             const remaining = msg_len - slot.netrepl_msg_pos;
-            const n = std.posix.read(slot.fd, msg_buf[slot.netrepl_msg_pos..][0..remaining]) catch {
+            const n = self.fdFile(slot.fd).readStreaming(self.io, &.{msg_buf[slot.netrepl_msg_pos..][0..remaining]}) catch {
                 slot.freeMsgBuf();
                 self.closeSlot(slot, true, sink);
                 return;
@@ -453,6 +500,14 @@ pub const IpcPool = struct {
                 return;
             }
             slot.netrepl_msg_pos += n;
+            trace.log("ipc.read-large name={s} fd={d} bytes={d} pos={d} target={d} dur_ms={d:.3}", .{
+                std.mem.span(c.janet_unwrap_keyword(slot.name)),
+                slot.fd,
+                n,
+                slot.netrepl_msg_pos,
+                msg_len,
+                trace.elapsedMs(start_ns),
+            });
             if (slot.netrepl_msg_pos >= msg_len) {
                 // Complete — enqueue and free
                 enqueueMessage(slot, msg_buf[0..msg_len], .netrepl, sink);
@@ -475,7 +530,7 @@ pub const IpcPool = struct {
             return;
         }
 
-        const n = std.posix.read(slot.fd, slot.recv_buf[slot.recv_len..]) catch {
+        const n = self.fdFile(slot.fd).readStreaming(self.io, &.{slot.recv_buf[slot.recv_len..]}) catch {
             self.closeSlot(slot, true, sink);
             return;
         };
@@ -486,6 +541,14 @@ pub const IpcPool = struct {
         }
 
         slot.recv_len += n;
+        trace.log("ipc.read name={s} fd={d} bytes={d} buffered={d} framing={s} dur_ms={d:.3}", .{
+            std.mem.span(c.janet_unwrap_keyword(slot.name)),
+            slot.fd,
+            n,
+            slot.recv_len,
+            if (slot.framing == .netrepl) "netrepl" else "line",
+            trace.elapsedMs(start_ns),
+        });
 
         switch (slot.framing) {
             .line => drainLines(slot, sink),
@@ -601,6 +664,7 @@ pub const IpcPool = struct {
 
     /// Enqueue a received IPC message as an event.
     fn enqueueMessage(slot: *IpcSlot, data: []const u8, framing: IpcFraming, sink: jt.EventSink) void {
+        const start_ns = trace.nowNs();
         if (framing == .netrepl and data.len > 0) {
             // Classify by first byte
             const type_kw = switch (data[0]) {
@@ -623,6 +687,12 @@ pub const IpcPool = struct {
             const items = [2]Janet{ slot.event_id, str_val };
             sink.enqueue(sink.ctx, jt.makeTuple(&items));
         }
+        trace.log("ipc.enqueue-message name={s} bytes={d} framing={s} dur_ms={d:.3}", .{
+            std.mem.span(c.janet_unwrap_keyword(slot.name)),
+            data.len,
+            if (framing == .netrepl) "netrepl" else "line",
+            trace.elapsedMs(start_ns),
+        });
     }
 
     /// Fill a poll fd buffer with active IPC connection fds. Returns count added.
@@ -663,11 +733,27 @@ pub const IpcPool = struct {
         for (&self.slots) |*slot| {
             if (slot.active) {
                 if (slot.fd >= 0) {
-                    std.posix.close(slot.fd);
+                    self.closeFd(slot.fd);
                     slot.fd = -1;
                 }
                 freeSlot(slot);
             }
         }
+    }
+
+    fn fdFile(_: *IpcPool, fd: std.posix.fd_t) std.Io.File {
+        return .{ .handle = fd, .flags = .{ .nonblocking = false } };
+    }
+
+    fn closeFd(self: *IpcPool, fd: std.posix.fd_t) void {
+        self.fdFile(fd).close(self.io);
+    }
+
+    fn activeCount(self: *const IpcPool) usize {
+        var count: usize = 0;
+        for (self.slots) |slot| {
+            if (slot.active) count += 1;
+        }
+        return count;
     }
 };

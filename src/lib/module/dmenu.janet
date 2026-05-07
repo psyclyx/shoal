@@ -72,7 +72,7 @@
 
 (defn- result-item [idx label selected]
   (let [active (= idx selected)]
-    [:row {:id (string "result-" idx) :w :grow :h 64
+    [:row {:id (string/format "result-%d" idx) :w :grow :h 64
            :bg (if active overlay-color bg)
            :radius 8 :pad [8 24] :align-y :center :gap 16}
       [:row {:w 8 :h 32 :bg (if active accent [0 0 0 0]) :radius 4}]
@@ -108,7 +108,7 @@
       # Footer with count and keybind reference
       [:row {:h 56 :w :grow :align-y :center :pad [0 16] :gap 32}
         [:text {:color subtle :size 22}
-          (string (length results) " / " (sub :dmenu/total))]
+          (string/format "%d / %d" (length results) (sub :dmenu/total))]
         [:row {:w :grow}]
         [:text {:color subtle :size 22}
           "Ret select · S-Ret literal · Esc cancel · C-w word · C-u clear · ↑↓ nav"]]]))
@@ -119,7 +119,8 @@
 
 (reg-event-handler :init
   (fn [cofx event]
-    {:anim {:id :dmenu/reveal :to 1 :duration 0.15 :easing :ease-out-cubic}}))
+    {:anim {:id :dmenu/reveal :to 1 :duration 0.15 :easing :ease-out-cubic
+            :surface :default}}))
 
 # Close on keyboard focus loss (compositor sends this on click-outside)
 (reg-event-handler :keyboard-leave
@@ -164,10 +165,12 @@
           {:db (-> db
                    (put :dmenu/query new-query)
                    (put :dmenu/selected (clamp selected 0
-                                          (max 0 (- (length new-results) 1)))))})
+                                          (max 0 (- (length new-results) 1)))))
+           :render :default})
 
         (and (= sym "u") (info :ctrl))
-        {:db (-> db (put :dmenu/query "") (put :dmenu/selected 0))}
+        {:db (-> db (put :dmenu/query "") (put :dmenu/selected 0))
+         :render :default}
 
         (and (= sym "w") (info :ctrl))
         (let [new-query (do
@@ -181,14 +184,17 @@
           {:db (-> db
                    (put :dmenu/query new-query)
                    (put :dmenu/selected (clamp selected 0
-                                          (max 0 (- (length new-results) 1)))))})
+                                          (max 0 (- (length new-results) 1)))))
+           :render :default})
 
         (or (= sym "Up") (and (= sym "p") (info :ctrl)) (and (= sym "k") (info :ctrl)))
-        {:db (put db :dmenu/selected (max 0 (- selected 1)))}
+        {:db (put db :dmenu/selected (max 0 (- selected 1)))
+         :render :default}
 
         (or (= sym "Down") (and (= sym "n") (info :ctrl)) (and (= sym "j") (info :ctrl)))
         {:db (put db :dmenu/selected (min (max 0 (- result-count 1))
-                                           (+ selected 1)))}
+                                           (+ selected 1)))
+         :render :default}
 
         # Regular text input
         (and (> (length text) 0) (not (info :ctrl)) (not (info :alt)) (not (info :super)))
@@ -197,7 +203,8 @@
           {:db (-> db
                    (put :dmenu/query new-query)
                    (put :dmenu/selected (clamp selected 0
-                                          (max 0 (- (length new-results) 1)))))})))))))))
+                                          (max 0 (- (length new-results) 1)))))
+           :render :default})))))))
 
 # --- Pointer handling ---
 
@@ -223,7 +230,9 @@
           result-count (length (filter-items items query))]
       (cond
         (= dir "up")
-        {:db (put db :dmenu/selected (max 0 (- selected 1)))}
+        {:db (put db :dmenu/selected (max 0 (- selected 1)))
+         :render :default}
         (= dir "down")
         {:db (put db :dmenu/selected (min (max 0 (- result-count 1))
-                                           (+ selected 1)))}))))
+                                           (+ selected 1)))
+         :render :default}))))

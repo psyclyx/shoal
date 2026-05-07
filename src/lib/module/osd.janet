@@ -53,7 +53,9 @@
                :bg [(bar-color 0) (bar-color 1) (bar-color 2) alpha]
                :radius 4}]]
       [:text {:color [(bright 0) (bright 1) (bright 2) alpha] :size 22}
-        (string (math/floor value) (if is-muted " (muted)" "%"))]]])
+        (if is-muted
+          (string/format "%d (muted)" (math/floor value))
+          (string/format "%d%%" (math/floor value)))]]])
 
 (reg-view :osd osd-view)
 
@@ -61,35 +63,39 @@
 
 (defn- osd/show [db label value &opt muted]
   "Update db and return fx to show the OSD."
-  (def was-visible (get db :osd/visible? false))
   (def updated (-> db
                    (put :osd/visible? true)
                    (put :osd/label label)
                    (put :osd/value value)
                    (put :osd/muted? (truthy? muted))))
-  (def effects @{:db updated
-                 :anim {:id :osd/reveal :to 1 :duration 0.12 :easing :ease-out-cubic}
-                 :timer {:delay 1.5 :event [:osd/hide] :id :osd-timeout}})
-  (when (not was-visible)
-    (put effects :surface
+  {:db updated
+   :render :osd
+   :anim {:id :osd/reveal :to 1 :duration 0.12 :easing :ease-out-cubic
+          :surface :osd}
+   :timer {:delay 1.5 :event [:osd/hide] :id :osd-timeout}})
+
+(reg-event-handler :init
+  (fn [cofx event]
+    {:surface
       {:create {:name :osd
                 :layer :overlay
                 :width 320
                 :height 120
                 :anchor {:top true}
                 :margin {:top 80}
-                :keyboard-interactivity :none}}))
-  effects)
+                :keyboard-interactivity :none
+                :input-region :empty}}}))
 
 (reg-event-handler :osd/hide
   (fn [cofx event]
     {:anim {:id :osd/reveal :to 0 :duration 0.2 :easing :ease-in-out-quad
-            :on-complete [:osd/destroy]}}))
+            :surface :osd
+            :on-complete [:osd/hidden]}}))
 
-(reg-event-handler :osd/destroy
+(reg-event-handler :osd/hidden
   (fn [cofx event]
     {:db (put (cofx :db) :osd/visible? false)
-     :surface {:destroy :osd}}))
+     :render :osd}))
 
 # --- Reactive volume watcher ---
 # Compares current audio state to previous snapshot each time sysinfo
@@ -106,4 +112,5 @@
                (or (not= pct (get prev :percent 0))
                    (not= muted (get prev :muted false))))
         (osd/show (put db :osd/prev-audio audio) "Volume" pct muted)
-        {:db (put db :osd/prev-audio audio)}))))
+        {:db (put db :osd/prev-audio audio)
+         :render :osd}))))

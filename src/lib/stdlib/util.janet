@@ -39,7 +39,7 @@
   [g]
   (let [w (math/floor g)
         f (math/floor (* 10 (- g w)))]
-    (string w "." f)))
+    (string/format "%d.%d" w f)))
 
 (defn fmt-mem
   "Format memory in MB or GB."
@@ -48,8 +48,8 @@
     (let [gib (/ mb 1024)
           whole (math/floor gib)
           frac (math/floor (* 10 (- gib whole)))]
-      (string whole "." frac "G"))
-    (string (math/floor mb) "M")))
+      (string/format "%d.%dG" whole frac))
+    (string/format "%dM" (math/floor mb))))
 
 (defn fmt3
   "Format value + suffix as exactly 3 characters: X.X or XX or XXX."

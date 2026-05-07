@@ -43,19 +43,21 @@
                                         :prev-idle idle
                                         :prev-total total
                                         :bars new-bars
-                                        :tick-clock clock})}))))))
+                                        :tick-clock clock})
+             :render :default}))))))
 
 (reg-event-handler :init
   (fn [cofx event]
     {:dispatch [:cpu/tick]
      :timer {:delay 2.0 :event [:cpu/tick] :repeat true :id :cpu}
      # Heartbeat animation keeps render loop at 60fps for smooth time-based charts
-     :anim {:id :render-heartbeat :to 1 :duration 9999 :easing :linear}}))
+     :anim {:id :render-heartbeat :to 1 :duration 9999 :easing :linear
+            :surface :default}}))
 
 (reg-sub :cpu (fn [db] (get db :cpu {})))
 (reg-sub :cpu/percent [:cpu] (fn [cpu] (get cpu :percent 0)))
 (reg-sub :cpu/text [:cpu]
-  (fn [cpu] (string "cpu " (math/floor (get cpu :percent 0)) "%")))
+  (fn [cpu] (string/format "cpu %d%%" (math/floor (get cpu :percent 0)))))
 
 # -- Memory --
 
@@ -92,7 +94,8 @@
                 pct (math/round (* 100.0 (/ (- total-kb avail-kb) total-kb)))]
             {:db (put (cofx :db) :mem {:used-mb used-mb
                                         :total-mb total-mb
-                                        :percent pct})}))))))
+                                        :percent pct})
+             :render :default}))))))
 
 (reg-event-handler :init
   (fn [cofx event]
@@ -105,8 +108,8 @@
     (let [gib (/ mb 1024)
           whole (math/floor gib)
           frac (math/floor (* 10 (- gib whole)))]
-      (string whole "." frac "G"))
-    (string (math/floor mb) "M")))
+      (string/format "%d.%dG" whole frac))
+    (string/format "%dM" (math/floor mb))))
 
 (reg-sub :mem/text [:mem]
   (fn [mem]
@@ -148,9 +151,12 @@
             {:db (put (cofx :db) :bat {:percent cap
                                         :charging charging
                                         :status status
-                                        :present true})})
-          {:db (put (cofx :db) :bat {:present false})}))
-      {:db (put (cofx :db) :bat {:present false})})))
+                                        :present true})
+             :render :default})
+          {:db (put (cofx :db) :bat {:present false})
+           :render :default}))
+      {:db (put (cofx :db) :bat {:present false})
+       :render :default})))
 
 (reg-event-handler :init
   (fn [cofx event]
@@ -162,7 +168,7 @@
 (reg-sub :bat/text [:bat]
   (fn [bat]
     (if (bat :present)
-      (string "bat " (if (bat :charging) "+" "") (math/floor (get bat :percent 0)) "%")
+      (string/format "bat %s%d%%" (if (bat :charging) "+" "") (math/floor (get bat :percent 0)))
       nil)))
 
 # -- Disk --
@@ -173,9 +179,10 @@
       (let [total (get info :total 0)
             used (get info :used 0)
             pct (get info :percent 0)]
-        {:db (put (cofx :db) :disk {:total-gb (/ total 1073741824)
-                                     :used-gb (/ used 1073741824)
-                                     :percent (math/round pct)})}))))
+          {:db (put (cofx :db) :disk {:total-gb (/ total 1073741824)
+                                       :used-gb (/ used 1073741824)
+                                       :percent (math/round pct)})
+           :render :default}))))
 
 (reg-event-handler :init
   (fn [cofx event]
@@ -214,18 +221,152 @@
 
 (var- net-iface nil)
 
-(def- ln10 (math/log 10))
-(defn- log10 [x] (/ (math/log x) ln10))
+(def- NET-SAMPLE-SEC 1.5)
+(def- NET-DISPLAY-SEC 30.0)
+(def- NET-SPARK-LAG 2.0)
+(def- NET-HISTORY-SEC 45.0)
+(def- NET-ZOOM-HOLD-SEC (+ NET-SPARK-LAG (/ NET-DISPLAY-SEC 2)))
+(def- NET-SMOOTH-TAU 3.0)
+(def- NET-ZOOM-FLOOR 131072.0) # 128 KiB/s full-scale minimum
+(def- NET-ZOOM-HEADROOM-LINE 0.78)
+(def- NET-ZOOM-RECENT-TAU 8.0)
+(def- NET-ZOOM-OLD-WEIGHT 0.18)
+(def- NET-ZOOM-UP-TAU 0.8)
+(def- NET-ZOOM-DOWN-TAU 6.0)
 
-(def- NET-SMOOTH 0.25)
+(defn- exp-decay [dt tau]
+  (if (<= tau 0) 1.0
+    (- 1.0 (math/exp (- (/ (max 0 dt) tau))))))
 
-(defn- net-log-val [bps link-speed]
-  "Log10-normalize bytes/sec to 0-1 range."
-  (let [floor-bps 1024
-        ceil-bps (or link-speed 1250000000)]
-    (if (<= bps floor-bps) 0
-      (min 1 (/ (- (log10 bps) (log10 floor-bps))
-                (- (log10 ceil-bps) (log10 floor-bps)))))))
+(defn- smooth-rate [prev raw dt]
+  (let [a (exp-decay dt NET-SMOOTH-TAU)]
+    (+ (* a raw) (* (- 1 a) prev))))
+
+(defn- prune-timed [items cutoff key]
+  (def out @[])
+  (each item items
+    (when (>= (get item key 0) cutoff)
+      (array/push out item)))
+  out)
+
+(defn- secant [a b key]
+  (let [dt (max 0.001 (- (b :t) (a :t)))]
+    (/ (- (b key) (a key)) dt)))
+
+(defn- monotone-slope [d0 d1 h0 h1]
+  (if (or (= d0 0) (= d1 0) (<= (* d0 d1) 0))
+    0.0
+    (let [w1 (+ (* 2 h1) h0)
+          w2 (+ h1 (* 2 h0))]
+      (/ (+ w1 w2)
+         (+ (/ w1 d0) (/ w2 d1))))))
+
+(defn- clamp-hermite-slopes [d m0 m1]
+  (if (= d 0)
+    [0.0 0.0]
+    (let [a (/ m0 d)
+          b (/ m1 d)
+          mag (+ (* a a) (* b b))]
+      (if (> mag 9)
+        (let [scale (/ 3.0 (math/sqrt mag))]
+          [(* scale a d) (* scale b d)])
+        [m0 m1]))))
+
+(defn- cubic-coeffs [y0 y1 m0 m1 h]
+  [ (+ (* 2 (- y0 y1)) (* h (+ m0 m1)))
+    (- (* 3 (- y1 y0)) (* h (+ (* 2 m0) m1)))
+    (* h m0)
+    y0])
+
+(defn- interval-coeffs [samples idx key]
+  (let [a (samples idx)
+        b (samples (+ idx 1))
+        h (max 0.001 (- (b :t) (a :t)))
+        d (secant a b key)
+        m0 (if (> idx 0)
+             (let [p (samples (- idx 1))
+                   hp (max 0.001 (- (a :t) (p :t)))
+                   dp (secant p a key)]
+               (monotone-slope dp d hp h))
+             d)
+        slopes (clamp-hermite-slopes d m0 d)]
+    (cubic-coeffs (a key) (b key) (slopes 0) (slopes 1) h)))
+
+(defn- finalized-net-interval [samples idx]
+  (let [a (samples idx)
+        b (samples (+ idx 1))]
+    {:t0 (a :t)
+     :t1 (b :t)
+     :dt (max 0.001 (- (b :t) (a :t)))
+     :rx (interval-coeffs samples idx :rx)
+     :tx (interval-coeffs samples idx :tx)}))
+
+(defn- net-zoom-at [net now]
+  (let [from (get net :zoom-from NET-ZOOM-FLOOR)
+        to (get net :zoom-to NET-ZOOM-FLOOR)
+        clock (get net :zoom-clock now)
+        tau (get net :zoom-tau 0)]
+    (if (<= tau 0)
+      to
+      (+ to (* (- from to)
+               (math/exp (- (/ (max 0 (- now clock)) tau))))))))
+
+(defn- target-net-zoom [samples now]
+  (var peak 0.0)
+  (each s samples
+    (let [age (max 0 (- now (s :t)))]
+      (when (<= age NET-HISTORY-SEC)
+        (let [decay-age (max 0 (- age NET-ZOOM-HOLD-SEC))
+              recent (if (<= age NET-ZOOM-HOLD-SEC)
+                       1.0
+                       (+ NET-ZOOM-OLD-WEIGHT
+                          (* (- 1 NET-ZOOM-OLD-WEIGHT)
+                             (math/exp (- (/ decay-age NET-ZOOM-RECENT-TAU))))))
+              rate (max (s :rx) (s :tx))]
+          (set peak (max peak (* rate recent)))))))
+  (max NET-ZOOM-FLOOR (/ peak NET-ZOOM-HEADROOM-LINE)))
+
+(defn- eval-cubic [coeff u]
+  (+ (* (+ (* (+ (* (coeff 0) u) (coeff 1)) u) (coeff 2)) u)
+     (coeff 3)))
+
+(defn- sharpen-interval-u [u]
+  # Bias the frozen cubic toward its right endpoint so transitions read
+  # crisper without recomputing old intervals.
+  (* u u))
+
+(defn- sample-net-intervals [intervals t key]
+  (var result nil)
+  (each interval intervals
+    (when (and (>= t (interval :t0)) (<= t (interval :t1)))
+      (let [u (max 0 (min 1 (/ (- t (interval :t0)) (interval :dt))))
+            su (sharpen-interval-u u)]
+        (set result (max 0 (eval-cubic (interval key) su))))
+      (break)))
+  (or result 0.0))
+
+(defn net-spark-values
+  "Return normalized rx/tx values sampled from frozen cubic network intervals."
+  [net count &opt opts]
+  (let [now (os/clock :monotonic)
+        zoom (max NET-ZOOM-FLOOR (net-zoom-at net now))
+        intervals (get net :intervals @[])
+        head-time (- now NET-SPARK-LAG)
+        bar-w (get opts :bar-width 4)
+        bar-gap (get opts :gap 2)
+        pitch (+ bar-w bar-gap)
+        span (+ (* count bar-w) (* (max 0 (- count 1)) bar-gap))
+        rx-values @[]
+        tx-values @[]]
+    (for i 0 count
+      (let [mid-x (+ (* i pitch) (/ bar-w 2))
+            # Newest data is at the rightmost bar midpoint. Gaps count as
+            # time distance, so wider spacing moves neighboring samples apart.
+            age (* NET-DISPLAY-SEC (- 1 (/ mid-x span)))
+            t (- head-time age)]
+        (array/push rx-values (/ (sample-net-intervals intervals t :rx) zoom))
+        (array/push tx-values (/ (sample-net-intervals intervals t :tx) zoom))))
+    {:rx rx-values :tx tx-values :zoom zoom}))
 
 (defn- get-link-speed [iface]
   "Get link speed in bytes/sec from sysfs. Returns nil on failure."
@@ -267,21 +408,33 @@
             rx-rate (if (> prev-rx 0) (max 0 (/ (- (now :rx) prev-rx) dt)) 0)
             tx-rate (if (> prev-tx 0) (max 0 (/ (- (now :tx) prev-tx) dt)) 0)
             tick-count (+ 1 (get prev :tick-count 0))
-            update-ips (or (nil? (get prev :ipv4)) (= 0 (% tick-count 60)))
+            update-ips (or (nil? (get prev :ipv4)) (= 0 (% tick-count 15)))
             ipv4 (if update-ips (or (get-local-ipv4) "") (get prev :ipv4 ""))
             link-speed (or (get prev :link-speed)
                            (get-link-speed net-iface))
-            # Log-normalize and smooth into bar histories
-            log-rx (net-log-val rx-rate link-speed)
-            log-tx (net-log-val tx-rate link-speed)
-            rx-bars (or (get prev :rx-bars) (array/new-filled (+ N-BARS 1) 0))
-            tx-bars (or (get prev :tx-bars) (array/new-filled (+ N-BARS 1) 0))
-            sm-rx (+ (* NET-SMOOTH log-rx) (* (- 1 NET-SMOOTH) (or (last rx-bars) 0)))
-            sm-tx (+ (* NET-SMOOTH log-tx) (* (- 1 NET-SMOOTH) (or (last tx-bars) 0)))
-            new-rx-bars (array/slice rx-bars 1)
-            new-tx-bars (array/slice tx-bars 1)]
-        (array/push new-rx-bars sm-rx)
-        (array/push new-tx-bars sm-tx)
+            old-samples (get prev :samples @[])
+            old-intervals (get prev :intervals @[])
+            last-sample (last old-samples)
+            sm-rx (if last-sample
+                    (smooth-rate (last-sample :rx) rx-rate dt)
+                    rx-rate)
+            sm-tx (if last-sample
+                    (smooth-rate (last-sample :tx) tx-rate dt)
+                    tx-rate)
+            sample {:t clock :dt dt :rx sm-rx :tx sm-tx}
+            samples (array/slice old-samples 0)
+            intervals (array/slice old-intervals 0)]
+        (array/push samples sample)
+        (when (>= (length samples) 2)
+          (array/push intervals (finalized-net-interval samples (- (length samples) 2))))
+        (let [cutoff (- clock NET-HISTORY-SEC)
+              samples (prune-timed samples cutoff :t)
+              intervals (prune-timed intervals cutoff :t1)
+              current-zoom (net-zoom-at prev clock)
+              zoom-target (target-net-zoom samples clock)
+              zoom-tau (if (> zoom-target current-zoom)
+                         NET-ZOOM-UP-TAU
+                         NET-ZOOM-DOWN-TAU)]
         {:db (put (cofx :db) :net {:rx-rate rx-rate
                                     :tx-rate tx-rate
                                     :prev-rx (now :rx)
@@ -292,13 +445,18 @@
                                     :ipv4 ipv4
                                     :tick-count tick-count
                                     :link-speed link-speed
-                                    :rx-bars new-rx-bars
-                                    :tx-bars new-tx-bars})}))))
+                                    :samples samples
+                                    :intervals intervals
+                                    :zoom-from current-zoom
+                                    :zoom-to zoom-target
+                                    :zoom-clock clock
+                                    :zoom-tau zoom-tau})
+         :render :default})))))
 
 (reg-event-handler :init
   (fn [cofx event]
     {:dispatch [:net/tick]
-     :timer {:delay 1.0 :event [:net/tick] :repeat true :id :net}}))
+     :timer {:delay NET-SAMPLE-SEC :event [:net/tick] :repeat true :id :net}}))
 
 (reg-sub :net (fn [db] (get db :net {})))
 
@@ -317,7 +475,8 @@
         (let [vol (or (scan-number (get parts 1 "0")) 0)
               pct (math/round (* vol 100))
               muted (truthy? (string/find "[MUTED]" line))]
-          {:db (put (cofx :db) :audio {:percent pct :muted muted})})))))
+          {:db (put (cofx :db) :audio {:percent pct :muted muted})
+           :render :default})))))
 
 (reg-event-handler :audio/subscribe-event
   (fn [cofx event]

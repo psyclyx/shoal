@@ -50,12 +50,14 @@
   (fn [cofx event]
     (if (os/getenv "SWAYSOCK")
       {:db (put (cofx :db) :wm {:connected false})
+       :render :default
        :spawn {:cmd ["swaymsg" "-t" "subscribe" "-m"
                       "[\"workspace\",\"window\",\"mode\",\"binding\"]"]
                :event :sway/event
                :done :sway/disconnected}
        :dispatch-n [[:sway/poll-workspaces] [:sway/poll-tree]]}
-      {:db (put (cofx :db) :wm {:connected false})})))
+      {:db (put (cofx :db) :wm {:connected false})
+       :render :default})))
 
 (reg-event-handler :sway/poll-workspaces
   (fn [cofx event]
@@ -70,7 +72,8 @@
       (do
         (def data (json/decode line true))
         (when (and data (indexed? data))
-          {:db (sway/apply-workspaces (cofx :db) data)}))
+          {:db (sway/apply-workspaces (cofx :db) data)
+           :render :default}))
       ([err] nil))))
 
 (reg-event-handler :sway/workspaces-done
@@ -119,7 +122,8 @@
                             :connected true}
                            (when focused
                              {:title (get focused :title "")
-                              :app-id (get focused :app-id "")})))}))
+                              :app-id (get focused :app-id "")})))
+           :render :default}))
       ([err] nil))))
 
 (reg-event-handler :sway/tree-done
@@ -145,6 +149,7 @@
             (do
               (def db (sway/apply-window-event (cofx :db) data))
               {:db db
+               :render :default
                :dispatch [:sway/poll-tree]})
 
             # Binding events (treated as signals)
@@ -158,6 +163,7 @@
   (fn [cofx event]
     (eprintf "sway: subscription ended, reconnecting in 2s")
     {:db (put (cofx :db) :wm (merge (get (cofx :db) :wm {}) {:connected false}))
+     :render :default
      :timer {:delay 2.0 :event [:init] :id :sway-reconnect}}))
 
 # -- Actions --
@@ -168,15 +174,15 @@
 
 (reg-event-handler :wm/focus-tag
   (fn [cofx event]
-    (sway/cmd "workspace number" (string (get event 1 1)))))
+    (sway/cmd "workspace number" (string/format "%d" (get event 1 1)))))
 
 (reg-event-handler :wm/toggle-tag
   (fn [cofx event]
-    (sway/cmd "workspace number" (string (get event 1 1)))))
+    (sway/cmd "workspace number" (string/format "%d" (get event 1 1)))))
 
 (reg-event-handler :wm/set-tag
   (fn [cofx event]
-    (sway/cmd "move container to workspace number" (string (get event 1 1)))))
+    (sway/cmd "move container to workspace number" (string/format "%d" (get event 1 1)))))
 
 (reg-event-handler :wm/set-layout
   (fn [cofx event]
@@ -217,7 +223,7 @@
 (reg-event-handler :wm/focus-window
   (fn [cofx event]
     (def wid (get event 1 0))
-    (sway/cmd (string "[con_id=" wid "]") "focus")))
+    (sway/cmd (string/format "[con_id=%d]" wid) "focus")))
 
 (reg-event-handler :wm/query-actions
   (fn [cofx event] nil))

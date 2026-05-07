@@ -36,6 +36,17 @@ pub fn build(b: *Build) void {
         .optimize = optimize,
     });
 
+    // --- Snail text/vector renderer ---
+    const snail_dep = b.dependency("snail", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const snail_assets_mod = b.createModule(.{
+        .root_source_file = snail_dep.path("assets/assets.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     // --- Main executable ---
     const exe = b.addExecutable(.{
         .name = "shoal",
@@ -47,6 +58,8 @@ pub fn build(b: *Build) void {
             .imports = &.{
                 .{ .name = "wayland", .module = wayland_mod },
                 .{ .name = "clay", .module = zclay.module("zclay") },
+                .{ .name = "snail", .module = snail_dep.module("snail") },
+                .{ .name = "snail_assets", .module = snail_assets_mod },
             },
         }),
     });
@@ -56,10 +69,7 @@ pub fn build(b: *Build) void {
     root_mod.linkSystemLibrary("wayland-client", .{});
     root_mod.linkSystemLibrary("wayland-egl", .{});
     root_mod.linkSystemLibrary("EGL", .{});
-    root_mod.linkSystemLibrary("GLESv2", .{});
-    root_mod.linkSystemLibrary("freetype2", .{});
-    root_mod.linkSystemLibrary("harfbuzz", .{});
-    root_mod.linkSystemLibrary("fontconfig", .{});
+    root_mod.linkSystemLibrary("OpenGL", .{});
     root_mod.linkSystemLibrary("xkbcommon", .{});
     root_mod.linkSystemLibrary("janet", .{});
 

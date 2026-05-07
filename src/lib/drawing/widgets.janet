@@ -12,16 +12,20 @@
 (def N-SPARKLINE 15)    # Number of sparkline bars
 (def SPARKLINE-W 4)     # Sparkline bar width
 (def SPARKLINE-GAP 2)   # Gap between sparkline bars
+(def N-NET-SPARK 15)    # 30s network window sampled at visible bar midpoints
+(def NET-SPARK-HEADROOM 0.78) # Bars fade from this line to the edge
 
 # --- Section ---
 
 (defn section
   "Powerline section: parallelogram bg with /-slanted edges.
    Minimal left padding so fill-bars can sit at the left edge.
-   Optional :height key in opts overrides default 38px."
+   Optional :height, :pad, and :gap keys in opts override defaults."
   [color opts & children]
   (def h (get opts :height 38))
-  [:row {:h h :pad [0 12 0 2] :align-y :center :gap 8
+  (def pad (get opts :pad [0 12 0 2]))
+  (def gap (get opts :gap 8))
+  [:row {:h h :pad pad :align-y :center :gap gap
          :bg color :skew SLANT}
     ;children])
 
@@ -82,6 +86,24 @@
         [:row {:pad [0 0 0 rx-offset]}
           [:row {:w SPARKLINE-W :h rx-h :bg (rx-color-fn rv) :skew SLANT}]]
         [:row {:w SPARKLINE-W :h tx-h :bg (tx-color-fn tv) :skew SLANT}]])])
+
+(defn network-spark
+  "Mirrored network spark with centered slanted bars.
+   Values are linear normalized rates; values above 1 fade into the edge."
+  [rx-vals tx-vals rx-color tx-color &opt opts]
+  (def h (get opts :height 38))
+  (def bar-w (get opts :bar-width SPARKLINE-W))
+  (def gap (get opts :gap SPARKLINE-GAP))
+  (def fade-start (get opts :fade-start NET-SPARK-HEADROOM))
+  (def n (max (length rx-vals) (length tx-vals)))
+  (def skew-pad (math/ceil (* SLANT (/ h 2))))
+  (def w (+ (* n bar-w) (* (max 0 (- n 1)) gap) (* 2 skew-pad)))
+  [:net-spark {:w w :h h
+               :values rx-vals :values2 tx-vals
+               :color rx-color :color2 tx-color
+               :skew SLANT
+               :bar-width bar-w :bar-gap gap
+               :fade-start fade-start}])
 
 # --- Icons ---
 # All shapes lean with the / via skew to match the section aesthetic.

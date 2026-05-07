@@ -6,6 +6,7 @@ const spawn_mod = @import("spawn.zig");
 const ipc_mod = @import("ipc.zig");
 const fileio = @import("fileio.zig");
 const theme_mod = @import("theme.zig");
+const trace = @import("trace.zig");
 const log = std.log.scoped(.janet);
 
 pub const c = jutil.c;
@@ -94,6 +95,7 @@ const MAX_QUEUED_EVENTS = 256;
 const MAX_TIMERS = 64;
 const MAX_ANIMS = 64;
 const MAX_SURFACE_REQUESTS = 8;
+const MAX_RENDER_REQUESTS = 32;
 
 const AnimSlot = struct {
     active: bool = false,
@@ -105,6 +107,7 @@ const AnimSlot = struct {
     duration: f32 = 0,
     easing: animation.Easing = .linear,
     on_complete: Janet = undefined, // event tuple or nil, GC-rooted when active
+    surface: Janet = undefined, // target surface keyword or nil, GC-rooted when present
 };
 
 const Timer = struct {
@@ -117,6 +120,8 @@ const Timer = struct {
 };
 
 pub const Dispatch = struct {
+    io: std.Io = undefined,
+    environ_map: *std.process.Environ.Map = undefined,
     env: *JanetTable,
     db: Janet,
     render_dirty: bool = false,
@@ -150,6 +155,10 @@ pub const Dispatch = struct {
     shm_render_requests: [MAX_SURFACE_REQUESTS]Janet = undefined,
     shm_render_request_count: usize = 0,
 
+    // Surface-specific render requests (processed by main.zig)
+    render_requests: [MAX_RENDER_REQUESTS]Janet = undefined,
+    render_request_count: usize = 0,
+
     // Cached function references (set by initBoot)
     fn_get_handler: Janet = undefined,
     fn_get_cofx_injector: Janet = undefined,
@@ -162,7 +171,12 @@ pub const Dispatch = struct {
     fn_set_theme: Janet = undefined,
 
     /// Load the shoal framework into a fresh environment. Sets up registries.
-    pub fn initBoot(self: *Dispatch, theme: theme_mod.Theme, dmenu_mode: bool) !void {
+    pub fn initBoot(self: *Dispatch, io: std.Io, environ_map: *std.process.Environ.Map, theme: theme_mod.Theme, dmenu_mode: bool) !void {
+        self.io = io;
+        self.environ_map = environ_map;
+        self.spawns.io = io;
+        self.ipcs.io = io;
+
         // Set global dispatch pointer for Janet C functions
         global_dispatch = self;
 
@@ -210,6 +224,7 @@ pub const Dispatch = struct {
         self.fn_get_view_fn = envLookup(self.env, "get-view-fn") orelse return error.BootMissingGetViewFn;
         self.fn_get_all_surface_configs = envLookup(self.env, "get-all-surface-configs") orelse return error.BootMissingGetSurfaceConfigs;
         self.fn_set_theme = envLookup(self.env, "set-theme") orelse return error.BootMissingSetTheme;
+        _ = self.pcall(self.fn_set_current_db, &.{self.db});
 
         // Initialize the hiccup walker (pre-intern keywords)
         hiccup.init();
@@ -232,34 +247,59 @@ pub const Dispatch = struct {
     pub fn enqueue(self: *Dispatch, event: Janet) void {
         if (self.queue_count >= MAX_QUEUED_EVENTS) {
             log.warn("event queue full, dropping event", .{});
+            trace.log("dispatch.enqueue-drop event={s} queue={d} capacity={d}", .{
+                traceEventName(event),
+                self.queue_count,
+                MAX_QUEUED_EVENTS,
+            });
             return;
         }
         c.janet_gcroot(event);
         self.event_queue[self.queue_tail] = event;
         self.queue_tail = (self.queue_tail + 1) % MAX_QUEUED_EVENTS;
         self.queue_count += 1;
+        trace.log("dispatch.enqueue event={s} queue={d} capacity={d}", .{
+            traceEventName(event),
+            self.queue_count,
+            MAX_QUEUED_EVENTS,
+        });
     }
 
     /// Process all queued events. Events enqueued during processing (via :dispatch fx)
     /// are processed in the same batch. Returns true if any events were processed.
     pub fn processQueue(self: *Dispatch) bool {
         if (self.queue_count == 0) return false;
+        const start_ns = trace.nowNs();
+        const initial_count = self.queue_count;
+        var processed: usize = 0;
+        trace.log("dispatch.process-start queue={d}", .{initial_count});
         // Drain until empty (handlers may enqueue more events)
         while (self.queue_count > 0) {
             const event = self.event_queue[self.queue_head];
             self.queue_head = (self.queue_head + 1) % MAX_QUEUED_EVENTS;
             self.queue_count -= 1;
             self.dispatchImmediate(event);
+            processed += 1;
             _ = c.janet_gcunroot(event);
         }
+        trace.log("dispatch.process-end initial={d} processed={d} remaining={d} dur_ms={d:.3}", .{
+            initial_count,
+            processed,
+            self.queue_count,
+            trace.elapsedMs(start_ns),
+        });
         return true;
     }
 
     /// Dispatch a single event immediately (not queued). Used internally.
     fn dispatchImmediate(self: *Dispatch, event: Janet) void {
+        const start_ns = trace.nowNs();
+        const event_name = traceEventName(event);
+        trace.log("dispatch.event-start event={s} queue_before={d}", .{ event_name, self.queue_count });
         // Extract event-id (first element of tuple)
         const event_id = tupleFirst(event) orelse {
             log.warn("dispatch: event is not a tuple or is empty", .{});
+            trace.log("dispatch.event-bad dur_ms={d:.3}", .{trace.elapsedMs(start_ns)});
             return;
         };
 
@@ -272,6 +312,7 @@ pub const Dispatch = struct {
             } else {
                 log.debug("dispatch: no handler for event", .{});
             }
+            trace.log("dispatch.event-no-handler event={s} dur_ms={d:.3}", .{ event_name, trace.elapsedMs(start_ns) });
             return;
         }
         // Root handler_entry — for composed multi-handlers, get-handler returns
@@ -298,6 +339,13 @@ pub const Dispatch = struct {
 
         // Execute effects
         self.executeFx(fx_map);
+        trace.log("dispatch.event-end event={s} queue_after={d} render_dirty={} render_requests={d} dur_ms={d:.3}", .{
+            event_name,
+            self.queue_count,
+            self.render_dirty,
+            self.render_request_count,
+            trace.elapsedMs(start_ns),
+        });
     }
 
     /// Build the cofx table with built-in values, then inject declared cofx.
@@ -346,21 +394,29 @@ pub const Dispatch = struct {
             return;
         }
 
+        const render_fx = janetGet(fx_map, kw("render"));
+        const has_render_fx = c.janet_checktype(render_fx, c.JANET_NIL) == 0;
+
         // Process fx in defined order
         for (fx_order) |fx_name| {
             const fx_key = kw(fx_name);
             const fx_val = janetGet(fx_map, fx_key);
             if (c.janet_checktype(fx_val, c.JANET_NIL) != 0) continue;
 
+            const fx_start_ns = trace.nowNs();
+            trace.log("dispatch.fx-start name={s} queue={d} render_dirty={}", .{
+                fx_name,
+                self.queue_count,
+                self.render_dirty,
+            });
             if (std.mem.eql(u8, fx_name, "db")) {
                 self.setDb(fx_val);
                 _ = self.pcall(self.fn_bump_generation, &.{});
-                self.render_dirty = true;
+                if (!has_render_fx) self.render_dirty = true;
             } else if (std.mem.eql(u8, fx_name, "anim")) {
                 self.handleAnimFx(fx_val);
-                self.render_dirty = true;
             } else if (std.mem.eql(u8, fx_name, "render")) {
-                self.render_dirty = true;
+                self.enqueueRenderRequest(fx_val);
             } else if (std.mem.eql(u8, fx_name, "dispatch")) {
                 self.enqueue(fx_val);
             } else if (std.mem.eql(u8, fx_name, "dispatch-n")) {
@@ -392,6 +448,13 @@ pub const Dispatch = struct {
                 }
                 _ = self.pcall(executor, &.{fx_val}) orelse continue;
             }
+            trace.log("dispatch.fx-end name={s} queue={d} render_dirty={} render_requests={d} dur_ms={d:.3}", .{
+                fx_name,
+                self.queue_count,
+                self.render_dirty,
+                self.render_request_count,
+                trace.elapsedMs(fx_start_ns),
+            });
         }
     }
 
@@ -548,10 +611,12 @@ pub const Dispatch = struct {
     /// Check timers against current time, enqueue events for any that have fired.
     pub fn checkTimers(self: *Dispatch) void {
         const now = monotonicNow();
+        var fired: usize = 0;
         for (&self.timers) |*timer| {
             if (!timer.active) continue;
             if (now >= timer.fire_time) {
                 self.enqueue(timer.event);
+                fired += 1;
                 if (timer.repeat) {
                     timer.fire_time += timer.interval;
                     // If fallen far behind (e.g. system suspend), reset to avoid burst
@@ -560,6 +625,9 @@ pub const Dispatch = struct {
                     self.freeTimer(timer);
                 }
             }
+        }
+        if (fired > 0) {
+            trace.log("dispatch.timers-fired count={d} queue={d}", .{ fired, self.queue_count });
         }
     }
 
@@ -596,13 +664,13 @@ pub const Dispatch = struct {
     // Animation pool
     // -------------------------------------------------------------------
 
-    /// Tick all active animations by dt seconds. Returns true if any are active
-    /// (caller should keep rendering). Enqueues on-complete events for finished
-    /// animations.
+    /// Tick all active animations by dt seconds. Enqueues targeted render
+    /// requests while active and on-complete events for finished animations.
     pub fn tickAnimations(self: *Dispatch, dt: f32) bool {
         var any_active = false;
         for (&self.anims) |*slot| {
             if (!slot.active) continue;
+            self.markAnimRenderDirty(slot.surface);
 
             if (slot.duration <= 0) {
                 // Immediate set (duration 0 or omitted)
@@ -699,6 +767,16 @@ pub const Dispatch = struct {
             return;
         }
 
+        const surface_val = janetGet(spec, kw("surface"));
+        const has_surface = c.janet_checktype(surface_val, c.JANET_NIL) == 0;
+        const surface_target = if (c.janet_checktype(surface_val, c.JANET_KEYWORD) != 0)
+            surface_val
+        else
+            c.janet_wrap_nil();
+        if (has_surface and c.janet_checktype(surface_target, c.JANET_NIL) != 0) {
+            log.warn("anim fx: :surface must be a keyword", .{});
+        }
+
         // Cancel?
         const cancel_val = janetGet(spec, kw("cancel"));
         if (c.janet_checktype(cancel_val, c.JANET_NIL) == 0) {
@@ -747,6 +825,9 @@ pub const Dispatch = struct {
                 slot.duration = duration;
                 slot.easing = easing;
                 slot.active = duration > 0;
+                if (c.janet_checktype(surface_target, c.JANET_KEYWORD) != 0) {
+                    self.replaceAnimSurface(slot, surface_target);
+                }
                 if (!slot.active) {
                     slot.current = target;
                     slot.progress = 1.0;
@@ -767,6 +848,7 @@ pub const Dispatch = struct {
                 } else {
                     slot.on_complete = c.janet_wrap_nil();
                 }
+                self.markAnimRenderDirty(slot.surface);
                 return;
             }
         }
@@ -774,18 +856,15 @@ pub const Dispatch = struct {
         // Find a free slot (inactive and no resting value, or first inactive)
         for (&self.anims) |*slot| {
             if (!slot.active and c.janet_checktype(slot.id, c.JANET_NIL) != 0) {
-                self.initAnimSlot(slot, id, target, duration, easing, has_explicit_from, from_val, on_complete);
+                self.initAnimSlot(slot, id, target, duration, easing, has_explicit_from, from_val, on_complete, surface_target);
                 return;
             }
         }
         // Fall back: reuse any inactive slot
         for (&self.anims) |*slot| {
             if (!slot.active) {
-                // Free the old id's GC root
-                if (c.janet_checktype(slot.id, c.JANET_KEYWORD) != 0) {
-                    _ = c.janet_gcunroot(slot.id);
-                }
-                self.initAnimSlot(slot, id, target, duration, easing, has_explicit_from, from_val, on_complete);
+                self.freeAnimSlot(slot);
+                self.initAnimSlot(slot, id, target, duration, easing, has_explicit_from, from_val, on_complete, surface_target);
                 return;
             }
         }
@@ -803,9 +882,13 @@ pub const Dispatch = struct {
         has_explicit_from: bool,
         from_val: Janet,
         on_complete: Janet,
+        surface: Janet,
     ) void {
         const start_val: f64 = if (has_explicit_from) c.janet_unwrap_number(from_val) else target;
         c.janet_gcroot(id);
+        if (c.janet_checktype(surface, c.JANET_KEYWORD) != 0) {
+            c.janet_gcroot(surface);
+        }
         slot.* = .{
             .active = duration > 0,
             .id = id,
@@ -816,6 +899,7 @@ pub const Dispatch = struct {
             .duration = duration,
             .easing = easing,
             .on_complete = c.janet_wrap_nil(),
+            .surface = surface,
         };
         if (c.janet_checktype(on_complete, c.JANET_TUPLE) != 0) {
             if (duration > 0) {
@@ -826,6 +910,7 @@ pub const Dispatch = struct {
                 self.enqueue(on_complete);
             }
         }
+        self.markAnimRenderDirty(slot.surface);
     }
 
     fn cancelAnim(self: *Dispatch, id: Janet) void {
@@ -833,6 +918,7 @@ pub const Dispatch = struct {
             if (c.janet_checktype(slot.id, c.JANET_KEYWORD) != 0 and
                 c.janet_equals(slot.id, id) != 0)
             {
+                self.markAnimRenderDirty(slot.surface);
                 slot.active = false;
                 // Discard on-complete
                 if (c.janet_checktype(slot.on_complete, c.JANET_TUPLE) != 0) {
@@ -851,7 +937,30 @@ pub const Dispatch = struct {
         if (c.janet_checktype(slot.on_complete, c.JANET_TUPLE) != 0) {
             _ = c.janet_gcunroot(slot.on_complete);
         }
+        if (c.janet_checktype(slot.surface, c.JANET_KEYWORD) != 0) {
+            _ = c.janet_gcunroot(slot.surface);
+        }
         slot.* = .{};
+    }
+
+    fn replaceAnimSurface(_: *Dispatch, slot: *AnimSlot, surface: Janet) void {
+        if (c.janet_checktype(slot.surface, c.JANET_KEYWORD) != 0) {
+            _ = c.janet_gcunroot(slot.surface);
+        }
+        if (c.janet_checktype(surface, c.JANET_KEYWORD) != 0) {
+            c.janet_gcroot(surface);
+            slot.surface = surface;
+        } else {
+            slot.surface = c.janet_wrap_nil();
+        }
+    }
+
+    fn markAnimRenderDirty(self: *Dispatch, surface: Janet) void {
+        if (c.janet_checktype(surface, c.JANET_KEYWORD) != 0) {
+            self.enqueueRenderRequest(surface);
+        } else {
+            self.render_dirty = true;
+        }
     }
 
     // -------------------------------------------------------------------
@@ -873,27 +982,32 @@ pub const Dispatch = struct {
     fn enqueueSurfaceRequest(self: *Dispatch, val: Janet) void {
         if (self.surface_request_count >= MAX_SURFACE_REQUESTS) {
             log.warn("surface request queue full", .{});
+            trace.log("dispatch.surface-request-drop count={d} capacity={d}", .{ self.surface_request_count, MAX_SURFACE_REQUESTS });
             return;
         }
         c.janet_gcroot(val);
         self.surface_requests[self.surface_request_count] = val;
         self.surface_request_count += 1;
+        trace.log("dispatch.surface-request-enqueue count={d} capacity={d}", .{ self.surface_request_count, MAX_SURFACE_REQUESTS });
     }
 
     fn enqueueShmRenderRequest(self: *Dispatch, val: Janet) void {
         if (self.shm_render_request_count >= MAX_SURFACE_REQUESTS) {
             log.warn("render-to-shm request queue full", .{});
+            trace.log("dispatch.shm-request-drop count={d} capacity={d}", .{ self.shm_render_request_count, MAX_SURFACE_REQUESTS });
             return;
         }
         c.janet_gcroot(val);
         self.shm_render_requests[self.shm_render_request_count] = val;
         self.shm_render_request_count += 1;
+        trace.log("dispatch.shm-request-enqueue count={d} capacity={d}", .{ self.shm_render_request_count, MAX_SURFACE_REQUESTS });
     }
 
     pub fn drainShmRenderRequests(self: *Dispatch) []const Janet {
         const count = self.shm_render_request_count;
         if (count == 0) return &.{};
         self.shm_render_request_count = 0;
+        trace.log("dispatch.shm-request-drain count={d}", .{count});
         return self.shm_render_requests[0..count];
     }
 
@@ -903,6 +1017,7 @@ pub const Dispatch = struct {
         const count = self.surface_request_count;
         if (count == 0) return &.{};
         self.surface_request_count = 0;
+        trace.log("dispatch.surface-request-drain count={d}", .{count});
         return self.surface_requests[0..count];
     }
 
@@ -915,11 +1030,70 @@ pub const Dispatch = struct {
     }
 
     // -------------------------------------------------------------------
+    // Targeted render requests
+    // -------------------------------------------------------------------
+
+    fn enqueueRenderRequest(self: *Dispatch, val: Janet) void {
+        if (c.janet_checktype(val, c.JANET_NIL) != 0) return;
+
+        if (c.janet_checktype(val, c.JANET_BOOLEAN) != 0) {
+            if (c.janet_unwrap_boolean(val) != 0) self.render_dirty = true;
+            return;
+        }
+
+        if (c.janet_checktype(val, c.JANET_TUPLE) != 0 or
+            c.janet_checktype(val, c.JANET_ARRAY) != 0)
+        {
+            const view = janetIndexedView(val);
+            if (view.items) |items| {
+                for (0..@intCast(view.len)) |i| {
+                    self.enqueueRenderRequest(items[i]);
+                }
+            }
+            return;
+        }
+
+        if (c.janet_checktype(val, c.JANET_KEYWORD) == 0 and
+            c.janet_checktype(val, c.JANET_SYMBOL) == 0 and
+            c.janet_checktype(val, c.JANET_STRING) == 0)
+        {
+            log.warn("render fx: expected keyword, string, symbol, bool, or array", .{});
+            return;
+        }
+
+        for (self.render_requests[0..self.render_request_count]) |existing| {
+            if (c.janet_equals(existing, val) != 0) return;
+        }
+
+        if (self.render_request_count >= MAX_RENDER_REQUESTS) {
+            log.warn("render request queue full; falling back to full redraw", .{});
+            self.render_dirty = true;
+            trace.log("dispatch.render-request-drop count={d} capacity={d}", .{ self.render_request_count, MAX_RENDER_REQUESTS });
+            return;
+        }
+
+        c.janet_gcroot(val);
+        self.render_requests[self.render_request_count] = val;
+        self.render_request_count += 1;
+        trace.log("dispatch.render-request-enqueue count={d} capacity={d}", .{ self.render_request_count, MAX_RENDER_REQUESTS });
+    }
+
+    /// Drain targeted render requests. Returns GC-rooted Janet values.
+    /// Caller must call janet_gcunroot on each after processing.
+    pub fn drainRenderRequests(self: *Dispatch) []const Janet {
+        const count = self.render_request_count;
+        if (count == 0) return &.{};
+        self.render_request_count = 0;
+        trace.log("dispatch.render-request-drain count={d}", .{count});
+        return self.render_requests[0..count];
+    }
+
+    // -------------------------------------------------------------------
     // Async file I/O
     // -------------------------------------------------------------------
 
-    pub fn initFileReader(self: *Dispatch) void {
-        self.file_reader = fileio.AsyncReader.init();
+    pub fn initFileReader(self: *Dispatch, io: std.Io) void {
+        self.file_reader = fileio.AsyncReader.init(io);
         if (self.file_reader) |*r| r.startWorker();
     }
 
@@ -929,7 +1103,9 @@ pub const Dispatch = struct {
     }
 
     pub fn onFileReaderReadable(self: *Dispatch) void {
+        const start_ns = trace.nowNs();
         if (self.file_reader) |*r| r.onReadable(self.eventSink());
+        trace.log("dispatch.file-reader-readable queue={d} dur_ms={d:.3}", .{ self.queue_count, trace.elapsedMs(start_ns) });
     }
 
     pub fn getFileReaderPollFd(self: *Dispatch) ?std.posix.fd_t {
@@ -961,38 +1137,63 @@ pub const Dispatch = struct {
         _ = c.janet_gcunroot(self.db);
         self.db = new_db;
         c.janet_gcroot(new_db);
+        _ = self.pcall(self.fn_set_current_db, &.{self.db});
     }
 
-    /// Set the current db for subscription evaluation. Call before view fn.
-    pub fn prepareRender(self: *Dispatch, output_name: []const u8) void {
-        _ = self.pcall(self.fn_set_current_db, &.{self.db});
-        if (output_name.len > 0) {
-            const name_str = c.janet_wrap_string(c.janet_string(output_name.ptr, @intCast(output_name.len)));
-            _ = self.pcall(self.fn_set_current_output, &.{name_str});
-        } else {
+    /// Set the current output for view evaluation. The current db is kept in
+    /// sync when :db effects update Dispatch.db.
+    pub fn prepareRender(self: *Dispatch, output_name: Janet, output_name_trace: []const u8) void {
+        const start_ns = trace.nowNs();
+        if (c.janet_checktype(output_name, c.JANET_NIL) != 0) {
             _ = self.pcall(self.fn_set_current_output, &.{c.janet_wrap_nil()});
+        } else {
+            _ = self.pcall(self.fn_set_current_output, &.{output_name});
         }
+        trace.log("dispatch.prepare-render output={s} dur_ms={d:.3}", .{
+            if (output_name_trace.len > 0) output_name_trace else "nil",
+            trace.elapsedMs(start_ns),
+        });
     }
 
     /// Call the registered view function and walk the resulting hiccup tree.
-    /// Call prepareRender() first to set up the db for subscriptions.
+    /// Call prepareRender() first to set up output-local view context.
     /// Pass a keyword Janet value to render a named view, or nil for the default.
     /// Returns true if a view was rendered, false if no view fn registered.
     pub fn renderView(self: *Dispatch, view_name: Janet) bool {
+        const start_ns = trace.nowNs();
         // Get the view function (named or default)
+        const lookup_start_ns = trace.nowNs();
         const view_fn_val = if (c.janet_checktype(view_name, c.JANET_NIL) != 0)
             self.pcall(self.fn_get_view_fn, &.{}) orelse return false
         else
             self.pcall(self.fn_get_view_fn, &.{view_name}) orelse return false;
         if (c.janet_checktype(view_fn_val, c.JANET_NIL) != 0) return false;
+        trace.log("dispatch.render-view-lookup view={s} dur_ms={d:.3}", .{
+            traceViewName(view_name),
+            trace.elapsedMs(lookup_start_ns),
+        });
 
         // Call the view function (no args) → hiccup tree
+        const view_call_start_ns = trace.nowNs();
         const hiccup_tree = self.pcall(view_fn_val, &.{}) orelse return false;
         c.janet_gcroot(hiccup_tree);
         defer _ = c.janet_gcunroot(hiccup_tree);
+        trace.log("dispatch.render-view-call view={s} dur_ms={d:.3}", .{
+            traceViewName(view_name),
+            trace.elapsedMs(view_call_start_ns),
+        });
 
         // Walk the hiccup tree, emitting Clay calls
+        const walk_start_ns = trace.nowNs();
         hiccup.walkHiccup(hiccup_tree);
+        trace.log("dispatch.hiccup-walk view={s} dur_ms={d:.3}", .{
+            traceViewName(view_name),
+            trace.elapsedMs(walk_start_ns),
+        });
+        trace.log("dispatch.render-view-total view={s} dur_ms={d:.3}", .{
+            traceViewName(view_name),
+            trace.elapsedMs(start_ns),
+        });
         return true;
     }
 
@@ -1017,7 +1218,8 @@ pub const Dispatch = struct {
         }
         const signal = c.janet_continue(fiber, c.janet_wrap_nil(), &out);
         if (signal != c.JANET_SIGNAL_OK) {
-            log.warn("pcall: Janet error: {s}", .{jutil.janetToStr(out)});
+            log.warn("pcall: Janet error in {s}: {s}", .{ jutil.janetToStr(func), jutil.janetToStr(out) });
+            c.janet_stacktrace_ext(fiber, out, "pcall: ");
             return null;
         }
         return out;
@@ -1028,11 +1230,9 @@ pub const Dispatch = struct {
         return doString(self.env, source, source_path);
     }
 
-    /// Inject theme colors as a `theme` def in the Janet environment.
-    /// Creates a table with semantic color names and the full Base16 palette,
-    /// each as a 4-element RGBA tuple (0-255 range).
+    /// Merge Zig config colors into Janet's theme registry.
     fn injectTheme(self: *Dispatch, theme: theme_mod.Theme) void {
-        const t = c.janet_table(24);
+        const t = c.janet_table(36);
         const t_val = c.janet_wrap_table(t);
         c.janet_gcroot(t_val);
         defer _ = c.janet_gcunroot(t_val);
@@ -1046,6 +1246,15 @@ pub const Dispatch = struct {
         c.janet_table_put(t, kw("text"), colorToJanet(theme.text()));
         c.janet_table_put(t, kw("bright"), colorToJanet(theme.bright_text()));
         c.janet_table_put(t, kw("accent"), colorToJanet(theme.accent()));
+
+        // Common aliases used by configs.
+        c.janet_table_put(t, kw("red"), colorToJanet(theme.base08));
+        c.janet_table_put(t, kw("orange"), colorToJanet(theme.base09));
+        c.janet_table_put(t, kw("yellow"), colorToJanet(theme.base0A));
+        c.janet_table_put(t, kw("green"), colorToJanet(theme.base0B));
+        c.janet_table_put(t, kw("cyan"), colorToJanet(theme.base0C));
+        c.janet_table_put(t, kw("blue"), colorToJanet(theme.base0D));
+        c.janet_table_put(t, kw("purple"), colorToJanet(theme.base0E));
 
         // Full Base16 palette
         c.janet_table_put(t, kw("base00"), colorToJanet(theme.base00));
@@ -1065,7 +1274,11 @@ pub const Dispatch = struct {
         c.janet_table_put(t, kw("base0E"), colorToJanet(theme.base0E));
         c.janet_table_put(t, kw("base0F"), colorToJanet(theme.base0F));
 
-        c.janet_def(self.env, "theme", c.janet_wrap_table(t), "Base16 theme colors from config");
+        const set_theme = envLookup(self.env, "set-theme") orelse {
+            log.warn("theme injection: set-theme missing", .{});
+            return;
+        };
+        _ = self.pcall(set_theme, &.{t_val});
     }
 
     /// Try to load a Janet source string. Returns true on success.
@@ -1087,12 +1300,10 @@ pub const Dispatch = struct {
         @memcpy(path_z[0..path.len], path);
         path_z[path.len] = 0;
 
-        const file = std.fs.openFileAbsolute(path_z[0..path.len :0], .{}) catch return false;
-        defer file.close();
-
         // Read up to 1MB
         var content_buf: [1 << 20]u8 = undefined;
-        const n = file.readAll(&content_buf) catch return false;
+        const content = std.Io.Dir.cwd().readFile(self.io, path, &content_buf) catch return false;
+        const n = content.len;
         if (n == 0 or n >= content_buf.len) return false;
         content_buf[n] = 0;
 
@@ -1123,26 +1334,26 @@ pub const Dispatch = struct {
 
         // Add src/lib from cwd if it exists (development mode)
         var cwd_buf: [4096]u8 = undefined;
-        if (std.posix.getcwd(&cwd_buf)) |cwd| {
+        if (std.process.currentPath(self.io, &cwd_buf)) |cwd_len| {
+            const cwd = cwd_buf[0..cwd_len];
             var lib_buf: [4608]u8 = undefined;
             if (std.fmt.bufPrint(&lib_buf, "{s}/src/lib", .{cwd})) |lib_path| {
-                var dir = std.fs.openDirAbsolute(lib_path, .{}) catch null;
-                if (dir) |*d| {
-                    d.close();
+                if (std.Io.Dir.openDirAbsolute(self.io, lib_path, .{})) |dir| {
+                    defer dir.close(self.io);
                     const lib_janet = c.janet_string(@ptrCast(lib_path.ptr), @intCast(lib_path.len));
                     c.janet_array_push(load_path_arr, c.janet_wrap_string(lib_janet));
-                }
+                } else |_| {}
             } else |_| {}
         } else |_| {}
 
         // Add user config dir
-        if (std.posix.getenv("XDG_CONFIG_HOME")) |xdg| {
+        if (self.environ_map.get("XDG_CONFIG_HOME")) |xdg| {
             var buf: [512]u8 = undefined;
             if (std.fmt.bufPrint(&buf, "{s}/shoal", .{xdg})) |config_dir| {
                 const dir_janet = c.janet_string(@ptrCast(config_dir.ptr), @intCast(config_dir.len));
                 c.janet_array_push(load_path_arr, c.janet_wrap_string(dir_janet));
             } else |_| {}
-        } else if (std.posix.getenv("HOME")) |home| {
+        } else if (self.environ_map.get("HOME")) |home| {
             var buf: [512]u8 = undefined;
             if (std.fmt.bufPrint(&buf, "{s}/.config/shoal", .{home})) |config_dir| {
                 const dir_janet = c.janet_string(@ptrCast(config_dir.ptr), @intCast(config_dir.len));
@@ -1170,18 +1381,17 @@ pub const Dispatch = struct {
     pub fn loadUserConfig(self: *Dispatch) usize {
         var dir_path_buf: [4096]u8 = undefined;
         const dir_path = blk: {
-            if (std.posix.getenv("XDG_CONFIG_HOME")) |xdg| {
+            if (self.environ_map.get("XDG_CONFIG_HOME")) |xdg| {
                 break :blk std.fmt.bufPrint(&dir_path_buf, "{s}/shoal", .{xdg}) catch return 0;
             }
-            if (std.posix.getenv("HOME")) |home| {
+            if (self.environ_map.get("HOME")) |home| {
                 break :blk std.fmt.bufPrint(&dir_path_buf, "{s}/.config/shoal", .{home}) catch return 0;
             }
             return 0;
         };
 
-        // Open the directory
-        var dir = std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch return 0;
-        defer dir.close();
+        var dir = std.Io.Dir.openDirAbsolute(self.io, dir_path, .{ .iterate = true }) catch return 0;
+        defer dir.close(self.io);
 
         // Collect .janet filenames, sort alphabetically
         var names: [64][]const u8 = undefined;
@@ -1189,12 +1399,12 @@ pub const Dispatch = struct {
         var count: usize = 0;
 
         var iter = dir.iterate();
-        while (iter.next() catch null) |entry| {
-            if (entry.kind != .file) continue;
-            if (!std.mem.endsWith(u8, entry.name, ".janet")) continue;
+        while (iter.next(self.io) catch null) |entry| {
+            const name = entry.name;
+            if (!std.mem.endsWith(u8, name, ".janet")) continue;
             if (count >= 64) break;
-            const len = @min(entry.name.len, 255);
-            @memcpy(name_storage[count][0..len], entry.name[0..len]);
+            const len = @min(name.len, 255);
+            @memcpy(name_storage[count][0..len], name[0..len]);
             names[count] = name_storage[count][0..len];
             count += 1;
         }
@@ -1264,6 +1474,18 @@ pub const Dispatch = struct {
             self.queue_head = (self.queue_head + 1) % MAX_QUEUED_EVENTS;
             self.queue_count -= 1;
         }
+        for (self.render_requests[0..self.render_request_count]) |req| {
+            _ = c.janet_gcunroot(req);
+        }
+        self.render_request_count = 0;
+        for (self.surface_requests[0..self.surface_request_count]) |req| {
+            _ = c.janet_gcunroot(req);
+        }
+        self.surface_request_count = 0;
+        for (self.shm_render_requests[0..self.shm_render_request_count]) |req| {
+            _ = c.janet_gcunroot(req);
+        }
+        self.shm_render_request_count = 0;
         // Free active timers
         for (&self.timers) |*timer| {
             if (timer.active) self.freeTimer(timer);
@@ -1312,10 +1534,7 @@ fn janetDiskUsageFn(argc: i32, argv: [*c]Janet) callconv(.c) Janet {
     @memcpy(path_buf[0..len], str[0..len]);
     path_buf[len] = 0;
 
-    const posix_c = @cImport(@cInclude("sys/vfs.h"));
-    var stat: posix_c.struct_statfs = undefined;
-    const rc = posix_c.statfs(@ptrCast(path_buf[0..len :0]), &stat);
-    if (rc != 0) return c.janet_wrap_nil();
+    const stat = linuxStatFs(path_buf[0..len :0]) orelse return c.janet_wrap_nil();
 
     const bsize: f64 = @floatFromInt(stat.f_bsize);
     const total = @as(f64, @floatFromInt(stat.f_blocks)) * bsize;
@@ -1331,30 +1550,60 @@ fn janetDiskUsageFn(argc: i32, argv: [*c]Janet) callconv(.c) Janet {
     return c.janet_wrap_table(t);
 }
 
+const LinuxStatFs = extern struct {
+    f_type: isize,
+    f_bsize: isize,
+    f_blocks: isize,
+    f_bfree: isize,
+    f_bavail: isize,
+    f_files: isize,
+    f_ffree: isize,
+    f_fsid: [2]i32,
+    f_namelen: isize,
+    f_frsize: isize,
+    f_flags: isize,
+    f_spare: [4]isize,
+};
+
+fn linuxStatFs(path: [:0]const u8) ?LinuxStatFs {
+    var stat: LinuxStatFs = undefined;
+    const rc = std.os.linux.syscall2(
+        .statfs,
+        @intFromPtr(path.ptr),
+        @intFromPtr(&stat),
+    );
+    return switch (std.os.linux.errno(rc)) {
+        .SUCCESS => stat,
+        else => null,
+    };
+}
+
 /// Janet C function: (desktop-apps) → array of {:name "..." :exec "..." :icon "..."}
 /// Scans XDG_DATA_DIRS and XDG_DATA_HOME for .desktop files.
 fn janetDesktopAppsFn(argc: i32, _: [*c]Janet) callconv(.c) Janet {
     _ = argc;
-    const posix_c = @cImport(@cInclude("dirent.h"));
+    const d = global_dispatch orelse return c.janet_wrap_nil();
 
     const results = c.janet_array(64);
 
     // Build list of data dirs to scan
     var dirs_buf: [8][]const u8 = undefined;
     var dir_count: usize = 0;
+    var data_home_from_env = false;
 
     // XDG_DATA_HOME (default ~/.local/share)
-    if (std.posix.getenv("XDG_DATA_HOME")) |home| {
+    if (d.environ_map.get("XDG_DATA_HOME")) |home| {
         dirs_buf[dir_count] = home;
         dir_count += 1;
-    } else if (std.posix.getenv("HOME")) |home| {
+        data_home_from_env = true;
+    } else if (d.environ_map.get("HOME")) |home| {
         // Will construct path manually below
         dirs_buf[dir_count] = home;
         dir_count += 1;
     }
 
     // XDG_DATA_DIRS (default /usr/local/share:/usr/share)
-    const xdg_dirs = std.posix.getenv("XDG_DATA_DIRS") orelse "/usr/local/share:/usr/share";
+    const xdg_dirs = d.environ_map.get("XDG_DATA_DIRS") orelse "/usr/local/share:/usr/share";
     var it = std.mem.splitScalar(u8, xdg_dirs, ':');
     while (it.next()) |dir| {
         if (dir.len > 0 and dir_count < dirs_buf.len) {
@@ -1368,7 +1617,7 @@ fn janetDesktopAppsFn(argc: i32, _: [*c]Janet) callconv(.c) Janet {
     for (dirs_buf[0..dir_count], 0..) |base_dir, di| {
         // Build "base_dir/applications" or "base_dir/.local/share/applications"
         const app_path = blk: {
-            if (di == 0 and std.posix.getenv("XDG_DATA_HOME") == null) {
+            if (di == 0 and !data_home_from_env) {
                 // HOME fallback: construct ~/.local/share/applications
                 break :blk std.fmt.bufPrint(&path_buf, "{s}/.local/share/applications", .{base_dir}) catch continue;
             } else {
@@ -1379,13 +1628,12 @@ fn janetDesktopAppsFn(argc: i32, _: [*c]Janet) callconv(.c) Janet {
         if (app_path.len >= path_buf.len - 1) continue;
         path_buf[app_path.len] = 0;
 
-        const dir = posix_c.opendir(@ptrCast(path_buf[0..app_path.len :0]));
-        if (dir == null) continue;
-        defer _ = posix_c.closedir(dir);
+        var dir = std.Io.Dir.openDirAbsolute(d.io, app_path, .{ .iterate = true }) catch continue;
+        defer dir.close(d.io);
 
-        while (posix_c.readdir(dir)) |entry| {
-            const name_ptr: [*:0]const u8 = @ptrCast(&entry.*.d_name);
-            const name = std.mem.span(name_ptr);
+        var iter = dir.iterate();
+        while (iter.next(d.io) catch null) |entry| {
+            const name = entry.name;
             if (!std.mem.endsWith(u8, name, ".desktop")) continue;
 
             // Build full path
@@ -1395,12 +1643,8 @@ fn janetDesktopAppsFn(argc: i32, _: [*c]Janet) callconv(.c) Janet {
             file_path_buf[file_path.len] = 0;
 
             // Read and parse .desktop file
-            const file = std.fs.openFileAbsolute(file_path_buf[0..file_path.len :0], .{}) catch continue;
-            defer file.close();
-
             var read_buf: [8192]u8 = undefined;
-            const bytes_read = file.readAll(&read_buf) catch continue;
-            const content = read_buf[0..bytes_read];
+            const content = std.Io.Dir.cwd().readFile(d.io, file_path, &read_buf) catch continue;
 
             var app_name: ?[]const u8 = null;
             var app_exec: ?[]const u8 = null;
@@ -1471,6 +1715,8 @@ fn janetDesktopAppsFn(argc: i32, _: [*c]Janet) callconv(.c) Janet {
 /// Handle :exec fx — fire-and-forget process launch (for desktop apps).
 /// Value: {:cmd "command string"} or {:cmd ["arg0" "arg1" ...]}
 fn handleExecFx(val: Janet) void {
+    const d = global_dispatch orelse return;
+
     if (c.janet_checktype(val, c.JANET_TABLE) == 0 and
         c.janet_checktype(val, c.JANET_STRUCT) == 0)
     {
@@ -1481,17 +1727,17 @@ fn handleExecFx(val: Janet) void {
     const cmd_val = jutil.janetGet(val, kw("cmd"));
 
     // Support string command (passed to sh -c) or array command
-    var use_shell = false;
-    var shell_cmd: ?[]const u8 = null;
-    var argv: [33]?[*:0]const u8 = [_]?[*:0]const u8{null} ** 33;
+    var argv: [33][]const u8 = undefined;
     var argc: usize = 0;
 
     if (c.janet_checktype(cmd_val, c.JANET_STRING) != 0) {
         // String: run via sh -c
         const str = c.janet_unwrap_string(cmd_val);
         const len: usize = @intCast(c.janet_string_length(str));
-        shell_cmd = str[0..len];
-        use_shell = true;
+        argv[0] = "/bin/sh";
+        argv[1] = "-c";
+        argv[2] = str[0..len];
+        argc = 3;
     } else {
         // Array: direct exec
         const view = jutil.janetIndexedView(cmd_val);
@@ -1507,9 +1753,10 @@ fn handleExecFx(val: Janet) void {
         for (0..argc) |i| {
             const s = view.items.?[i];
             if (c.janet_checktype(s, c.JANET_STRING) != 0) {
-                argv[i] = @ptrCast(c.janet_unwrap_string(s));
+                const str = c.janet_unwrap_string(s);
+                argv[i] = str[0..@intCast(c.janet_string_length(str))];
             } else if (c.janet_checktype(s, c.JANET_KEYWORD) != 0) {
-                argv[i] = @ptrCast(c.janet_unwrap_keyword(s));
+                argv[i] = std.mem.span(c.janet_unwrap_keyword(s));
             } else {
                 log.warn("exec fx: cmd element is not a string/keyword", .{});
                 return;
@@ -1517,43 +1764,33 @@ fn handleExecFx(val: Janet) void {
         }
     }
 
-    const posix_c2 = @cImport(@cInclude("unistd.h"));
-    const fork_result = std.posix.fork() catch {
-        log.warn("exec fx: fork() failed", .{});
+    var child = std.process.spawn(d.io, .{
+        .argv = argv[0..argc],
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .ignore,
+        .pgid = 0,
+    }) catch |err| {
+        log.warn("exec fx: spawn failed: {}", .{err});
         return;
     };
 
-    if (fork_result == 0) {
-        // Child: double-fork to fully detach
-        const fork2 = std.posix.fork() catch std.process.exit(127);
-        if (fork2 != 0) std.process.exit(0); // first child exits immediately
+    const child_ptr = std.heap.c_allocator.create(std.process.Child) catch {
+        child.kill(d.io);
+        return;
+    };
+    child_ptr.* = child;
 
-        // Grandchild: new session, redirect stdio to /dev/null
-        _ = posix_c2.setsid();
-        const devnull = std.posix.open("/dev/null", .{ .ACCMODE = .WRONLY }, 0) catch std.process.exit(127);
-        _ = std.posix.dup2(devnull, 0) catch {};
-        _ = std.posix.dup2(devnull, 1) catch {};
-        _ = std.posix.dup2(devnull, 2) catch {};
-        if (devnull > 2) std.posix.close(devnull);
+    _ = std.Thread.spawn(.{}, waitDetachedChild, .{ d.io, child_ptr }) catch {
+        child_ptr.kill(d.io);
+        std.heap.c_allocator.destroy(child_ptr);
+        return;
+    };
+}
 
-        if (use_shell) {
-            // Copy shell_cmd to a stack buffer (parent memory is shared until exec)
-            var cmd_buf: [4096]u8 = undefined;
-            const scmd = shell_cmd orelse std.process.exit(127);
-            if (scmd.len >= cmd_buf.len) std.process.exit(127);
-            @memcpy(cmd_buf[0..scmd.len], scmd);
-            cmd_buf[scmd.len] = 0;
-            const cmd_z: [*:0]const u8 = @ptrCast(cmd_buf[0..scmd.len :0]);
-            const sh_argv = [_]?[*:0]const u8{ "/bin/sh", "-c", cmd_z, null };
-            _ = posix_c2.execvp("/bin/sh", @ptrCast(&sh_argv));
-        } else {
-            _ = posix_c2.execvp(argv[0].?, @ptrCast(&argv));
-        }
-        std.process.exit(127);
-    }
-
-    // Parent: reap first child immediately
-    _ = std.posix.waitpid(fork_result, 0);
+fn waitDetachedChild(io: std.Io, child: *std.process.Child) void {
+    defer std.heap.c_allocator.destroy(child);
+    _ = child.wait(io) catch {};
 }
 
 /// Handle :stdout fx — write a string to stdout. Value: "text" or {:text "..." :newline true}
@@ -1576,9 +1813,9 @@ fn handleStdoutFx(val: Janet) void {
         return;
     };
 
-    const stdout = std.fs.File.stdout();
-    stdout.writeAll(text) catch {};
-    stdout.writeAll("\n") catch {};
+    const io = if (global_dispatch) |d| d.io else std.Options.debug_io;
+    std.Io.File.stdout().writeStreamingAll(io, text) catch {};
+    std.Io.File.stdout().writeStreamingAll(io, "\n") catch {};
 }
 
 /// Handle :exit fx — exit the process with a given code. Value: number (exit code)
@@ -1635,6 +1872,29 @@ fn tupleFirst(val: Janet) ?Janet {
     return null;
 }
 
+fn traceEventName(event: Janet) []const u8 {
+    const event_id = tupleFirst(event) orelse return "invalid";
+    if (c.janet_checktype(event_id, c.JANET_KEYWORD) != 0) {
+        return std.mem.span(c.janet_unwrap_keyword(event_id));
+    }
+    return "non-keyword";
+}
+
+fn traceViewName(view_name: Janet) []const u8 {
+    if (c.janet_checktype(view_name, c.JANET_NIL) != 0) return "default";
+    if (c.janet_checktype(view_name, c.JANET_KEYWORD) != 0) {
+        return std.mem.span(c.janet_unwrap_keyword(view_name));
+    }
+    if (c.janet_checktype(view_name, c.JANET_SYMBOL) != 0) {
+        return std.mem.span(c.janet_unwrap_symbol(view_name));
+    }
+    if (c.janet_checktype(view_name, c.JANET_STRING) != 0) {
+        const str = c.janet_unwrap_string(view_name);
+        return str[0..@intCast(c.janet_string_length(str))];
+    }
+    return "unknown";
+}
+
 /// Get a keyword-keyed value from a handler entry (table).
 fn tableGet(entry: Janet, key_name: [:0]const u8) ?Janet {
     if (c.janet_checktype(entry, c.JANET_TABLE) == 0 and
@@ -1669,7 +1929,7 @@ fn colorToJanet(color: theme_mod.Color) Janet {
 
 /// Get current monotonic time in seconds.
 fn monotonicNow() f64 {
-    const ts = std.posix.clock_gettime(.MONOTONIC) catch return 0;
-    return @as(f64, @floatFromInt(ts.sec)) + @as(f64, @floatFromInt(ts.nsec)) / 1_000_000_000.0;
+    const io = if (global_dispatch) |d| d.io else std.Options.debug_io;
+    const ts = std.Io.Clock.awake.now(io);
+    return @as(f64, @floatFromInt(ts.nanoseconds)) / 1_000_000_000.0;
 }
-

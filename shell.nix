@@ -4,16 +4,14 @@ pkgs.mkShell {
   nativeBuildInputs = with pkgs; [
     pkg-config
     wayland-scanner
-    zig_0_15
+    zig_0_16
   ];
 
   buildInputs = with pkgs; [
     wayland
     wayland-protocols
     libGL
-    freetype
     harfbuzz
-    fontconfig
     libxkbcommon
     janet
   ];

@@ -3,6 +3,7 @@ const clay = @import("clay");
 const Renderer = @import("renderer.zig").Renderer;
 const TextRenderer = @import("text.zig").TextRenderer;
 const hiccup = @import("hiccup.zig");
+const trace = @import("trace.zig");
 
 const log = std.log.scoped(.layout);
 
@@ -18,7 +19,7 @@ pub const Layout = struct {
         const min_memory = clay.minMemorySize();
         const clay_memory = try allocator.alloc(u8, min_memory);
 
-        const arena = clay.createArenaWithCapacityAndMemory(clay_memory);
+        const arena = clay.Arena.init(clay_memory);
 
         _ = clay.initialize(arena, .{ .w = 0, .h = 0 }, .{
             .error_handler_function = handleClayError,
@@ -56,23 +57,42 @@ pub const Layout = struct {
     /// Call between beginLayout/endLayout to declare UI.
     /// Returns the render command slice from Clay.
     pub fn beginLayout(_: *Layout) void {
+        const start_ns = trace.nowNs();
         clay.beginLayout();
+        trace.log("layout.begin dur_ms={d:.3}", .{trace.elapsedMs(start_ns)});
     }
 
     /// End layout, process render commands through the GL renderer.
     pub fn endLayout(self: *Layout) void {
+        const clay_start_ns = trace.nowNs();
         const commands = clay.endLayout();
+        trace.log("layout.clay-end commands={d} dur_ms={d:.3}", .{
+            commands.len,
+            trace.elapsedMs(clay_start_ns),
+        });
+        const process_start_ns = trace.nowNs();
         self.processRenderCommands(commands);
+        trace.log("layout.process-commands commands={d} content_h={d:.1} dur_ms={d:.3}", .{
+            commands.len,
+            self.content_height,
+            trace.elapsedMs(process_start_ns),
+        });
     }
 
     fn processRenderCommands(self: *Layout, commands: []clay.RenderCommand) void {
         var max_bottom: f32 = 0;
+        var rectangles: usize = 0;
+        var texts: usize = 0;
+        var borders: usize = 0;
+        var scissors: usize = 0;
+        var custom: usize = 0;
         for (commands) |cmd| {
             const bb = cmd.bounding_box;
             const bottom = bb.y + bb.height;
             if (bottom > max_bottom) max_bottom = bottom;
             switch (cmd.command_type) {
                 .rectangle => {
+                    rectangles += 1;
                     const rect = cmd.render_data.rectangle;
                     self.renderer.drawRect(
                         bb.x,
@@ -89,11 +109,22 @@ pub const Layout = struct {
                     );
                 },
                 .text => {
+                    texts += 1;
                     const td = cmd.render_data.text;
                     const text_slice = td.string_contents.chars[0..@intCast(td.string_contents.length)];
-                    self.renderText(
-                        bb.x,
-                        bb.y,
+                    var text_x = bb.x;
+                    var text_y = bb.y;
+                    if (cmd.user_data) |ptr| {
+                        const tweak: *const hiccup.TextTweak = @ptrCast(@alignCast(ptr));
+                        text_x += tweak.dx;
+                        text_y += tweak.dy + tweak.baseline_shift_px;
+                        text_y += tweak.baseline_shift_line *
+                            self.text_renderer.lineHeightForFont(td.font_id, td.font_size);
+                    }
+                    self.renderer.drawText(
+                        self.text_renderer,
+                        text_x,
+                        text_y,
                         text_slice,
                         td.font_id,
                         td.font_size,
@@ -101,6 +132,7 @@ pub const Layout = struct {
                     );
                 },
                 .border => {
+                    borders += 1;
                     const bd = cmd.render_data.border;
                     const color = clayToGlColor(bd.color);
                     const radii = [4]f32{
@@ -125,10 +157,12 @@ pub const Layout = struct {
                     );
                 },
                 .scissor_start => {
+                    scissors += 1;
                     self.renderer.flush();
                     self.renderer.setScissor(bb.x, bb.y, bb.width, bb.height);
                 },
                 .scissor_end => {
+                    scissors += 1;
                     self.renderer.flush();
                     self.renderer.clearScissor();
                 },
@@ -136,6 +170,7 @@ pub const Layout = struct {
                     // TODO: image rendering
                 },
                 .custom => {
+                    custom += 1;
                     const cd = cmd.render_data.custom;
                     if (cd.custom_data) |ptr| {
                         const header: *const hiccup.CustomHeader = @ptrCast(@alignCast(ptr));
@@ -187,6 +222,26 @@ pub const Layout = struct {
                                     tri.dir,
                                 );
                             },
+                            .net_spark => {
+                                const spark: *const hiccup.NetSparkData = @ptrCast(@alignCast(ptr));
+                                self.renderer.drawNetSpark(
+                                    bb.x,
+                                    bb.y,
+                                    bb.width,
+                                    bb.height,
+                                    spark.values[0..spark.value_count],
+                                    spark.value_count,
+                                    spark.values2[0..spark.value_count2],
+                                    spark.value_count2,
+                                    spark.color,
+                                    spark.color2,
+                                    spark.skew,
+                                    spark.bar_width,
+                                    spark.bar_gap,
+                                    spark.min_bar_height,
+                                    spark.fade_start,
+                                );
+                            },
                         }
                     }
                 },
@@ -194,37 +249,14 @@ pub const Layout = struct {
             }
         }
         self.content_height = max_bottom;
-    }
-
-    fn renderText(self: *Layout, x: f32, y: f32, text: []const u8, font_id: u16, font_size: u16, color: [4]f32) void {
-        _ = font_size;
-        const shaped = self.text_renderer.shapeText(font_id, text) catch return;
-        defer shaped.deinit(self.text_renderer.allocator);
-
-        const metrics = self.text_renderer.getFontMetrics(font_id) orelse return;
-        const baseline_y = y + metrics.ascender;
-
-        var cursor_x = x;
-        for (shaped.glyphs) |glyph| {
-            const info = self.text_renderer.getGlyphInfo(glyph.font_id, glyph.glyph_index) catch continue;
-
-            const gx = @round(cursor_x + glyph.x_offset + info.bearing_x);
-            const gy = @round(baseline_y - glyph.y_offset - info.bearing_y);
-
-            self.renderer.drawTexturedQuad(
-                gx,
-                gy,
-                info.width,
-                info.height,
-                color,
-                info.region.u0,
-                info.region.v0,
-                info.region.u1 - info.region.u0,
-                info.region.v1 - info.region.v0,
-            );
-
-            cursor_x += glyph.x_advance;
-        }
+        trace.log("layout.command-counts total={d} rect={d} text={d} border={d} scissor={d} custom={d}", .{
+            commands.len,
+            rectangles,
+            texts,
+            borders,
+            scissors,
+            custom,
+        });
     }
 
     fn measureText(

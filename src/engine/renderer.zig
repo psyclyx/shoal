@@ -1,40 +1,16 @@
 const std = @import("std");
+const snail = @import("snail");
+const TextRenderer = @import("text.zig").TextRenderer;
+const trace = @import("trace.zig");
+
 const c = @cImport({
-    @cInclude("GLES3/gl3.h");
+    @cDefine("GL_GLEXT_PROTOTYPES", "1");
+    @cInclude("GL/gl.h");
+    @cInclude("GL/glext.h");
 });
 
 const log = std.log.scoped(.renderer);
 
-// ---------------------------------------------------------------------------
-// Vertex layout
-// ---------------------------------------------------------------------------
-
-pub const Vertex = extern struct {
-    // Position
-    x: f32,
-    y: f32,
-    // UV (for texture sampling; 0,0 for solid colour)
-    u: f32,
-    v: f32,
-    // Colour (RGBA 0-1)
-    r: f32,
-    g: f32,
-    b: f32,
-    a: f32,
-    // Rect dimensions (for SDF rounded corners)
-    rect_w: f32,
-    rect_h: f32,
-    // Corner radii: top-left, top-right, bottom-left, bottom-right
-    radius_tl: f32,
-    radius_tr: f32,
-    radius_bl: f32,
-    radius_br: f32,
-    // 0.0 = solid colour with rounded-rect SDF, 1.0 = texture sample,
-    // 2.0 = area fill curve, 3.0 = line stroke curve, 4.0 = triangle SDF
-    mode: f32,
-};
-
-/// Triangle direction — which rect edge the apex points toward.
 pub const TriDir = enum(i32) {
     up = 0,
     right = 1,
@@ -42,465 +18,169 @@ pub const TriDir = enum(i32) {
     left = 3,
 };
 
-// ---------------------------------------------------------------------------
-// Shader sources
-// ---------------------------------------------------------------------------
+const path_hash_seed: u64 = 0x53484f414c504154;
+const path_run_max_ops: usize = 8;
+const path_cache_max_entries: usize = 512;
+const path_cache_retire_after_frames: u64 = 120;
+const prepared_cache_seed: u64 = 0x53484f414c505245;
+const prepared_cache_max_entries: usize = 16;
+const prepared_cache_retire_after_frames: u64 = 600;
+const net_spark_fade_slices: usize = 4;
 
-const vert_src: [*c]const u8 =
-    \\#version 300 es
-    \\precision highp float;
-    \\
-    \\layout(location = 0) in vec2 a_pos;
-    \\layout(location = 1) in vec2 a_uv;
-    \\layout(location = 2) in vec4 a_color;
-    \\layout(location = 3) in vec2 a_rect_size;
-    \\layout(location = 4) in vec4 a_corner_radius;
-    \\layout(location = 5) in float a_mode;
-    \\
-    \\uniform mat4 u_projection;
-    \\
-    \\out vec2 v_uv;
-    \\out vec4 v_color;
-    \\out vec2 v_rect_size;
-    \\out vec4 v_corner_radius;
-    \\out float v_mode;
-    \\out vec2 v_local_pos;
-    \\
-    \\void main() {
-    \\    v_uv           = a_uv;
-    \\    v_color        = a_color;
-    \\    v_rect_size    = a_rect_size;
-    \\    v_corner_radius = a_corner_radius;
-    \\    v_mode         = a_mode;
-    \\    // a_uv doubles as the normalised local position (0..rect_size)
-    \\    v_local_pos    = a_uv * a_rect_size;
-    \\    gl_Position    = u_projection * vec4(a_pos, 0.0, 1.0);
-    \\}
-    \\
-;
+const PathCacheEntry = struct {
+    picture: *snail.PathPicture,
+    last_used: u64,
+};
 
-const frag_src: [*c]const u8 =
-    \\#version 300 es
-    \\precision highp float;
-    \\
-    \\in vec2 v_uv;
-    \\in vec4 v_color;
-    \\in vec2 v_rect_size;
-    \\in vec4 v_corner_radius;
-    \\in float v_mode;
-    \\in vec2 v_local_pos;
-    \\
-    \\uniform sampler2D u_atlas;
-    \\
-    \\// Curve uniforms
-    \\uniform float u_values[64];
-    \\uniform int u_value_count;
-    \\uniform float u_values2[64];
-    \\uniform int u_value_count2;
-    \\uniform vec4 u_color2;
-    \\uniform float u_fill;
-    \\uniform float u_thickness;
-    \\uniform int u_smooth;
-    \\uniform int u_mirror;
-    \\uniform int u_grid;
-    \\uniform float u_grid_lines[8];
-    \\uniform float u_scroll;
-    \\uniform int u_tri_dir;
-    \\
-    \\out vec4 frag_color;
-    \\
-    \\float roundedRectSDF(vec2 p, vec2 half_size, float radius) {
-    \\    vec2 d = abs(p) - half_size + vec2(radius);
-    \\    return min(max(d.x, d.y), 0.0) + length(max(d, 0.0)) - radius;
-    \\}
-    \\
-    \\float catmullRom(float p0, float p1, float p2, float p3, float t) {
-    \\    float t2 = t * t;
-    \\    float t3 = t2 * t;
-    \\    return 0.5 * ((2.0 * p1) +
-    \\                   (-p0 + p2) * t +
-    \\                   (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2 +
-    \\                   (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3);
-    \\}
-    \\
-    \\float sampleArray(float x, int count, float vals[64]) {
-    \\    if (count < 2) return count > 0 ? vals[0] : 0.0;
-    \\    float span = float(count - 1);
-    \\    float pos = x * span;
-    \\    int idx = int(floor(pos));
-    \\    float t = fract(pos);
-    \\    int i0 = clamp(idx - 1, 0, count - 1);
-    \\    int i1 = clamp(idx,     0, count - 1);
-    \\    int i2 = clamp(idx + 1, 0, count - 1);
-    \\    int i3 = clamp(idx + 2, 0, count - 1);
-    \\    // Non-negative, but unclamped above — callers decide how to
-    \\    // handle overshoot (mirror mode uses it to softly fade clipped
-    \\    // regions instead of hard-capping).
-    \\    if (u_smooth > 0) {
-    \\        return max(0.0, catmullRom(vals[i0], vals[i1],
-    \\                                   vals[i2], vals[i3], t));
-    \\    } else {
-    \\        return max(0.0, mix(vals[i1], vals[i2], t));
-    \\    }
-    \\}
-    \\float sampleCurve(float x) {
-    \\    float sx = x + u_scroll / max(1.0, float(u_value_count - 1));
-    \\    return sampleArray(sx, u_value_count, u_values);
-    \\}
-    \\float sampleCurve2(float x) {
-    \\    float sx = x + u_scroll / max(1.0, float(u_value_count2 - 1));
-    \\    return sampleArray(sx, u_value_count2, u_values2);
-    \\}
-    \\// Peak-stable max-pooling: for each pixel, find all data points
-    \\// within ±1px and take the max value. Guarantees peaks at data
-    \\// resolution are visible at pixel resolution — no height
-    \\// oscillation as data scrolls across the pixel grid.
-    \\float sampleCurveAA(float x) {
-    \\    float base = sampleCurve(x);
-    \\    if (u_value_count < 2) return base;
-    \\    float sx = x + u_scroll / float(u_value_count - 1);
-    \\    float pw = 1.0 / v_rect_size.x;
-    \\    float span = float(u_value_count - 1);
-    \\    int lo = clamp(int(floor((sx - pw) * span)), 0, u_value_count - 1);
-    \\    int hi = clamp(int(ceil((sx + pw) * span)), 0, u_value_count - 1);
-    \\    for (int i = lo; i <= hi; i++) {
-    \\        base = max(base, u_values[i]);
-    \\    }
-    \\    return base;
-    \\}
-    \\float sampleCurve2AA(float x) {
-    \\    float base = sampleCurve2(x);
-    \\    if (u_value_count2 < 2) return base;
-    \\    float sx = x + u_scroll / float(u_value_count2 - 1);
-    \\    float pw = 1.0 / v_rect_size.x;
-    \\    float span = float(u_value_count2 - 1);
-    \\    int lo = clamp(int(floor((sx - pw) * span)), 0, u_value_count2 - 1);
-    \\    int hi = clamp(int(ceil((sx + pw) * span)), 0, u_value_count2 - 1);
-    \\    for (int i = lo; i <= hi; i++) {
-    \\        base = max(base, u_values2[i]);
-    \\    }
-    \\    return base;
-    \\}
-    \\
-    \\// Line coverage at constant pixel thickness with fixed AA.
-    \\// No fwidth() — derivative-based AA causes frame-to-frame jitter
-    \\// when curve values shift by sub-pixel amounts each frame.
-    \\float lineCoverage(float frag_y, float curve_y, float thickness_px, float height) {
-    \\    float dist = abs(frag_y - curve_y) * height;
-    \\    float rad = thickness_px * 0.5;
-    \\    return 1.0 - smoothstep(rad - 1.0, rad + 1.0, dist);
-    \\}
-    \\
-    \\// Area fill coverage: filled below curve_y with fixed AA band.
-    \\float areaCoverage(float frag_y, float curve_y, float height) {
-    \\    float aa = 2.0 / height;
-    \\    return smoothstep(curve_y - aa, curve_y + aa, frag_y);
-    \\}
-    \\
-    \\// Triangle SDF inscribed in the unit rect, apex toward an edge
-    \\// selected by u_tri_dir (0=up, 1=right, 2=down, 3=left).
-    \\// Returns signed distance in logical pixel space; negative = inside.
-    \\float triangleSDF(vec2 p, vec2 size, int dir) {
-    \\    vec2 q = p;
-    \\    vec2 s = size;
-    \\    if (dir == 1) {        // right: apex at (w, h/2)
-    \\        q = vec2(p.y, size.x - p.x);
-    \\        s = vec2(size.y, size.x);
-    \\    } else if (dir == 2) { // down: apex at (w/2, h)
-    \\        q = vec2(size.x - p.x, size.y - p.y);
-    \\    } else if (dir == 3) { // left: apex at (0, h/2)
-    \\        q = vec2(size.y - p.y, p.x);
-    \\        s = vec2(size.y, size.x);
-    \\    }
-    \\    // Canonical triangle: apex (s.x/2, 0), base (0, s.y)-(s.x, s.y).
-    \\    vec2 a = vec2(s.x * 0.5, 0.0);
-    \\    vec2 b = vec2(0.0, s.y);
-    \\    vec2 cc = vec2(s.x, s.y);
-    \\    vec2 ab = b - a;
-    \\    vec2 nab = normalize(vec2(-ab.y, ab.x));
-    \\    float dab = dot(q - a, nab);
-    \\    vec2 bc = cc - b;
-    \\    vec2 nbc = normalize(vec2(-bc.y, bc.x));
-    \\    float dbc = dot(q - b, nbc);
-    \\    vec2 ca = a - cc;
-    \\    vec2 nca = normalize(vec2(-ca.y, ca.x));
-    \\    float dca = dot(q - cc, nca);
-    \\    return max(max(dab, dbc), dca);
-    \\}
-    \\
-    \\void main() {
-    \\    if (v_mode > 3.5) {
-    \\        // Mode 4: triangle SDF
-    \\        float dist = triangleSDF(v_local_pos, v_rect_size, u_tri_dir);
-    \\        float fw = max(fwidth(dist), 1e-4);
-    \\        float cov = 1.0 - smoothstep(-0.5, 0.5, dist / fw);
-    \\        float a = cov * v_color.a;
-    \\        frag_color = vec4(v_color.rgb * a, a);
-    \\    } else if (v_mode > 2.5) {
-    \\        // Mode 3: line stroke curve — constant thickness
-    \\        float lsv = min(1.0, sampleCurveAA(v_uv.x));
-    \\        float lmin = 2.5 / v_rect_size.y;
-    \\        float curve_y = 1.0 - (lsv > 0.001 ? max(lsv, lmin) : lsv);
-    \\        float aa = lineCoverage(v_uv.y, curve_y, u_thickness, v_rect_size.y);
-    \\        float speculative = smoothstep(u_fill - 0.02, u_fill, v_uv.x);
-    \\        vec4 color = mix(v_color, u_color2, speculative);
-    \\        float a = aa * color.a;
-    \\        frag_color = vec4(color.rgb * a, a);
-    \\    } else if (v_mode > 1.5) {
-    \\        // Mode 2: area fill curve
-    \\        float a = 0.0;
-    \\        vec4 color = v_color;
-    \\
-    \\        if (u_mirror > 0 && u_value_count2 > 0) {
-    \\            // Mirrored: values1 area above center, values2 below.
-    \\            // Center mask is a ~1 px smoothstep so the two halves AA
-    \\            // against each other instead of being hard-cut. A soft
-    \\            // edge gradient on the top/bottom of the rect lets
-    \\            // overshooting curves fade off-chart instead of hard-
-    \\            // capping — no per-column clipping logic needed.
-    \\            float center = 0.5;
-    \\            float c1 = sampleCurveAA(v_uv.x) * 0.5;
-    \\            float c2 = sampleCurve2AA(v_uv.x) * 0.5;
-    \\            float top = center - c1;
-    \\            float bot = center + c2;
-    \\            float center_aa = 1.0 / v_rect_size.y;
-    \\            float lower_mask = smoothstep(center - center_aa, center + center_aa, v_uv.y);
-    \\            float upper_mask = 1.0 - lower_mask;
-    \\            float edge_fade = 0.15;
-    \\            float grad_up = smoothstep(0.0, edge_fade, v_uv.y);
-    \\            float grad_dn = smoothstep(0.0, edge_fade, 1.0 - v_uv.y);
-    \\            float fill_up = areaCoverage(v_uv.y, top, v_rect_size.y) * upper_mask * grad_up;
-    \\            float fill_dn = (1.0 - areaCoverage(v_uv.y, bot, v_rect_size.y)) * lower_mask * grad_dn;
-    \\            float line_up = lineCoverage(v_uv.y, top, 2.0, v_rect_size.y) * upper_mask * grad_up;
-    \\            float line_dn = lineCoverage(v_uv.y, bot, 2.0, v_rect_size.y) * lower_mask * grad_dn;
-    \\            float edge_a1 = min(v_color.a * 1.8, 1.0);
-    \\            float edge_a2 = min(u_color2.a * 1.8, 1.0);
-    \\            float a1 = max(fill_up * v_color.a, line_up * edge_a1);
-    \\            float a2 = max(fill_dn * u_color2.a, line_dn * edge_a2);
-    \\            a = a1 + a2 * (1.0 - a1);
-    \\            vec3 rgb = (v_color.rgb * a1 + u_color2.rgb * a2 * (1.0 - a1));
-    \\            if (a > 0.001) rgb /= a;
-    \\            color = vec4(rgb, 1.0);
-    \\        } else {
-    \\            // Standard bottom-up area fill
-    \\            float sv = min(1.0, sampleCurveAA(v_uv.x));
-    \\            float min_vis = 2.5 / v_rect_size.y;
-    \\            float curve_y = 1.0 - (sv > 0.001 ? max(sv, min_vis) : sv);
-    \\            a = areaCoverage(v_uv.y, curve_y, v_rect_size.y) * v_color.a;
-    \\            // Edge line — boosted alpha over dim area fill
-    \\            float edge_line = lineCoverage(v_uv.y, curve_y, 2.0, v_rect_size.y);
-    \\            a = max(a, edge_line * min(v_color.a * 1.8, 1.0));
-    \\            // Overlay second series as line stroke
-    \\            if (u_value_count2 > 0) {
-    \\                float sv2 = min(1.0, sampleCurve2AA(v_uv.x));
-    \\                float c2_y = 1.0 - (sv2 > 0.001 ? max(sv2, min_vis) : sv2);
-    \\                float la = lineCoverage(v_uv.y, c2_y, 2.0, v_rect_size.y) * u_color2.a;
-    \\                a = la + a * (1.0 - la);
-    \\                vec3 bl = u_color2.rgb * la + color.rgb * (a - la);
-    \\                if (a > 0.001) bl /= a;
-    \\                color = vec4(bl, 1.0);
-    \\            }
-    \\        }
-    \\
-    \\        // Grid lines at specified value-space positions
-    \\        if (u_grid > 0) {
-    \\            float py = v_uv.y * v_rect_size.y;
-    \\            float gmin = 1.0e6;
-    \\            int gc = min(u_grid, 8);
-    \\            for (int i = 0; i < gc; i++) {
-    \\                float val = u_grid_lines[i];
-    \\                if (val <= 0.0 || val > 1.0) continue;
-    \\                if (u_mirror > 0) {
-    \\                    float gy_top = (0.5 - val * 0.5) * v_rect_size.y;
-    \\                    float gy_bot = (0.5 + val * 0.5) * v_rect_size.y;
-    \\                    gmin = min(gmin, min(abs(py - gy_top), abs(py - gy_bot)));
-    \\                } else {
-    \\                    float gy = (1.0 - val) * v_rect_size.y;
-    \\                    gmin = min(gmin, abs(py - gy));
-    \\                }
-    \\            }
-    \\            float ga = (1.0 - smoothstep(0.0, 1.5, gmin)) * 0.15;
-    \\            a = ga + a * (1.0 - ga);
-    \\        }
-    \\
-    \\        frag_color = vec4(color.rgb * a, a);
-    \\    } else if (v_mode > 0.5) {
-    \\        // Mode 1: texture (glyph atlas) -- single-channel alpha
-    \\        float a = texture(u_atlas, v_uv).r * v_color.a;
-    \\        frag_color = vec4(v_color.rgb * a, a);
-    \\    } else {
-    \\        // Mode 0: solid colour, optionally with rounded-rect SDF.
-    \\        float max_r = max(max(v_corner_radius.x, v_corner_radius.y),
-    \\                          max(v_corner_radius.z, v_corner_radius.w));
-    \\        if (max_r < 0.5) {
-    \\            // No corner radius — shape is the rasterized quad itself.
-    \\            // Skipping the SDF avoids seam artifacts between adjacent
-    \\            // tessellating parallelograms (the SDF would fade each
-    \\            // edge independently, leaking the clear color at shared
-    \\            // edges where the AA bands don't sum to full coverage).
-    \\            frag_color = vec4(v_color.rgb * v_color.a, v_color.a);
-    \\        } else {
-    \\            // Rounded rect: SDF for curved corners with AA.
-    \\            vec2 half_size = v_rect_size * 0.5;
-    \\            vec2 p = v_local_pos - half_size;
-    \\            float radius;
-    \\            if (p.x < 0.0 && p.y < 0.0) {
-    \\                radius = v_corner_radius.x;
-    \\            } else if (p.x >= 0.0 && p.y < 0.0) {
-    \\                radius = v_corner_radius.y;
-    \\            } else if (p.x < 0.0 && p.y >= 0.0) {
-    \\                radius = v_corner_radius.z;
-    \\            } else {
-    \\                radius = v_corner_radius.w;
-    \\            }
-    \\            float dist = roundedRectSDF(p, half_size, radius);
-    \\            float fw = max(fwidth(dist), 1e-4);
-    \\            float a = (1.0 - smoothstep(-0.5, 0.5, dist / fw)) * v_color.a;
-    \\            frag_color = vec4(v_color.rgb * a, a);
-    \\        }
-    \\    }
-    \\}
-    \\
-;
+const PreparedCacheEntry = struct {
+    prepared: snail.PreparedResources,
+    last_used: u64,
+};
 
-// ---------------------------------------------------------------------------
-// Renderer
-// ---------------------------------------------------------------------------
+const RectOp = struct {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    color: [4]f32,
+    corner_radius: [4]f32,
+};
+
+const SlantRectOp = struct {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    color: [4]f32,
+    skew: f32,
+};
+
+const TriangleOp = struct {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    color: [4]f32,
+    dir: TriDir,
+};
+
+const CurveOp = struct {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    values: []const f32,
+    value_count: u32,
+    values2: []const f32,
+    value_count2: u32,
+    color: [4]f32,
+    color2: [4]f32,
+    thickness: f32,
+    mirror: bool,
+    scroll: f32,
+    grid_lines: [8]f32,
+    grid_count: u32,
+    is_line: bool,
+};
+
+const NetSparkOp = struct {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    values: []const f32,
+    value_count: u32,
+    values2: []const f32,
+    value_count2: u32,
+    color: [4]f32,
+    color2: [4]f32,
+    skew: f32,
+    bar_width: f32,
+    bar_gap: f32,
+    min_bar_height: f32,
+    fade_start: f32,
+};
+
+const PathOp = union(enum) {
+    rect: RectOp,
+    slant_rect: SlantRectOp,
+    triangle: TriangleOp,
+    curve: CurveOp,
+    net_spark: NetSparkOp,
+};
 
 pub const Renderer = struct {
-    // GL handles
-    program: c.GLuint,
-    vao: c.GLuint,
-    vbo: c.GLuint,
-
-    // Uniform locations
-    u_projection: c.GLint,
-    u_atlas: c.GLint,
-    // Curve uniforms
-    u_values: c.GLint,
-    u_value_count: c.GLint,
-    u_values2: c.GLint,
-    u_value_count2: c.GLint,
-    u_color2: c.GLint,
-    u_fill: c.GLint,
-    u_thickness: c.GLint,
-    u_smooth: c.GLint,
-    u_mirror: c.GLint,
-    u_grid: c.GLint,
-    u_grid_lines: c.GLint,
-    u_scroll: c.GLint,
-    u_tri_dir: c.GLint,
-
-    // CPU-side vertex accumulator
-    vertices: std.ArrayListUnmanaged(Vertex),
     allocator: std.mem.Allocator,
-
-    // Current frame dimensions
-    width: f32,
-    height: f32,
-
-    // -----------------------------------------------------------------------
-    // Lifecycle
-    // -----------------------------------------------------------------------
+    gl: snail.GlRenderer,
+    scene: snail.Scene,
+    frame_arena: std.heap.ArenaAllocator,
+    text_blobs: std.ArrayListUnmanaged(*snail.TextBlob),
+    transient_path_pictures: std.ArrayListUnmanaged(*snail.PathPicture),
+    path_ops: std.ArrayListUnmanaged(PathOp),
+    path_cache: std.AutoHashMapUnmanaged(u64, PathCacheEntry),
+    net_spark_picture: ?*snail.PathPicture,
+    prepared_cache: std.AutoHashMapUnmanaged(u64, PreparedCacheEntry),
+    resource_entries: std.ArrayListUnmanaged(snail.ResourceSet.Entry),
+    draw_words: std.ArrayListUnmanaged(u32),
+    draw_segments: std.ArrayListUnmanaged(snail.DrawSegment),
+    path_hash: std.hash.Wyhash,
+    path_frame: u64 = 0,
+    width: f32 = 0,
+    height: f32 = 0,
 
     pub fn init(allocator: std.mem.Allocator) !Renderer {
-        // --- Compile & link shader program ---
-        const program = try createProgram();
-
-        const u_projection = c.glGetUniformLocation(program, "u_projection");
-        const u_atlas = c.glGetUniformLocation(program, "u_atlas");
-        const u_values = c.glGetUniformLocation(program, "u_values");
-        const u_value_count = c.glGetUniformLocation(program, "u_value_count");
-        const u_values2 = c.glGetUniformLocation(program, "u_values2");
-        const u_value_count2 = c.glGetUniformLocation(program, "u_value_count2");
-        const u_color2 = c.glGetUniformLocation(program, "u_color2");
-        const u_fill = c.glGetUniformLocation(program, "u_fill");
-        const u_thickness = c.glGetUniformLocation(program, "u_thickness");
-        const u_smooth = c.glGetUniformLocation(program, "u_smooth");
-        const u_mirror = c.glGetUniformLocation(program, "u_mirror");
-        const u_grid = c.glGetUniformLocation(program, "u_grid");
-        const u_grid_lines = c.glGetUniformLocation(program, "u_grid_lines");
-        const u_scroll = c.glGetUniformLocation(program, "u_scroll");
-        const u_tri_dir = c.glGetUniformLocation(program, "u_tri_dir");
-
-        // --- VAO / VBO ---
-        var vao: c.GLuint = 0;
-        var vbo: c.GLuint = 0;
-        c.glGenVertexArrays(1, &vao);
-        c.glGenBuffers(1, &vbo);
-
-        c.glBindVertexArray(vao);
-        c.glBindBuffer(c.GL_ARRAY_BUFFER, vbo);
-
-        const stride: c.GLsizei = @sizeOf(Vertex);
-
-        // location 0 : a_pos  (2 x f32)
-        c.glEnableVertexAttribArray(0);
-        c.glVertexAttribPointer(0, 2, c.GL_FLOAT, c.GL_FALSE, stride, @ptrFromInt(@offsetOf(Vertex, "x")));
-
-        // location 1 : a_uv   (2 x f32)
-        c.glEnableVertexAttribArray(1);
-        c.glVertexAttribPointer(1, 2, c.GL_FLOAT, c.GL_FALSE, stride, @ptrFromInt(@offsetOf(Vertex, "u")));
-
-        // location 2 : a_color (4 x f32)
-        c.glEnableVertexAttribArray(2);
-        c.glVertexAttribPointer(2, 4, c.GL_FLOAT, c.GL_FALSE, stride, @ptrFromInt(@offsetOf(Vertex, "r")));
-
-        // location 3 : a_rect_size (2 x f32)
-        c.glEnableVertexAttribArray(3);
-        c.glVertexAttribPointer(3, 2, c.GL_FLOAT, c.GL_FALSE, stride, @ptrFromInt(@offsetOf(Vertex, "rect_w")));
-
-        // location 4 : a_corner_radius (4 x f32)
-        c.glEnableVertexAttribArray(4);
-        c.glVertexAttribPointer(4, 4, c.GL_FLOAT, c.GL_FALSE, stride, @ptrFromInt(@offsetOf(Vertex, "radius_tl")));
-
-        // location 5 : a_mode (1 x f32)
-        c.glEnableVertexAttribArray(5);
-        c.glVertexAttribPointer(5, 1, c.GL_FLOAT, c.GL_FALSE, stride, @ptrFromInt(@offsetOf(Vertex, "mode")));
-
-        c.glBindVertexArray(0);
+        var gl = try snail.GlRenderer.init(allocator);
+        errdefer gl.deinit();
 
         return .{
-            .program = program,
-            .vao = vao,
-            .vbo = vbo,
-            .u_projection = u_projection,
-            .u_atlas = u_atlas,
-            .u_values = u_values,
-            .u_value_count = u_value_count,
-            .u_values2 = u_values2,
-            .u_value_count2 = u_value_count2,
-            .u_color2 = u_color2,
-            .u_fill = u_fill,
-            .u_thickness = u_thickness,
-            .u_smooth = u_smooth,
-            .u_mirror = u_mirror,
-            .u_grid = u_grid,
-            .u_grid_lines = u_grid_lines,
-            .u_scroll = u_scroll,
-            .u_tri_dir = u_tri_dir,
-            .vertices = .{},
             .allocator = allocator,
-            .width = 0,
-            .height = 0,
+            .gl = gl,
+            .scene = snail.Scene.init(allocator),
+            .frame_arena = std.heap.ArenaAllocator.init(allocator),
+            .text_blobs = .empty,
+            .transient_path_pictures = .empty,
+            .path_ops = .empty,
+            .path_cache = .empty,
+            .net_spark_picture = null,
+            .prepared_cache = .empty,
+            .resource_entries = .empty,
+            .draw_words = .empty,
+            .draw_segments = .empty,
+            .path_hash = std.hash.Wyhash.init(path_hash_seed),
         };
     }
 
     pub fn deinit(self: *Renderer) void {
-        c.glDeleteProgram(self.program);
-        c.glDeleteBuffers(1, &self.vbo);
-        c.glDeleteVertexArrays(1, &self.vao);
-        self.vertices.deinit(self.allocator);
+        self.clearBatchResources();
+        self.text_blobs.deinit(self.allocator);
+        self.transient_path_pictures.deinit(self.allocator);
+        self.path_ops.deinit(self.allocator);
+        self.clearPathCache();
+        self.path_cache.deinit(self.allocator);
+        if (self.net_spark_picture) |picture| {
+            picture.deinit();
+            self.allocator.destroy(picture);
+        }
+        self.net_spark_picture = null;
+        self.frame_arena.deinit();
+        self.clearPreparedCache();
+        self.prepared_cache.deinit(self.allocator);
+        self.resource_entries.deinit(self.allocator);
+        self.draw_words.deinit(self.allocator);
+        self.draw_segments.deinit(self.allocator);
+        self.scene.deinit();
+        self.gl.deinit();
+        self.* = undefined;
     }
 
-    // -----------------------------------------------------------------------
-    // Frame begin / end
-    // -----------------------------------------------------------------------
-
     pub fn begin(self: *Renderer, width: f32, height: f32) void {
+        const start_ns = trace.nowNs();
+        self.path_frame +%= 1;
+        self.clearBatchResources();
+        self.sweepPathCache();
+        self.sweepPreparedCache();
         self.width = width;
         self.height = height;
-        self.vertices.clearRetainingCapacity();
 
         c.glViewport(0, 0, @intFromFloat(width), @intFromFloat(height));
         c.glClearColor(0.0, 0.0, 0.0, 0.0);
@@ -508,28 +188,49 @@ pub const Renderer = struct {
 
         c.glEnable(c.GL_BLEND);
         c.glBlendFunc(c.GL_ONE, c.GL_ONE_MINUS_SRC_ALPHA);
-
-        c.glUseProgram(self.program);
-
-        // Orthographic projection: (0,0) top-left -> (width,height) bottom-right
-        const proj = ortho(0, width, height, 0, -1, 1);
-        c.glUniformMatrix4fv(self.u_projection, 1, c.GL_FALSE, &proj);
-
-        // Bind atlas to texture unit 0 (caller is responsible for creating the texture)
-        c.glActiveTexture(c.GL_TEXTURE0);
-        c.glUniform1i(self.u_atlas, 0);
+        trace.log("renderer.begin frame={d} size={d:.0}x{d:.0} dur_ms={d:.3}", .{
+            self.path_frame,
+            width,
+            height,
+            trace.elapsedMs(start_ns),
+        });
     }
 
     pub fn end(self: *Renderer) void {
+        const start_ns = trace.nowNs();
         self.flush();
         c.glDisable(c.GL_SCISSOR_TEST);
+        trace.log("renderer.end frame={d} dur_ms={d:.3}", .{ self.path_frame, trace.elapsedMs(start_ns) });
     }
 
-    // -----------------------------------------------------------------------
-    // Drawing primitives
-    // -----------------------------------------------------------------------
+    pub fn drawText(
+        self: *Renderer,
+        text_renderer: *TextRenderer,
+        x: f32,
+        y: f32,
+        text: []const u8,
+        font_id: u16,
+        font_size: u16,
+        color: [4]f32,
+    ) void {
+        if (text.len == 0 or color[3] <= 0) return;
 
-    /// Draw a filled, optionally rounded rectangle.
+        self.flushPathRun() catch |err| {
+            if (err != error.EmptyPicture) log.warn("flush paths before text failed: {}", .{err});
+            self.clearBatchResources();
+            return;
+        };
+
+        var blob = text_renderer.buildTextBlob(text, font_id, font_size, x, y, color) catch |err| {
+            log.warn("draw text failed: {}", .{err});
+            return;
+        };
+        self.addTextBlob(blob) catch |err| {
+            blob.deinit();
+            log.warn("queue text failed: {}", .{err});
+        };
+    }
+
     pub fn drawRect(
         self: *Renderer,
         x: f32,
@@ -539,12 +240,18 @@ pub const Renderer = struct {
         color: [4]f32,
         corner_radius: [4]f32,
     ) void {
-        self.pushQuad(x, y, w, h, color, corner_radius, .{ 0, 0, 1, 1 }, 0.0, 0);
+        if (w <= 0 or h <= 0 or color[3] <= 0) return;
+
+        self.queuePathOp(.{ .rect = .{
+            .x = x,
+            .y = y,
+            .w = w,
+            .h = h,
+            .color = color,
+            .corner_radius = corner_radius,
+        } });
     }
 
-    /// Draw a filled parallelogram. `skew` is horizontal shift per unit of
-    /// height — positive values slant the top edge to the right (`/`).
-    /// Corner radius is not supported; it is ignored.
     pub fn drawSlantRect(
         self: *Renderer,
         x: f32,
@@ -554,12 +261,18 @@ pub const Renderer = struct {
         color: [4]f32,
         skew: f32,
     ) void {
-        const no_radius = [4]f32{ 0, 0, 0, 0 };
-        self.pushQuad(x, y, w, h, color, no_radius, .{ 0, 0, 1, 1 }, 0.0, skew);
+        if (w <= 0 or h <= 0 or color[3] <= 0) return;
+
+        self.queuePathOp(.{ .slant_rect = .{
+            .x = x,
+            .y = y,
+            .w = w,
+            .h = h,
+            .color = color,
+            .skew = skew,
+        } });
     }
 
-    /// Draw a filled triangle inscribed in the given rect, apex pointing
-    /// toward the edge selected by `dir`.
     pub fn drawTriangle(
         self: *Renderer,
         x: f32,
@@ -569,33 +282,18 @@ pub const Renderer = struct {
         color: [4]f32,
         dir: TriDir,
     ) void {
-        self.flush();
-        c.glUniform1i(self.u_tri_dir, @intFromEnum(dir));
-        const no_radius = [4]f32{ 0, 0, 0, 0 };
-        self.pushQuad(x, y, w, h, color, no_radius, .{ 0, 0, 1, 1 }, 4.0, 0);
-        self.flush();
+        if (w <= 0 or h <= 0 or color[3] <= 0) return;
+
+        self.queuePathOp(.{ .triangle = .{
+            .x = x,
+            .y = y,
+            .w = w,
+            .h = h,
+            .color = color,
+            .dir = dir,
+        } });
     }
 
-    /// Draw a textured quad (e.g. a glyph from an atlas).
-    /// `tex_x/y/w/h` are texel coordinates normalised to 0-1 by the caller.
-    pub fn drawTexturedQuad(
-        self: *Renderer,
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
-        color: [4]f32,
-        tex_x: f32,
-        tex_y: f32,
-        tex_w: f32,
-        tex_h: f32,
-    ) void {
-        const no_radius = [4]f32{ 0, 0, 0, 0 };
-        self.pushQuad(x, y, w, h, color, no_radius, .{ tex_x, tex_y, tex_w, tex_h }, 1.0, 0);
-    }
-
-    /// Draw a border as four rectangles (top, bottom, left, right).
-    /// `widths` order: top, right, bottom, left.
     pub fn drawBorder(
         self: *Renderer,
         x: f32,
@@ -610,29 +308,14 @@ pub const Renderer = struct {
         const right = widths[1];
         const bottom = widths[2];
         const left = widths[3];
+        const no_radius = [4]f32{ 0, 0, 0, 0 };
 
-        const no_r = [4]f32{ 0, 0, 0, 0 };
-
-        // Top edge
-        if (top > 0) {
-            self.drawRect(x, y, w, top, color, .{ corner_radius[0], corner_radius[1], 0, 0 });
-        }
-        // Bottom edge
-        if (bottom > 0) {
-            self.drawRect(x, y + h - bottom, w, bottom, color, .{ 0, 0, corner_radius[2], corner_radius[3] });
-        }
-        // Left edge (between top and bottom borders)
-        if (left > 0) {
-            self.drawRect(x, y + top, left, h - top - bottom, color, no_r);
-        }
-        // Right edge (between top and bottom borders)
-        if (right > 0) {
-            self.drawRect(x + w - right, y + top, right, h - top - bottom, color, no_r);
-        }
+        if (top > 0) self.drawRect(x, y, w, top, color, .{ corner_radius[0], corner_radius[1], 0, 0 });
+        if (bottom > 0) self.drawRect(x, y + h - bottom, w, bottom, color, .{ 0, 0, corner_radius[2], corner_radius[3] });
+        if (left > 0) self.drawRect(x, y + top, left, h - top - bottom, color, no_radius);
+        if (right > 0) self.drawRect(x + w - right, y + top, right, h - top - bottom, color, no_radius);
     }
 
-    /// Draw a curve (area fill or line stroke) evaluated per-pixel in the fragment shader.
-    /// Flushes the vertex batch to set curve-specific uniforms.
     pub fn drawCurve(
         self: *Renderer,
         x: f32,
@@ -654,216 +337,1294 @@ pub const Renderer = struct {
         grid_count: u32,
         is_line: bool,
     ) void {
-        self.flush();
+        _ = fill;
+        _ = smooth;
+        if (w <= 0 or h <= 0) return;
 
-        // Set curve uniforms
-        c.glUniform1fv(self.u_values, @intCast(value_count), values.ptr);
-        c.glUniform1i(self.u_value_count, @intCast(value_count));
-        if (value_count2 > 0) {
-            c.glUniform1fv(self.u_values2, @intCast(value_count2), values2.ptr);
-        }
-        c.glUniform1i(self.u_value_count2, @intCast(value_count2));
-        c.glUniform4f(self.u_color2, color2[0], color2[1], color2[2], color2[3]);
-        c.glUniform1f(self.u_fill, fill);
-        c.glUniform1f(self.u_thickness, thickness);
-        c.glUniform1i(self.u_smooth, @intFromBool(smooth));
-        c.glUniform1i(self.u_mirror, @intFromBool(mirror));
-        c.glUniform1f(self.u_scroll, scroll);
-        c.glUniform1i(self.u_grid, @intCast(grid_count));
-        if (grid_count > 0) {
-            c.glUniform1fv(self.u_grid_lines, @intCast(grid_count), &grid_lines);
-        }
-
-        // Mode 2.0 = area fill, 3.0 = line stroke.
-        // UV is 0-1 across the quad (same mapping as mode 0 rects).
-        const mode: f32 = if (is_line) 3.0 else 2.0;
-        self.pushQuad(x, y, w, h, color, .{ 0, 0, 0, 0 }, .{ 0, 0, 1, 1 }, mode, 0);
-
-        // Flush immediately so curve uniforms only apply to this quad.
-        self.flush();
+        self.queuePathOp(.{ .curve = .{
+            .x = x,
+            .y = y,
+            .w = w,
+            .h = h,
+            .values = values,
+            .value_count = value_count,
+            .values2 = values2,
+            .value_count2 = value_count2,
+            .color = color,
+            .color2 = color2,
+            .thickness = thickness,
+            .mirror = mirror,
+            .scroll = scroll,
+            .grid_lines = grid_lines,
+            .grid_count = grid_count,
+            .is_line = is_line,
+        } });
     }
 
-    /// Enable scissor test to clip rendering to the given rectangle.
-    pub fn setScissor(self: *Renderer, x: f32, y: f32, w: f32, h: f32) void {
-        // Flush anything that was queued before the scissor change.
-        self.flush();
-
-        c.glEnable(c.GL_SCISSOR_TEST);
-        // GL scissor origin is bottom-left; our coordinate space has origin at top-left.
-        const sx: c.GLint = @intFromFloat(x);
-        const sy: c.GLint = @intFromFloat(self.height - y - h);
-        const sw: c.GLsizei = @intFromFloat(w);
-        const sh: c.GLsizei = @intFromFloat(h);
-        c.glScissor(sx, sy, sw, sh);
-    }
-
-    /// Disable scissor test.
-    pub fn clearScissor(self: *Renderer) void {
-        self.flush();
-        c.glDisable(c.GL_SCISSOR_TEST);
-    }
-
-    // -----------------------------------------------------------------------
-    // Internal helpers
-    // -----------------------------------------------------------------------
-
-    pub fn flush(self: *Renderer) void {
-        const count = self.vertices.items.len;
-        if (count == 0) return;
-
-        c.glBindVertexArray(self.vao);
-        c.glBindBuffer(c.GL_ARRAY_BUFFER, self.vbo);
-        c.glBufferData(
-            c.GL_ARRAY_BUFFER,
-            @intCast(count * @sizeOf(Vertex)),
-            self.vertices.items.ptr,
-            c.GL_STREAM_DRAW,
-        );
-
-        c.glDrawArrays(c.GL_TRIANGLES, 0, @intCast(count));
-        c.glBindVertexArray(0);
-
-        self.vertices.clearRetainingCapacity();
-    }
-
-    fn pushQuad(
+    pub fn drawNetSpark(
         self: *Renderer,
         x: f32,
         y: f32,
         w: f32,
         h: f32,
+        values: []const f32,
+        value_count: u32,
+        values2: []const f32,
+        value_count2: u32,
         color: [4]f32,
-        corner_radius: [4]f32,
-        uv_rect: [4]f32, // u0, v0, u1, v1
-        mode: f32,
-        skew: f32, // horizontal shift per unit of height; shears top edge right
+        color2: [4]f32,
+        skew: f32,
+        bar_width: f32,
+        bar_gap: f32,
+        min_bar_height: f32,
+        fade_start: f32,
     ) void {
-        // For solid-colour quads and curves, UV encodes the normalised local
-        // position (0..1 mapping to 0..rect_size). For textured quads the UV
-        // is the atlas coordinate.
-        const is_normalized = mode < 0.5 or mode > 1.5;
-        const uv_l = if (is_normalized) @as(f32, 0.0) else uv_rect[0];
-        const uv_t = if (is_normalized) @as(f32, 0.0) else uv_rect[1];
-        const uv_r = if (is_normalized) @as(f32, 1.0) else uv_rect[0] + uv_rect[2];
-        const uv_b = if (is_normalized) @as(f32, 1.0) else uv_rect[1] + uv_rect[3];
+        if (w <= 0 or h <= 0) return;
 
-        // Top edge shifts right by skew*h. UVs stay (0,0)..(1,1) so
-        // v_local_pos interpolates linearly across the logical rect and
-        // the rounded-rect SDF stays correct.
-        const shift = skew * h;
+        const op = NetSparkOp{
+            .x = x,
+            .y = y,
+            .w = w,
+            .h = h,
+            .values = values,
+            .value_count = value_count,
+            .values2 = values2,
+            .value_count2 = value_count2,
+            .color = color,
+            .color2 = color2,
+            .skew = skew,
+            .bar_width = bar_width,
+            .bar_gap = bar_gap,
+            .min_bar_height = min_bar_height,
+            .fade_start = fade_start,
+        };
+        self.addNetSparkInstances(op) catch |err| {
+            log.warn("draw net spark failed: {}", .{err});
+        };
+    }
 
-        const base = Vertex{
-            .x = 0,
-            .y = 0,
-            .u = 0,
-            .v = 0,
-            .r = color[0],
-            .g = color[1],
-            .b = color[2],
-            .a = color[3],
-            .rect_w = w,
-            .rect_h = h,
-            .radius_tl = corner_radius[0],
-            .radius_tr = corner_radius[1],
-            .radius_bl = corner_radius[2],
-            .radius_br = corner_radius[3],
-            .mode = mode,
+    pub fn setScissor(self: *Renderer, x: f32, y: f32, w: f32, h: f32) void {
+        self.flush();
+        c.glEnable(c.GL_SCISSOR_TEST);
+        c.glScissor(
+            @intFromFloat(x),
+            @intFromFloat(self.height - y - h),
+            @intFromFloat(w),
+            @intFromFloat(h),
+        );
+    }
+
+    pub fn clearScissor(self: *Renderer) void {
+        self.flush();
+        c.glDisable(c.GL_SCISSOR_TEST);
+    }
+
+    pub fn flush(self: *Renderer) void {
+        if (self.scene.commandCount() == 0 and self.path_ops.items.len == 0) return;
+
+        const start_ns = trace.nowNs();
+        const initial_commands = self.scene.commandCount();
+        const initial_path_ops = self.path_ops.items.len;
+
+        const path_start_ns = trace.nowNs();
+        self.flushPathRun() catch |err| {
+            if (err != error.EmptyPicture) log.warn("flush paths failed: {}", .{err});
+            self.clearBatchResources();
+            return;
+        };
+        const path_ms = trace.elapsedMs(path_start_ns);
+        if (self.scene.commandCount() == 0) {
+            trace.log("renderer.flush-empty frame={d} initial_commands={d} initial_path_ops={d} path_ms={d:.3} total_ms={d:.3}", .{
+                self.path_frame,
+                initial_commands,
+                initial_path_ops,
+                path_ms,
+                trace.elapsedMs(start_ns),
+            });
+            return;
+        }
+
+        const command_count = self.scene.commandCount();
+        const resource_entry_count = @max(command_count, 1);
+        self.resource_entries.resize(self.allocator, resource_entry_count) catch |err| {
+            log.warn("resource entry allocation failed: {}", .{err});
+            self.clearBatchResources();
+            return;
         };
 
-        // Two triangles: TL, TR, BL  and  TR, BR, BL
-        const verts = [6]Vertex{
-            // top-left
-            withPosUV(base, x + shift, y, uv_l, uv_t),
-            // top-right
-            withPosUV(base, x + w + shift, y, uv_r, uv_t),
-            // bottom-left
-            withPosUV(base, x, y + h, uv_l, uv_b),
-            // top-right
-            withPosUV(base, x + w + shift, y, uv_r, uv_t),
-            // bottom-right
-            withPosUV(base, x + w, y + h, uv_r, uv_b),
-            // bottom-left
-            withPosUV(base, x, y + h, uv_l, uv_b),
+        var resources = snail.ResourceSet.init(self.resource_entries.items[0..resource_entry_count]);
+        const resource_start_ns = trace.nowNs();
+        resources.addScene(&self.scene) catch |err| {
+            log.warn("resource collection failed: {}", .{err});
+            self.clearBatchResources();
+            return;
+        };
+        const resource_ms = trace.elapsedMs(resource_start_ns);
+
+        const resource_lookup_start_ns = trace.nowNs();
+        var resource_changed_count: usize = resource_entry_count;
+        var resource_uploaded = false;
+        var upload_ms: f64 = 0;
+        var prepared: *snail.PreparedResources = undefined;
+        const manifest_key = resourceManifestKey(&resources);
+        if (self.prepared_cache.getPtr(manifest_key)) |cached| {
+            cached.last_used = self.path_frame;
+            resource_changed_count = 0;
+            prepared = &cached.prepared;
+        } else {
+            const upload_start_ns = trace.nowNs();
+            const next_prepared = self.gl.uploadResourcesBlocking(self.allocator, &resources) catch |err| {
+                log.warn("resource upload failed: {}", .{err});
+                self.clearBatchResources();
+                return;
+            };
+            upload_ms = trace.elapsedMs(upload_start_ns);
+            self.prepared_cache.put(self.allocator, manifest_key, .{
+                .prepared = next_prepared,
+                .last_used = self.path_frame,
+            }) catch |err| {
+                var owned = next_prepared;
+                owned.deinit();
+                log.warn("prepared-resource cache allocation failed: {}", .{err});
+                self.clearBatchResources();
+                return;
+            };
+            prepared = &self.prepared_cache.getPtr(manifest_key).?.prepared;
+            resource_uploaded = true;
+        }
+        const resource_lookup_ms = trace.elapsedMs(resource_lookup_start_ns);
+
+        const options = snail.DrawOptions{
+            .mvp = snail.Mat4.ortho(0, self.width, self.height, 0, -1, 1),
+            .target = .{
+                .pixel_width = self.width,
+                .pixel_height = self.height,
+                .subpixel_order = .none,
+                .opaque_backdrop = false,
+            },
+        };
+        const estimate_start_ns = trace.nowNs();
+        const word_count = snail.DrawList.estimate(&self.scene, options);
+        const segment_count = snail.DrawList.estimateSegments(&self.scene, options);
+        const estimate_ms = trace.elapsedMs(estimate_start_ns);
+        self.draw_words.resize(self.allocator, @max(word_count, 1)) catch |err| {
+            log.warn("draw word allocation failed: {}", .{err});
+            self.clearBatchResources();
+            return;
+        };
+        self.draw_segments.resize(self.allocator, @max(segment_count, 1)) catch |err| {
+            log.warn("draw segment allocation failed: {}", .{err});
+            self.clearBatchResources();
+            return;
         };
 
-        self.vertices.appendSlice(self.allocator, &verts) catch {
-            log.err("vertex buffer allocation failed", .{});
+        const drawlist_start_ns = trace.nowNs();
+        var draw = snail.DrawList.init(self.draw_words.items[0..word_count], self.draw_segments.items[0..segment_count]);
+        draw.addScene(prepared, &self.scene, options) catch |err| {
+            log.warn("draw list build failed: {}", .{err});
+            self.clearBatchResources();
+            return;
         };
+        const drawlist_ms = trace.elapsedMs(drawlist_start_ns);
+        const draw_start_ns = trace.nowNs();
+        self.gl.draw(prepared, draw.slice(), options) catch |err| {
+            log.warn("snail draw failed: {}", .{err});
+        };
+        const draw_ms = trace.elapsedMs(draw_start_ns);
+        const cleanup_start_ns = trace.nowNs();
+        self.clearBatchResources();
+        const cleanup_ms = trace.elapsedMs(cleanup_start_ns);
+        trace.log("renderer.flush frame={d} initial_commands={d} initial_path_ops={d} commands={d} resources={d} prepared_cache={d} resource_changed={d} resource_uploaded={} words={d} segments={d} path_ms={d:.3} resource_ms={d:.3} resource_lookup_ms={d:.3} upload_ms={d:.3} estimate_ms={d:.3} drawlist_ms={d:.3} draw_ms={d:.3} cleanup_ms={d:.3} total_ms={d:.3}", .{
+            self.path_frame,
+            initial_commands,
+            initial_path_ops,
+            command_count,
+            resources.slice().len,
+            self.prepared_cache.count(),
+            resource_changed_count,
+            resource_uploaded,
+            word_count,
+            segment_count,
+            path_ms,
+            resource_ms,
+            resource_lookup_ms,
+            upload_ms,
+            estimate_ms,
+            drawlist_ms,
+            draw_ms,
+            cleanup_ms,
+            trace.elapsedMs(start_ns),
+        });
+    }
+
+    fn addTextBlob(self: *Renderer, blob: snail.TextBlob) !void {
+        const ptr = try self.allocator.create(snail.TextBlob);
+        errdefer self.allocator.destroy(ptr);
+        ptr.* = blob;
+        errdefer ptr.deinit();
+        try self.text_blobs.append(self.allocator, ptr);
+        errdefer self.text_blobs.items.len -= 1;
+        try self.scene.addText(.{ .blob = ptr });
+    }
+
+    fn ensureNetSparkPicture(self: *Renderer) !*snail.PathPicture {
+        if (self.net_spark_picture) |picture| return picture;
+
+        var path = snail.Path.init(self.allocator);
+        defer path.deinit();
+        try path.moveTo(.{ .x = -0.5, .y = 0 });
+        try path.lineTo(.{ .x = 0.5, .y = 0 });
+        try path.lineTo(.{ .x = 0.5, .y = 1 });
+        try path.lineTo(.{ .x = -0.5, .y = 1 });
+        try path.close();
+
+        var builder = snail.PathPictureBuilder.init(self.allocator);
+        defer builder.deinit();
+        try builder.addFilledPath(&path, .{ .color = .{ 1, 1, 1, 1 } }, .identity);
+
+        const picture = try self.allocator.create(snail.PathPicture);
+        errdefer self.allocator.destroy(picture);
+        picture.* = try builder.freeze(self.allocator);
+        self.net_spark_picture = picture;
+        return picture;
+    }
+
+    fn addNetSparkInstances(self: *Renderer, op: NetSparkOp) !void {
+        try self.flushPathRun();
+
+        const picture = try self.ensureNetSparkPicture();
+        const frame_allocator = self.frame_arena.allocator();
+        var instances: std.ArrayListUnmanaged(snail.Override) = .empty;
+        defer instances.deinit(frame_allocator);
+        try buildNetSparkInstances(frame_allocator, &instances, op);
+        if (instances.items.len == 0) return;
+
+        const slice = try instances.toOwnedSlice(frame_allocator);
+        try self.scene.addPath(.{
+            .picture = picture,
+            .instances = slice,
+        });
+    }
+
+    fn queuePathOp(self: *Renderer, op: PathOp) void {
+        if (!pathOpCacheable(op) and self.path_ops.items.len > 0) {
+            self.flushPathRun() catch |err| {
+                if (err != error.EmptyPicture) log.warn("flush paths before dynamic op failed: {}", .{err});
+                self.clearBatchResources();
+            };
+        }
+
+        self.path_ops.append(self.allocator, op) catch |err| {
+            log.warn("queue path op failed: {}", .{err});
+            return;
+        };
+        hashPathOp(&self.path_hash, op);
+        if (self.path_ops.items.len >= path_run_max_ops or !pathOpCacheable(op)) {
+            self.flushPathRun() catch |err| {
+                if (err != error.EmptyPicture) log.warn("flush path chunk failed: {}", .{err});
+                self.clearBatchResources();
+            };
+        }
+    }
+
+    fn flushPathRun(self: *Renderer) !void {
+        if (self.path_ops.items.len == 0) return;
+
+        const start_ns = trace.nowNs();
+        const cacheable = self.pathRunCacheable();
+        const op_count = self.path_ops.items.len;
+        const key = self.pathRunKey();
+        if (cacheable) {
+            if (self.path_cache.getPtr(key)) |entry| {
+                entry.last_used = self.path_frame;
+                try self.scene.addPath(.{ .picture = entry.picture });
+                trace.log("renderer.path-cache-hit frame={d} ops={d} entries={d} dur_ms={d:.3}", .{
+                    self.path_frame,
+                    op_count,
+                    self.path_cache.count(),
+                    trace.elapsedMs(start_ns),
+                });
+                self.resetPathRun();
+                return;
+            }
+        }
+
+        var picture = try self.buildPathRun(self.path_ops.items);
+        var picture_owned = true;
+        defer if (picture_owned) picture.deinit();
+
+        const ptr = try self.allocator.create(snail.PathPicture);
+        errdefer self.allocator.destroy(ptr);
+        ptr.* = picture;
+        picture_owned = false;
+        errdefer ptr.deinit();
+
+        if (!cacheable) {
+            try self.transient_path_pictures.append(self.allocator, ptr);
+            errdefer self.transient_path_pictures.items.len -= 1;
+            try self.scene.addPath(.{ .picture = ptr });
+            trace.log("renderer.path-transient frame={d} ops={d} transient={d} build_ms={d:.3}", .{
+                self.path_frame,
+                op_count,
+                self.transient_path_pictures.items.len,
+                trace.elapsedMs(start_ns),
+            });
+            self.resetPathRun();
+            return;
+        }
+
+        try self.path_cache.put(self.allocator, key, .{
+            .picture = ptr,
+            .last_used = self.path_frame,
+        });
+        errdefer _ = self.path_cache.remove(key);
+        try self.scene.addPath(.{ .picture = ptr });
+        trace.log("renderer.path-cache-miss frame={d} ops={d} entries={d} build_ms={d:.3}", .{
+            self.path_frame,
+            op_count,
+            self.path_cache.count(),
+            trace.elapsedMs(start_ns),
+        });
+        self.resetPathRun();
+    }
+
+    fn buildPathRun(self: *Renderer, ops: []const PathOp) !snail.PathPicture {
+        var builder = snail.PathPictureBuilder.init(self.allocator);
+        defer builder.deinit();
+
+        for (ops) |op| {
+            switch (op) {
+                .rect => |rect| try addRectOp(self.allocator, &builder, rect),
+                .slant_rect => |slant| try addSlantRectOp(self.allocator, &builder, slant),
+                .triangle => |triangle| try addTriangleOp(self.allocator, &builder, triangle),
+                .curve => |curve| try addCurveOp(&builder, curve),
+                .net_spark => |spark| try addNetSparkOp(&builder, spark),
+            }
+        }
+
+        return builder.freeze(self.allocator);
+    }
+
+    fn clearBatchResources(self: *Renderer) void {
+        self.scene.reset();
+        for (self.text_blobs.items) |blob| {
+            blob.deinit();
+            self.allocator.destroy(blob);
+        }
+        self.text_blobs.clearRetainingCapacity();
+
+        for (self.transient_path_pictures.items) |picture| {
+            picture.deinit();
+            self.allocator.destroy(picture);
+        }
+        self.transient_path_pictures.clearRetainingCapacity();
+
+        _ = self.frame_arena.reset(.retain_capacity);
+
+        self.resetPathRun();
+    }
+
+    fn resetPathRun(self: *Renderer) void {
+        self.path_ops.clearRetainingCapacity();
+        self.path_hash = std.hash.Wyhash.init(path_hash_seed);
+    }
+
+    fn pathRunKey(self: *Renderer) u64 {
+        var hasher = self.path_hash;
+        hashValue(&hasher, self.path_ops.items.len);
+        return hasher.final();
+    }
+
+    fn pathRunCacheable(self: *Renderer) bool {
+        for (self.path_ops.items) |op| {
+            if (!pathOpCacheable(op)) return false;
+        }
+        return true;
+    }
+
+    fn sweepPathCache(self: *Renderer) void {
+        if (self.path_cache.count() <= path_cache_max_entries) return;
+
+        const start_ns = trace.nowNs();
+        const before = self.path_cache.count();
+        var stale: std.ArrayListUnmanaged(u64) = .empty;
+        defer stale.deinit(self.allocator);
+
+        var it = self.path_cache.iterator();
+        while (it.next()) |entry| {
+            if (self.path_frame -% entry.value_ptr.last_used > path_cache_retire_after_frames) {
+                stale.append(self.allocator, entry.key_ptr.*) catch {
+                    self.clearPathCache();
+                    return;
+                };
+            }
+        }
+
+        if (stale.items.len == 0) {
+            trace.log("renderer.path-cache-clear frame={d} entries_before={d} reason=no-stale dur_ms={d:.3}", .{
+                self.path_frame,
+                before,
+                trace.elapsedMs(start_ns),
+            });
+            self.clearPathCache();
+            return;
+        }
+
+        for (stale.items) |key| {
+            if (self.path_cache.fetchRemove(key)) |removed| {
+                removed.value.picture.deinit();
+                self.allocator.destroy(removed.value.picture);
+            }
+        }
+        trace.log("renderer.path-cache-sweep frame={d} entries_before={d} removed={d} entries_after={d} dur_ms={d:.3}", .{
+            self.path_frame,
+            before,
+            stale.items.len,
+            self.path_cache.count(),
+            trace.elapsedMs(start_ns),
+        });
+    }
+
+    fn clearPathCache(self: *Renderer) void {
+        var it = self.path_cache.iterator();
+        while (it.next()) |entry| {
+            entry.value_ptr.picture.deinit();
+            self.allocator.destroy(entry.value_ptr.picture);
+        }
+        self.path_cache.clearRetainingCapacity();
+    }
+
+    fn sweepPreparedCache(self: *Renderer) void {
+        if (self.prepared_cache.count() <= prepared_cache_max_entries) return;
+
+        const start_ns = trace.nowNs();
+        const before = self.prepared_cache.count();
+        var stale: std.ArrayListUnmanaged(u64) = .empty;
+        defer stale.deinit(self.allocator);
+
+        var it = self.prepared_cache.iterator();
+        while (it.next()) |entry| {
+            if (self.path_frame -% entry.value_ptr.last_used > prepared_cache_retire_after_frames) {
+                stale.append(self.allocator, entry.key_ptr.*) catch {
+                    self.clearPreparedCache();
+                    return;
+                };
+            }
+        }
+
+        if (stale.items.len == 0) {
+            trace.log("renderer.prepared-cache-clear frame={d} entries_before={d} reason=no-stale dur_ms={d:.3}", .{
+                self.path_frame,
+                before,
+                trace.elapsedMs(start_ns),
+            });
+            self.clearPreparedCache();
+            return;
+        }
+
+        for (stale.items) |key| {
+            if (self.prepared_cache.fetchRemove(key)) |removed| {
+                var entry = removed.value;
+                entry.prepared.deinit();
+            }
+        }
+        trace.log("renderer.prepared-cache-sweep frame={d} entries_before={d} removed={d} entries_after={d} dur_ms={d:.3}", .{
+            self.path_frame,
+            before,
+            stale.items.len,
+            self.prepared_cache.count(),
+            trace.elapsedMs(start_ns),
+        });
+    }
+
+    fn clearPreparedCache(self: *Renderer) void {
+        var it = self.prepared_cache.iterator();
+        while (it.next()) |entry| {
+            entry.value_ptr.prepared.deinit();
+        }
+        self.prepared_cache.clearRetainingCapacity();
     }
 };
 
-// ---------------------------------------------------------------------------
-// Utility functions
-// ---------------------------------------------------------------------------
-
-fn withPosUV(base: Vertex, x: f32, y: f32, u: f32, v: f32) Vertex {
-    var vert = base;
-    vert.x = x;
-    vert.y = y;
-    vert.u = u;
-    vert.v = v;
-    return vert;
+fn resourceManifestKey(resources: *const snail.ResourceSet) u64 {
+    var hasher = std.hash.Wyhash.init(prepared_cache_seed);
+    const entries = resources.slice();
+    hashValue(&hasher, entries.len);
+    for (entries) |entry| {
+        switch (entry) {
+            .text_atlas => |text| {
+                hashValue(&hasher, @as(u8, 0));
+                hashValue(&hasher, text.key.id);
+            },
+            .path_picture => |path| {
+                hashValue(&hasher, @as(u8, 1));
+                hashValue(&hasher, path.key.id);
+            },
+            .image => |image| {
+                hashValue(&hasher, @as(u8, 2));
+                hashValue(&hasher, image.key.id);
+            },
+        }
+    }
+    return hasher.final();
 }
 
-/// Build a column-major 4x4 orthographic projection matrix (returned as [16]f32).
-fn ortho(left: f32, right: f32, bottom: f32, top: f32, near: f32, far: f32) [16]f32 {
-    const rl = right - left;
-    const tb = top - bottom;
-    const fn_ = far - near;
-    return .{
-        2.0 / rl,           0,                  0,                0,
-        0,                   2.0 / tb,           0,                0,
-        0,                   0,                  -2.0 / fn_,       0,
-        -(right + left) / rl, -(top + bottom) / tb, -(far + near) / fn_, 1,
+fn addRectOp(allocator: std.mem.Allocator, builder: *snail.PathPictureBuilder, op: RectOp) !void {
+    const rect = snail.Rect{ .x = op.x, .y = op.y, .w = op.w, .h = op.h };
+    const fill = snail.FillStyle{ .color = op.color };
+    if (sameRadius(op.corner_radius)) {
+        try builder.addFilledRoundedRect(rect, fill, op.corner_radius[0], .identity);
+        return;
+    }
+
+    var path = snail.Path.init(allocator);
+    defer path.deinit();
+    try buildRoundedRectPath(&path, rect, op.corner_radius);
+    try builder.addFilledPath(&path, fill, .identity);
+}
+
+fn addSlantRectOp(allocator: std.mem.Allocator, builder: *snail.PathPictureBuilder, op: SlantRectOp) !void {
+    var path = snail.Path.init(allocator);
+    defer path.deinit();
+    const shift = op.skew * op.h;
+    try path.moveTo(.{ .x = op.x + shift, .y = op.y });
+    try path.lineTo(.{ .x = op.x + shift + op.w, .y = op.y });
+    try path.lineTo(.{ .x = op.x + op.w, .y = op.y + op.h });
+    try path.lineTo(.{ .x = op.x, .y = op.y + op.h });
+    try path.close();
+    try builder.addFilledPath(&path, .{ .color = op.color }, .identity);
+}
+
+fn addTriangleOp(allocator: std.mem.Allocator, builder: *snail.PathPictureBuilder, op: TriangleOp) !void {
+    var path = snail.Path.init(allocator);
+    defer path.deinit();
+    switch (op.dir) {
+        .up => {
+            try path.moveTo(.{ .x = op.x + op.w * 0.5, .y = op.y });
+            try path.lineTo(.{ .x = op.x + op.w, .y = op.y + op.h });
+            try path.lineTo(.{ .x = op.x, .y = op.y + op.h });
+        },
+        .right => {
+            try path.moveTo(.{ .x = op.x + op.w, .y = op.y + op.h * 0.5 });
+            try path.lineTo(.{ .x = op.x, .y = op.y });
+            try path.lineTo(.{ .x = op.x, .y = op.y + op.h });
+        },
+        .down => {
+            try path.moveTo(.{ .x = op.x + op.w * 0.5, .y = op.y + op.h });
+            try path.lineTo(.{ .x = op.x, .y = op.y });
+            try path.lineTo(.{ .x = op.x + op.w, .y = op.y });
+        },
+        .left => {
+            try path.moveTo(.{ .x = op.x, .y = op.y + op.h * 0.5 });
+            try path.lineTo(.{ .x = op.x + op.w, .y = op.y + op.h });
+            try path.lineTo(.{ .x = op.x + op.w, .y = op.y });
+        },
+    }
+    try path.close();
+    try builder.addFilledPath(&path, .{ .color = op.color }, .identity);
+}
+
+fn addCurveOp(builder: *snail.PathPictureBuilder, op: CurveOp) !void {
+    try addCurveGrid(builder, op.x, op.y, op.w, op.h, op.grid_lines, op.grid_count);
+    if (op.mirror) {
+        try addMirrorSeries(builder, op.values, op.value_count, op.x, op.y, op.w, op.h, op.color, op.thickness, op.scroll, op.is_line, true);
+        try addMirrorSeries(builder, op.values2, op.value_count2, op.x, op.y, op.w, op.h, op.color2, op.thickness, op.scroll, op.is_line, false);
+        return;
+    }
+
+    try addSeries(builder, op.values, op.value_count, op.x, op.y, op.w, op.h, op.color, op.thickness, op.scroll, op.is_line);
+    if (op.value_count2 > 0) {
+        try addSeries(builder, op.values2, op.value_count2, op.x, op.y, op.w, op.h, op.color2, op.thickness, op.scroll, true);
+    }
+}
+
+fn buildNetSparkInstances(
+    allocator: std.mem.Allocator,
+    instances: *std.ArrayListUnmanaged(snail.Override),
+    op: NetSparkOp,
+) !void {
+    const count1: usize = @min(@as(usize, @intCast(op.value_count)), op.values.len);
+    const count2: usize = @min(@as(usize, @intCast(op.value_count2)), op.values2.len);
+    const count: usize = @max(count1, count2);
+    if (count == 0 or op.w <= 0 or op.h <= 0) return;
+
+    const bar_w = @max(op.bar_width, 1.0);
+    const bar_gap = @max(op.bar_gap, 0.0);
+    const half_h = op.h * 0.5;
+    const center_y = op.y + half_h;
+    const content_w = @as(f32, @floatFromInt(count)) * bar_w +
+        @as(f32, @floatFromInt(if (count > 0) count - 1 else 0)) * bar_gap;
+    const skew_pad = @abs(op.skew) * half_h;
+    const total_w = content_w + skew_pad * 2.0;
+    const origin_x = op.x + @max(0.0, op.w - total_w) * 0.5 + skew_pad;
+
+    for (0..count) |i| {
+        const center_x = origin_x + bar_w * 0.5 +
+            @as(f32, @floatFromInt(i)) * (bar_w + bar_gap);
+        if (i < count2) {
+            try appendNetSparkHalfInstances(
+                allocator,
+                instances,
+                center_x,
+                center_y,
+                bar_w,
+                @max(0.0, op.values2[i]),
+                half_h,
+                op.skew,
+                op.min_bar_height,
+                op.fade_start,
+                false,
+                op.color2,
+            );
+        }
+        if (i < count1) {
+            try appendNetSparkHalfInstances(
+                allocator,
+                instances,
+                center_x,
+                center_y,
+                bar_w,
+                @max(0.0, op.values[i]),
+                half_h,
+                op.skew,
+                op.min_bar_height,
+                op.fade_start,
+                true,
+                op.color,
+            );
+        }
+    }
+}
+
+fn appendNetSparkHalfInstances(
+    allocator: std.mem.Allocator,
+    instances: *std.ArrayListUnmanaged(snail.Override),
+    center_x: f32,
+    center_y: f32,
+    bar_w: f32,
+    value: f32,
+    half_h: f32,
+    skew: f32,
+    min_bar_height: f32,
+    fade_start: f32,
+    upper: bool,
+    color: [4]f32,
+) !void {
+    if (value <= 0 or half_h <= 0 or color[3] <= 0) return;
+
+    const bar_h = @max(@max(min_bar_height, 0.0), value * half_h);
+    const fade_start_px = std.math.clamp(fade_start, 0.1, 0.98) * half_h;
+    const solid_h = @min(bar_h, fade_start_px);
+
+    if (solid_h > 0) {
+        try appendNetSparkSliceInstance(allocator, instances, center_x, center_y, bar_w, 0, solid_h, skew, upper, color);
+    }
+
+    const fade_limit = @min(bar_h, half_h);
+    if (fade_limit <= fade_start_px) return;
+
+    const fade_span = @max(half_h - fade_start_px, 0.001);
+    for (0..net_spark_fade_slices) |i| {
+        const f0 = @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(net_spark_fade_slices));
+        const f1 = @as(f32, @floatFromInt(i + 1)) / @as(f32, @floatFromInt(net_spark_fade_slices));
+        const d0 = fade_start_px + fade_span * f0;
+        const d1 = @min(fade_start_px + fade_span * f1, fade_limit);
+        if (d1 <= d0) continue;
+
+        const mid = (d0 + d1) * 0.5;
+        const alpha = std.math.clamp((half_h - mid) / fade_span, 0.0, 1.0);
+        if (alpha <= 0.02) continue;
+
+        var faded = color;
+        faded[3] *= alpha;
+        try appendNetSparkSliceInstance(allocator, instances, center_x, center_y, bar_w, d0, d1, skew, upper, faded);
+    }
+}
+
+fn appendNetSparkSliceInstance(
+    allocator: std.mem.Allocator,
+    instances: *std.ArrayListUnmanaged(snail.Override),
+    center_x: f32,
+    center_y: f32,
+    bar_w: f32,
+    d0: f32,
+    d1: f32,
+    skew: f32,
+    upper: bool,
+    color: [4]f32,
+) !void {
+    const seg_h = d1 - d0;
+    if (seg_h <= 0 or color[3] <= 0) return;
+
+    const transform = if (upper)
+        snail.Transform2D{
+            .xx = bar_w,
+            .xy = skew * seg_h,
+            .tx = center_x + skew * d0,
+            .yx = 0,
+            .yy = -seg_h,
+            .ty = center_y - d0,
+        }
+    else
+        snail.Transform2D{
+            .xx = bar_w,
+            .xy = -skew * seg_h,
+            .tx = center_x - skew * d0,
+            .yx = 0,
+            .yy = seg_h,
+            .ty = center_y + d0,
+        };
+
+    try instances.append(allocator, .{
+        .transform = transform,
+        .tint = color,
+    });
+}
+
+fn pathOpCacheable(op: PathOp) bool {
+    return switch (op) {
+        // This op is time-sampled every render frame. Caching each frame creates
+        // a stream of unique retained pictures and periodic cache sweeps.
+        .net_spark => false,
+        else => true,
     };
 }
 
-// ---------------------------------------------------------------------------
-// Shader compilation helpers
-// ---------------------------------------------------------------------------
-
-fn createProgram() !c.GLuint {
-    const vs = try compileShader(c.GL_VERTEX_SHADER, vert_src);
-    defer c.glDeleteShader(vs);
-
-    const fs = try compileShader(c.GL_FRAGMENT_SHADER, frag_src);
-    defer c.glDeleteShader(fs);
-
-    const program = c.glCreateProgram();
-    c.glAttachShader(program, vs);
-    c.glAttachShader(program, fs);
-    c.glLinkProgram(program);
-
-    var ok: c.GLint = 0;
-    c.glGetProgramiv(program, c.GL_LINK_STATUS, &ok);
-    if (ok == 0) {
-        var buf: [1024]u8 = undefined;
-        var len: c.GLsizei = 0;
-        c.glGetProgramInfoLog(program, buf.len, &len, &buf);
-        log.err("shader link error: {s}", .{buf[0..@intCast(len)]});
-        c.glDeleteProgram(program);
-        return error.ShaderLinkFailed;
+fn hashPathOp(hasher: *std.hash.Wyhash, op: PathOp) void {
+    switch (op) {
+        .rect => |rect| {
+            hashValue(hasher, @as(u8, 0));
+            hashValue(hasher, rect.x);
+            hashValue(hasher, rect.y);
+            hashValue(hasher, rect.w);
+            hashValue(hasher, rect.h);
+            hashValue(hasher, rect.color);
+            hashValue(hasher, rect.corner_radius);
+        },
+        .slant_rect => |slant| {
+            hashValue(hasher, @as(u8, 1));
+            hashValue(hasher, slant.x);
+            hashValue(hasher, slant.y);
+            hashValue(hasher, slant.w);
+            hashValue(hasher, slant.h);
+            hashValue(hasher, slant.color);
+            hashValue(hasher, slant.skew);
+        },
+        .triangle => |triangle| {
+            hashValue(hasher, @as(u8, 2));
+            hashValue(hasher, triangle.x);
+            hashValue(hasher, triangle.y);
+            hashValue(hasher, triangle.w);
+            hashValue(hasher, triangle.h);
+            hashValue(hasher, triangle.color);
+            hashValue(hasher, @as(i32, @intFromEnum(triangle.dir)));
+        },
+        .curve => |curve| {
+            hashValue(hasher, @as(u8, 3));
+            hashValue(hasher, curve.x);
+            hashValue(hasher, curve.y);
+            hashValue(hasher, curve.w);
+            hashValue(hasher, curve.h);
+            hashF32Slice(hasher, curve.values, curve.value_count);
+            hashF32Slice(hasher, curve.values2, curve.value_count2);
+            hashValue(hasher, curve.color);
+            hashValue(hasher, curve.color2);
+            hashValue(hasher, curve.thickness);
+            hashValue(hasher, @as(u8, @intFromBool(curve.mirror)));
+            hashValue(hasher, curve.scroll);
+            hashValue(hasher, curve.grid_lines);
+            hashValue(hasher, curve.grid_count);
+            hashValue(hasher, @as(u8, @intFromBool(curve.is_line)));
+        },
+        .net_spark => |spark| {
+            hashValue(hasher, @as(u8, 4));
+            hashValue(hasher, spark.x);
+            hashValue(hasher, spark.y);
+            hashValue(hasher, spark.w);
+            hashValue(hasher, spark.h);
+            hashF32Slice(hasher, spark.values, spark.value_count);
+            hashF32Slice(hasher, spark.values2, spark.value_count2);
+            hashValue(hasher, spark.color);
+            hashValue(hasher, spark.color2);
+            hashValue(hasher, spark.skew);
+            hashValue(hasher, spark.bar_width);
+            hashValue(hasher, spark.bar_gap);
+            hashValue(hasher, spark.min_bar_height);
+            hashValue(hasher, spark.fade_start);
+        },
     }
-
-    return program;
 }
 
-fn compileShader(shader_type: c.GLenum, source: [*c]const u8) !c.GLuint {
-    const shader = c.glCreateShader(shader_type);
-    c.glShaderSource(shader, 1, &source, null);
-    c.glCompileShader(shader);
+fn hashValue(hasher: *std.hash.Wyhash, value: anytype) void {
+    hasher.update(std.mem.asBytes(&value));
+}
 
-    var ok: c.GLint = 0;
-    c.glGetShaderiv(shader, c.GL_COMPILE_STATUS, &ok);
-    if (ok == 0) {
-        var buf: [1024]u8 = undefined;
-        var len: c.GLsizei = 0;
-        c.glGetShaderInfoLog(shader, buf.len, &len, &buf);
-        const kind: []const u8 = if (shader_type == c.GL_VERTEX_SHADER) "vertex" else "fragment";
-        log.err("{s} shader compile error: {s}", .{ kind, buf[0..@intCast(len)] });
-        c.glDeleteShader(shader);
-        return error.ShaderCompileFailed;
+fn hashF32Slice(hasher: *std.hash.Wyhash, values: []const f32, value_count: u32) void {
+    const count: usize = @intCast(@min(value_count, values.len));
+    hashValue(hasher, count);
+    hasher.update(std.mem.sliceAsBytes(values[0..count]));
+}
+
+fn sameRadius(r: [4]f32) bool {
+    return @abs(r[0] - r[1]) < 0.01 and
+        @abs(r[0] - r[2]) < 0.01 and
+        @abs(r[0] - r[3]) < 0.01;
+}
+
+fn buildRoundedRectPath(path: *snail.Path, rect: snail.Rect, radii: [4]f32) !void {
+    const max_radius = @min(rect.w, rect.h) * 0.5;
+    const tl = std.math.clamp(radii[0], 0, max_radius);
+    const tr = std.math.clamp(radii[1], 0, max_radius);
+    const bl = std.math.clamp(radii[2], 0, max_radius);
+    const br = std.math.clamp(radii[3], 0, max_radius);
+    const k: f32 = 0.55228475;
+    const x = rect.x;
+    const y = rect.y;
+    const w = rect.w;
+    const h = rect.h;
+
+    try path.moveTo(.{ .x = x + tl, .y = y });
+    try path.lineTo(.{ .x = x + w - tr, .y = y });
+    if (tr > 0) {
+        try path.cubicTo(
+            .{ .x = x + w - tr + tr * k, .y = y },
+            .{ .x = x + w, .y = y + tr - tr * k },
+            .{ .x = x + w, .y = y + tr },
+        );
+    }
+    try path.lineTo(.{ .x = x + w, .y = y + h - br });
+    if (br > 0) {
+        try path.cubicTo(
+            .{ .x = x + w, .y = y + h - br + br * k },
+            .{ .x = x + w - br + br * k, .y = y + h },
+            .{ .x = x + w - br, .y = y + h },
+        );
+    }
+    try path.lineTo(.{ .x = x + bl, .y = y + h });
+    if (bl > 0) {
+        try path.cubicTo(
+            .{ .x = x + bl - bl * k, .y = y + h },
+            .{ .x = x, .y = y + h - bl + bl * k },
+            .{ .x = x, .y = y + h - bl },
+        );
+    }
+    try path.lineTo(.{ .x = x, .y = y + tl });
+    if (tl > 0) {
+        try path.cubicTo(
+            .{ .x = x, .y = y + tl - tl * k },
+            .{ .x = x + tl - tl * k, .y = y },
+            .{ .x = x + tl, .y = y },
+        );
+    }
+    try path.close();
+}
+
+fn addCurveGrid(
+    builder: *snail.PathPictureBuilder,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    grid_lines: [8]f32,
+    grid_count: u32,
+) !void {
+    const count = @min(grid_count, grid_lines.len);
+    for (grid_lines[0..count]) |line| {
+        if (line <= 0 or line > 1) continue;
+        const gy = y + h * (1.0 - line);
+        try builder.addFilledRect(
+            .{ .x = x, .y = gy - 0.5, .w = w, .h = 1.0 },
+            .{ .color = .{ 1, 1, 1, 0.15 } },
+            .identity,
+        );
+    }
+}
+
+fn addSeries(
+    builder: *snail.PathPictureBuilder,
+    values: []const f32,
+    value_count: u32,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    color: [4]f32,
+    thickness: f32,
+    scroll: f32,
+    is_line: bool,
+) !void {
+    const count: usize = @intCast(@min(value_count, values.len));
+    if (count == 0 or color[3] <= 0) return;
+
+    var path = snail.Path.init(builder.allocator);
+    defer path.deinit();
+
+    if (!is_line) {
+        try path.moveTo(.{ .x = x, .y = y + h });
+        for (0..count) |i| {
+            const t = if (count == 1) @as(f32, 0) else @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(count - 1));
+            const v = std.math.clamp(sampleSeries(values, count, t, scroll), 0, 1);
+            try path.lineTo(.{ .x = x + w * t, .y = y + h * (1.0 - v) });
+        }
+        try path.lineTo(.{ .x = x + w, .y = y + h });
+        try path.close();
+        try builder.addFilledPath(&path, .{ .color = color }, .identity);
+    } else {
+        for (0..count) |i| {
+            const t = if (count == 1) @as(f32, 0) else @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(count - 1));
+            const v = std.math.clamp(sampleSeries(values, count, t, scroll), 0, 1);
+            const point = snail.Vec2{ .x = x + w * t, .y = y + h * (1.0 - v) };
+            if (i == 0) try path.moveTo(point) else try path.lineTo(point);
+        }
+        try builder.addStrokedPath(&path, .{
+            .color = color,
+            .width = @max(thickness, 1.0),
+            .join = .round,
+            .cap = .round,
+        }, .identity);
+    }
+}
+
+fn addMirrorSeries(
+    builder: *snail.PathPictureBuilder,
+    values: []const f32,
+    value_count: u32,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    color: [4]f32,
+    thickness: f32,
+    scroll: f32,
+    is_line: bool,
+    upper: bool,
+) !void {
+    const count: usize = @intCast(@min(value_count, values.len));
+    if (count == 0 or color[3] <= 0) return;
+
+    var path = snail.Path.init(builder.allocator);
+    defer path.deinit();
+    const center_y = y + h * 0.5;
+
+    if (!is_line) {
+        try path.moveTo(.{ .x = x, .y = center_y });
+        for (0..count) |i| {
+            const t = if (count == 1) @as(f32, 0) else @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(count - 1));
+            const v = std.math.clamp(sampleSeries(values, count, t, scroll), 0, 1) * 0.5;
+            const yy = if (upper) y + h * (0.5 - v) else y + h * (0.5 + v);
+            try path.lineTo(.{ .x = x + w * t, .y = yy });
+        }
+        try path.lineTo(.{ .x = x + w, .y = center_y });
+        try path.close();
+        try builder.addFilledPath(&path, .{ .color = color }, .identity);
+    } else {
+        for (0..count) |i| {
+            const t = if (count == 1) @as(f32, 0) else @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(count - 1));
+            const v = std.math.clamp(sampleSeries(values, count, t, scroll), 0, 1) * 0.5;
+            const yy = if (upper) y + h * (0.5 - v) else y + h * (0.5 + v);
+            const point = snail.Vec2{ .x = x + w * t, .y = yy };
+            if (i == 0) try path.moveTo(point) else try path.lineTo(point);
+        }
+        try builder.addStrokedPath(&path, .{
+            .color = color,
+            .width = @max(thickness, 1.0),
+            .join = .round,
+            .cap = .round,
+        }, .identity);
+    }
+}
+
+fn sampleSeries(values: []const f32, count: usize, t: f32, scroll: f32) f32 {
+    if (count == 0) return 0;
+    if (count == 1) return values[0];
+    const span = @as(f32, @floatFromInt(count - 1));
+    const shifted = std.math.clamp(t + scroll / span, 0, 1);
+    const pos = shifted * span;
+    const idx: usize = @intFromFloat(@floor(pos));
+    const next = @min(idx + 1, count - 1);
+    const frac = pos - @as(f32, @floatFromInt(idx));
+    return values[idx] + (values[next] - values[idx]) * frac;
+}
+
+fn appendSlantSegmentPath(
+    path: *snail.Path,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    skew: f32,
+) !void {
+    if (w <= 0 or h <= 0) return;
+
+    const shift = skew * h;
+    try path.moveTo(.{ .x = x + shift, .y = y });
+    try path.lineTo(.{ .x = x + shift + w, .y = y });
+    try path.lineTo(.{ .x = x + w, .y = y + h });
+    try path.lineTo(.{ .x = x, .y = y + h });
+    try path.close();
+}
+
+fn addSlantSegment(
+    builder: *snail.PathPictureBuilder,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    color: [4]f32,
+    skew: f32,
+) !void {
+    if (w <= 0 or h <= 0 or color[3] <= 0) return;
+
+    var path = snail.Path.init(builder.allocator);
+    defer path.deinit();
+
+    try appendSlantSegmentPath(&path, x, y, w, h, skew);
+    try builder.addFilledPath(&path, .{ .color = color }, .identity);
+}
+
+fn appendSparkColumnSlicePath(
+    path: *snail.Path,
+    used: *bool,
+    center_x: f32,
+    center_y: f32,
+    bar_w: f32,
+    d0: f32,
+    d1: f32,
+    skew: f32,
+    upper: bool,
+) !void {
+    const seg_h = d1 - d0;
+    if (seg_h <= 0) return;
+
+    const split_left = center_x - bar_w * 0.5;
+    const bottom_y = if (upper) center_y - d0 else center_y + d1;
+    const top_y = if (upper) center_y - d1 else center_y + d0;
+    const bottom_x = split_left + skew * (center_y - bottom_y);
+
+    try appendSlantSegmentPath(path, bottom_x, top_y, bar_w, seg_h, skew);
+    used.* = true;
+}
+
+fn appendSparkColumnHalfPaths(
+    solid_path: *snail.Path,
+    solid_used: *bool,
+    fade_paths: []snail.Path,
+    fade_used: []bool,
+    center_x: f32,
+    center_y: f32,
+    bar_w: f32,
+    value: f32,
+    half_h: f32,
+    skew: f32,
+    min_bar_height: f32,
+    fade_start: f32,
+    upper: bool,
+) !void {
+    if (value <= 0 or half_h <= 0) return;
+
+    const bar_h = @max(@max(min_bar_height, 0.0), value * half_h);
+    const fade_start_px = std.math.clamp(fade_start, 0.1, 0.98) * half_h;
+    const solid_h = @min(bar_h, fade_start_px);
+
+    if (solid_h > 0) {
+        try appendSparkColumnSlicePath(solid_path, solid_used, center_x, center_y, bar_w, 0, solid_h, skew, upper);
     }
 
-    return shader;
+    const fade_limit = @min(bar_h, half_h);
+    if (fade_limit <= fade_start_px) return;
+
+    const fade_span = @max(half_h - fade_start_px, 0.001);
+    for (fade_paths, 0..) |*fade_path, i| {
+        const f0 = @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(fade_paths.len));
+        const f1 = @as(f32, @floatFromInt(i + 1)) / @as(f32, @floatFromInt(fade_paths.len));
+        const d0 = fade_start_px + fade_span * f0;
+        const d1 = @min(fade_start_px + fade_span * f1, fade_limit);
+        if (d1 <= d0) continue;
+        try appendSparkColumnSlicePath(fade_path, &fade_used[i], center_x, center_y, bar_w, d0, d1, skew, upper);
+    }
+}
+
+fn addSparkColumnPaths(
+    builder: *snail.PathPictureBuilder,
+    solid_path: *snail.Path,
+    solid_used: bool,
+    fade_paths: []snail.Path,
+    fade_used: []bool,
+    color: [4]f32,
+    half_h: f32,
+    fade_start: f32,
+) !void {
+    if (color[3] <= 0) return;
+
+    if (solid_used) {
+        try builder.addFilledPath(solid_path, .{ .color = color }, .identity);
+    }
+
+    const fade_start_px = std.math.clamp(fade_start, 0.1, 0.98) * half_h;
+    const fade_span = @max(half_h - fade_start_px, 0.001);
+    for (fade_paths, fade_used, 0..) |*fade_path, used, i| {
+        if (!used) continue;
+        const f0 = @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(fade_paths.len));
+        const f1 = @as(f32, @floatFromInt(i + 1)) / @as(f32, @floatFromInt(fade_paths.len));
+        const d0 = fade_start_px + fade_span * f0;
+        const d1 = fade_start_px + fade_span * f1;
+        const mid = (d0 + d1) * 0.5;
+        const alpha = std.math.clamp((half_h - mid) / fade_span, 0.0, 1.0);
+        if (alpha <= 0.02) continue;
+
+        var faded = color;
+        faded[3] *= alpha;
+        try builder.addFilledPath(fade_path, .{ .color = faded }, .identity);
+    }
+}
+
+fn addSparkCurveOverlay(
+    builder: *snail.PathPictureBuilder,
+    origin_x: f32,
+    center_y: f32,
+    bar_w: f32,
+    bar_gap: f32,
+    values: []const f32,
+    count: usize,
+    half_h: f32,
+    color: [4]f32,
+    skew: f32,
+    upper: bool,
+) !void {
+    if (count == 0 or color[3] <= 0) return;
+
+    var path = snail.Path.init(builder.allocator);
+    defer path.deinit();
+
+    for (0..count) |i| {
+        const center_x = origin_x + bar_w * 0.5 +
+            @as(f32, @floatFromInt(i)) * (bar_w + bar_gap);
+        const d = @min(@max(0.0, values[i]) * half_h, half_h);
+        const point = if (upper)
+            snail.Vec2{ .x = center_x + skew * d, .y = center_y - d }
+        else
+            snail.Vec2{ .x = center_x - skew * d, .y = center_y + d };
+
+        if (i == 0) try path.moveTo(point) else try path.lineTo(point);
+    }
+
+    var line_color = color;
+    line_color[3] = @min(1.0, line_color[3] * 1.25);
+    try builder.addStrokedPath(&path, .{
+        .color = line_color,
+        .width = 1.35,
+        .join = .round,
+        .cap = .round,
+    }, .identity);
+}
+
+fn addNetSparkOp(builder: *snail.PathPictureBuilder, op: NetSparkOp) !void {
+    const count1: usize = @min(@as(usize, @intCast(op.value_count)), op.values.len);
+    const count2: usize = @min(@as(usize, @intCast(op.value_count2)), op.values2.len);
+    const count: usize = @max(count1, count2);
+    if (count == 0 or op.w <= 0 or op.h <= 0) return;
+
+    const fade_slices: usize = net_spark_fade_slices;
+    const bar_w = @max(op.bar_width, 1.0);
+    const bar_gap = @max(op.bar_gap, 0.0);
+    const half_h = op.h * 0.5;
+    const center_y = op.y + half_h;
+    const content_w = @as(f32, @floatFromInt(count)) * bar_w +
+        @as(f32, @floatFromInt(if (count > 0) count - 1 else 0)) * bar_gap;
+    const skew_pad = @abs(op.skew) * half_h;
+    const total_w = content_w + skew_pad * 2.0;
+    const origin_x = op.x + @max(0.0, op.w - total_w) * 0.5 + skew_pad;
+
+    var tx_solid = snail.Path.init(builder.allocator);
+    defer tx_solid.deinit();
+    var rx_solid = snail.Path.init(builder.allocator);
+    defer rx_solid.deinit();
+    var tx_solid_used = false;
+    var rx_solid_used = false;
+
+    var tx_fade: [fade_slices]snail.Path = undefined;
+    var rx_fade: [fade_slices]snail.Path = undefined;
+    var tx_fade_used = [_]bool{false} ** fade_slices;
+    var rx_fade_used = [_]bool{false} ** fade_slices;
+    for (0..fade_slices) |i| {
+        tx_fade[i] = snail.Path.init(builder.allocator);
+        rx_fade[i] = snail.Path.init(builder.allocator);
+    }
+    defer {
+        for (&tx_fade) |*path| path.deinit();
+        for (&rx_fade) |*path| path.deinit();
+    }
+
+    for (0..count) |i| {
+        const center_x = origin_x + bar_w * 0.5 +
+            @as(f32, @floatFromInt(i)) * (bar_w + bar_gap);
+        if (i < count2) {
+            try appendSparkColumnHalfPaths(
+                &tx_solid,
+                &tx_solid_used,
+                tx_fade[0..],
+                tx_fade_used[0..],
+                center_x,
+                center_y,
+                bar_w,
+                @max(0.0, op.values2[i]),
+                half_h,
+                op.skew,
+                op.min_bar_height,
+                op.fade_start,
+                false,
+            );
+        }
+        if (i < count1) {
+            try appendSparkColumnHalfPaths(
+                &rx_solid,
+                &rx_solid_used,
+                rx_fade[0..],
+                rx_fade_used[0..],
+                center_x,
+                center_y,
+                bar_w,
+                @max(0.0, op.values[i]),
+                half_h,
+                op.skew,
+                op.min_bar_height,
+                op.fade_start,
+                true,
+            );
+        }
+    }
+
+    try addSparkColumnPaths(builder, &tx_solid, tx_solid_used, tx_fade[0..], tx_fade_used[0..], op.color2, half_h, op.fade_start);
+    try addSparkColumnPaths(builder, &rx_solid, rx_solid_used, rx_fade[0..], rx_fade_used[0..], op.color, half_h, op.fade_start);
+
+    if (count2 > 0) {
+        try addSparkCurveOverlay(
+            builder,
+            origin_x,
+            center_y,
+            bar_w,
+            bar_gap,
+            op.values2,
+            count2,
+            half_h,
+            op.color2,
+            op.skew,
+            false,
+        );
+    }
+    if (count1 > 0) {
+        try addSparkCurveOverlay(
+            builder,
+            origin_x,
+            center_y,
+            bar_w,
+            bar_gap,
+            op.values,
+            count1,
+            half_h,
+            op.color,
+            op.skew,
+            true,
+        );
+    }
 }

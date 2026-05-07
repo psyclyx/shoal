@@ -29,6 +29,9 @@
        "w" (get o "w" 0) "h" (get o "h" 0)
        "focused" (get o "focused" false)
        "tag" (get o "tag" 0)
+       "tags" (get o "tags" (if (> (get o "tag" 0) 0)
+                               [(get o "tag" 0)]
+                               []))
        "columns" (get o "columns" [])
        "camera" (get o "camera" 0)
        "insert-mode" (get o "insert-mode" "sibling")}))
@@ -55,6 +58,17 @@
   (put db :wm (merge wm {:title (get data "title" "")
                           :app-id (get data "app-id" "")})))
 
+(defn- tp/rpc-line [id method &opt params]
+  (string (json/encode {"jsonrpc" "2.0"
+                        "id" id
+                        "method" method
+                        "params" (or params {})})
+          "\n"))
+
+(defn- tp/initial-requests []
+  (tp/rpc-line "watch" "watch"
+    {"events" ["state" "focus:changed"]}))
+
 (defn- tp/handle-notification [db method params]
   (case method
     "state" (tp/apply-state db params)
@@ -77,6 +91,7 @@
     (def path (tidepool-socket-path))
     (if path
       {:db (put (cofx :db) :wm {:connected false})
+       :render :default
        :ipc {:connect {:path path
                        :name :tidepool
                        :framing :line
@@ -84,21 +99,22 @@
                        :connected :tp/connected
                        :disconnected :tp/disconnected
                        :reconnect 1.0}}}
-      {:db (put (cofx :db) :wm {:connected false})})))
+      {:db (put (cofx :db) :wm {:connected false})
+       :render :default})))
 
 (reg-event-handler :tp/connected
   (fn [cofx event]
     {:db (put (cofx :db) :wm
               (merge (get (cofx :db) :wm {}) {:connected true}))
+     :render :default
      :ipc {:send {:name :tidepool
-                  :data (string (json/encode {"jsonrpc" "2.0" "id" 1
-                                              "method" "register-decorator"
-                                              "params" {}})
-                                "\n")}}}))
+                  :data (tp/initial-requests)}}}))
 
 (reg-event-handler :tp/disconnected
   (fn [cofx event]
-    {:db (put (cofx :db) :wm {:connected false})}))
+    {:db (put (cofx :db) :wm
+              (merge (get (cofx :db) :wm {}) {:connected false}))
+     :render :default}))
 
 (reg-event-handler :tp/recv
   (fn [cofx event]
@@ -120,8 +136,8 @@
         ([err]
           (eprintf "tidepool: recv error: %s" (string err))))
       (if extra-fx
-        (merge {:db db} extra-fx)
-        {:db db}))))
+        (merge {:db db :render []} extra-fx)
+        {:db db :render :default}))))
 
 # -- Action dispatch --
 
@@ -136,7 +152,7 @@
 
 (reg-event-handler :wm/focus-tag
   (fn [cofx event]
-    (tp/dispatch-action "focus-tag" [(string (get event 1 1))])))
+    (tp/dispatch-action "focus-tag" [(string/format "%d" (get event 1 1))])))
 
 (reg-event-handler :wm/close
   (fn [cofx event]

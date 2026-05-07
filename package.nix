@@ -7,13 +7,11 @@
   wayland-protocols,
   wayland-scanner,
   libGL,
-  freetype,
   harfbuzz,
-  fontconfig,
   libxkbcommon,
   janet,
-  zig_0_15,
-  snail-src ? null,
+  zig_0_16,
+  snail-src ? (import ./npins).snail,
 }:
 
 stdenv.mkDerivation (finalAttrs: {
@@ -22,23 +20,19 @@ stdenv.mkDerivation (finalAttrs: {
 
   src = ./.;
 
-  deps = callPackage ./build.zig.zon.nix {
-    inherit snail-src;
-  };
+  deps = callPackage ./build.zig.zon.nix {};
 
   nativeBuildInputs = [
     pkg-config
     wayland-scanner
-    zig_0_15
+    zig_0_16.hook
   ];
 
   buildInputs = [
     wayland
     wayland-protocols
     libGL
-    freetype
     harfbuzz
-    fontconfig
     libxkbcommon
     janet
   ];
@@ -46,10 +40,12 @@ stdenv.mkDerivation (finalAttrs: {
   zigBuildFlags = [
     "--system"
     "${finalAttrs.deps}"
+    "--fork=${snail-src}"
   ];
 
   postInstall = ''
-    cp -r $src/lib $out/share/shoal/lib
+    mkdir -p $out/share/shoal
+    cp -r $src/src/lib $out/share/shoal/lib
   '';
 
   meta = {

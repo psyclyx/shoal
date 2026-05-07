@@ -96,13 +96,10 @@ pub fn load(backing_allocator: std.mem.Allocator) LoadResult {
 fn loadFile(allocator: std.mem.Allocator, explicit_path: ?[:0]const u8) !Config {
     const path = explicit_path orelse resolveConfigPath(allocator) catch return Config{};
 
-    const file = std.fs.openFileAbsolute(path, .{}) catch |err| switch (err) {
+    const contents = std.Io.Dir.cwd().readFileAlloc(std.Options.debug_io, path, allocator, .limited(1 << 20)) catch |err| switch (err) {
         error.FileNotFound => return Config{},
         else => |e| return e,
     };
-    defer file.close();
-
-    const contents = try file.readToEndAlloc(allocator, 1 << 20);
 
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, contents, .{});
     const root = parsed.value;
@@ -173,14 +170,13 @@ fn parseSurfaceFields(allocator: std.mem.Allocator, config: *Config, map: std.js
             };
         }
     }
-
 }
 
 fn resolveConfigPath(allocator: std.mem.Allocator) ![:0]const u8 {
-    if (std.posix.getenv("XDG_CONFIG_HOME")) |config_home| {
+    if (getenv("XDG_CONFIG_HOME")) |config_home| {
         return try std.fs.path.joinZ(allocator, &.{ config_home, "shoal", "config.json" });
     }
-    if (std.posix.getenv("HOME")) |home| {
+    if (getenv("HOME")) |home| {
         return try std.fs.path.joinZ(allocator, &.{ home, ".config", "shoal", "config.json" });
     }
     return error.NoConfigDir;
@@ -342,5 +338,10 @@ fn printUsage() void {
         \\  If absent or empty, embedded defaults are used.
         \\
     ;
-    std.fs.File.stderr().writeAll(usage) catch {};
+    std.Io.File.stderr().writeStreamingAll(std.Options.debug_io, usage) catch {};
+}
+
+fn getenv(comptime name: [:0]const u8) ?[]const u8 {
+    const value = std.posix.system.getenv(name.ptr) orelse return null;
+    return std.mem.span(value);
 }

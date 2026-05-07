@@ -11,9 +11,10 @@
                :minutes (d :minutes)
                :seconds (d :seconds)
                :month (+ 1 (d :month))
-               :month-day (d :month-day)
+               :month-day (+ 1 (d :month-day))
                :year (d :year)
-               :week-day (d :week-day)})}))
+               :week-day (d :week-day)})
+       :render :default}))
 
 # Start the clock on :init
 (reg-event-handler :init

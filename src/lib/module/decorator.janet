@@ -89,7 +89,7 @@
 
 (defn- render-decoration [id params]
   "Trigger FBO render into the shared mmap buffer."
-  {:render-to-shm {:view (keyword (string "deco-" id))
+  {:render-to-shm {:view (keyword (string/format "deco-%d" id))
                     :width (get params "width" 100)
                     :height (get params "height" DECO-H)
                     :stride (get params "stride")
@@ -102,9 +102,10 @@
     (def db (cofx :db))
     (def decos (get db :decorations {}))
     (def new-decos (merge decos {id params}))
-    (reg-view (keyword (string "deco-" id)) (deco-view-for id))
-    (merge {:db (put db :decorations new-decos)}
-           (render-decoration id params))))
+    (reg-view (keyword (string/format "deco-%d" id)) (deco-view-for id))
+      (merge {:db (put db :decorations new-decos)
+              :render []}
+             (render-decoration id params))))
 
 (reg-event-handler :decoration/update
   (fn [cofx event]
@@ -114,8 +115,9 @@
     (def decos (get db :decorations {}))
     (when-let [existing (get decos id)]
       (def updated (merge existing params))
-      (merge {:db (put db :decorations (merge decos {id updated}))}
-             (render-decoration id updated)))))
+        (merge {:db (put db :decorations (merge decos {id updated}))
+                :render []}
+               (render-decoration id updated)))))
 
 (reg-event-handler :decoration/resize
   (fn [cofx event]
@@ -127,8 +129,9 @@
       # Resize changes the shared buffer — tidepool recreates the memfd.
       # The new shm-path comes in the resize params.
       (def updated (merge existing params))
-      (merge {:db (put db :decorations (merge decos {id updated}))}
-             (render-decoration id updated)))))
+        (merge {:db (put db :decorations (merge decos {id updated}))
+                :render []}
+               (render-decoration id updated)))))
 
 (reg-event-handler :decoration/destroy
   (fn [cofx event]
@@ -138,7 +141,16 @@
     (def decos (get db :decorations {}))
     (def new-decos (table/clone decos))
     (put new-decos id nil)
-    {:db (put db :decorations new-decos)}))
+      {:db (put db :decorations new-decos)
+       :render []}))
+
+(reg-event-handler :tp/connected
+  (fn [cofx event]
+    {:ipc {:send {:name :tidepool
+                  :data (string (json/encode {"jsonrpc" "2.0" "id" 1
+                                              "method" "register-decorator"
+                                              "params" {}})
+                                "\n")}}}))
 
 # After FBO render completes, signal tidepool to re-commit the surface
 (reg-event-handler :shm-rendered

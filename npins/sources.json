@@ -3,8 +3,8 @@
     "nixpkgs": {
       "type": "Channel",
       "name": "nixos-unstable",
-      "url": "https://releases.nixos.org/nixos/unstable/nixos-26.05pre964859.b40629efe5d6/nixexprs.tar.xz",
-      "hash": "sha256-p0tPeJJbg+PKaH741F1CWa9Bf9vf6g02HK9V/g4TkHo="
+      "url": "https://releases.nixos.org/nixos/unstable/nixos-26.05pre990025.15f4ee454b1d/nixexprs.tar.xz",
+      "hash": "sha256-fN6ynMvcdwPDB09LpWJNO5ogu+HFydrBWXJywoI/NNg="
     },
     "snail": {
       "type": "Git",
@@ -15,9 +15,9 @@
       },
       "branch": "main",
       "submodules": false,
-      "revision": "d655dcba2a85198dfe12b99138b612d4bef7b899",
-      "url": "https://github.com/psyclyx/snail/archive/d655dcba2a85198dfe12b99138b612d4bef7b899.tar.gz",
-      "hash": "sha256-Agc+QtTm8Fed+hFkwdk7RSDCfNwGozvQ3SagysGZpV0="
+      "revision": "9825c5bd654e5b9202b017fdf5946bf566cdb840",
+      "url": "https://github.com/psyclyx/snail/archive/9825c5bd654e5b9202b017fdf5946bf566cdb840.tar.gz",
+      "hash": "sha256-udO5V1qEEmNubFKgUT8lYvAkw8Nm+Jpv/ielhIgQovo="
     }
   },
   "version": 7

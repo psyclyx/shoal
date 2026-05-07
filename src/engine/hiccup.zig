@@ -13,6 +13,7 @@ var kw_text: jc.Janet = undefined;
 var kw_area: jc.Janet = undefined;
 var kw_line: jc.Janet = undefined;
 var kw_tri: jc.Janet = undefined;
+var kw_net_spark: jc.Janet = undefined;
 var kw_w: jc.Janet = undefined;
 var kw_h: jc.Janet = undefined;
 var kw_pad: jc.Janet = undefined;
@@ -28,6 +29,10 @@ var kw_color: jc.Janet = undefined;
 var kw_color2: jc.Janet = undefined;
 var kw_font: jc.Janet = undefined;
 var kw_size: jc.Janet = undefined;
+var kw_dx: jc.Janet = undefined;
+var kw_dy: jc.Janet = undefined;
+var kw_baseline_shift: jc.Janet = undefined;
+var kw_baseline_shift_line: jc.Janet = undefined;
 var kw_wrap: jc.Janet = undefined;
 var kw_text_align: jc.Janet = undefined;
 var kw_values: jc.Janet = undefined;
@@ -39,6 +44,10 @@ var kw_mirror: jc.Janet = undefined;
 var kw_grid: jc.Janet = undefined;
 var kw_scroll: jc.Janet = undefined;
 var kw_skew: jc.Janet = undefined;
+var kw_bar_width: jc.Janet = undefined;
+var kw_bar_gap: jc.Janet = undefined;
+var kw_fade_start: jc.Janet = undefined;
+var kw_min_bar_height: jc.Janet = undefined;
 var kw_dir: jc.Janet = undefined;
 var kw_up: jc.Janet = undefined;
 var kw_down: jc.Janet = undefined;
@@ -72,7 +81,7 @@ var coerced_count: usize = 0;
 // every struct and dispatching in layout.zig. All custom payloads in this
 // file MUST have `header: CustomHeader` as their first field.
 
-pub const CustomKind = enum(u32) { curve, skew_bg, triangle };
+pub const CustomKind = enum(u32) { curve, skew_bg, triangle, net_spark };
 
 pub const CustomHeader = extern struct {
     kind: CustomKind,
@@ -80,6 +89,8 @@ pub const CustomHeader = extern struct {
 
 pub const MAX_CURVES = 16;
 pub const MAX_CURVE_VALUES = 64;
+pub const MAX_NET_SPARKS = 16;
+pub const MAX_NET_SPARK_VALUES = 64;
 
 pub const CurveData = struct {
     header: CustomHeader = .{ .kind = .curve },
@@ -111,8 +122,31 @@ pub const TriData = struct {
     dir: renderer_mod.TriDir = .up,
 };
 
+pub const NetSparkData = struct {
+    header: CustomHeader = .{ .kind = .net_spark },
+    values: [MAX_NET_SPARK_VALUES]f32 = [_]f32{0} ** MAX_NET_SPARK_VALUES,
+    value_count: u32 = 0,
+    values2: [MAX_NET_SPARK_VALUES]f32 = [_]f32{0} ** MAX_NET_SPARK_VALUES,
+    value_count2: u32 = 0,
+    color: [4]f32 = .{ 1, 1, 1, 1 },
+    color2: [4]f32 = .{ 1, 1, 1, 1 },
+    skew: f32 = 0.3,
+    bar_width: f32 = 4,
+    bar_gap: f32 = 2,
+    min_bar_height: f32 = 2,
+    fade_start: f32 = 0.78,
+};
+
 pub const MAX_SKEW_BGS = 256;
 pub const MAX_TRIS = 64;
+pub const MAX_TEXT_TWEAKS = 512;
+
+pub const TextTweak = struct {
+    dx: f32 = 0,
+    dy: f32 = 0,
+    baseline_shift_px: f32 = 0,
+    baseline_shift_line: f32 = 0,
+};
 
 var curve_storage: [MAX_CURVES]CurveData = undefined;
 var curve_count: usize = 0;
@@ -123,12 +157,20 @@ var skew_count: usize = 0;
 var tri_storage: [MAX_TRIS]TriData = undefined;
 var tri_count: usize = 0;
 
+var net_spark_storage: [MAX_NET_SPARKS]NetSparkData = undefined;
+var net_spark_count: usize = 0;
+
+var text_tweak_storage: [MAX_TEXT_TWEAKS]TextTweak = undefined;
+var text_tweak_count: usize = 0;
+
 /// Call before walkHiccup to begin tracking coerced string roots.
 pub fn beginPass() void {
     coerced_count = 0;
     curve_count = 0;
     skew_count = 0;
     tri_count = 0;
+    net_spark_count = 0;
+    text_tweak_count = 0;
 }
 
 /// Call after Clay endLayout to unroot coerced strings.
@@ -148,6 +190,7 @@ pub fn init() void {
     kw_area = janet.kw("area");
     kw_line = janet.kw("line");
     kw_tri = janet.kw("tri");
+    kw_net_spark = janet.kw("net-spark");
     kw_w = janet.kw("w");
     kw_h = janet.kw("h");
     kw_pad = janet.kw("pad");
@@ -163,6 +206,10 @@ pub fn init() void {
     kw_color2 = janet.kw("color2");
     kw_font = janet.kw("font");
     kw_size = janet.kw("size");
+    kw_dx = janet.kw("dx");
+    kw_dy = janet.kw("dy");
+    kw_baseline_shift = janet.kw("baseline-shift");
+    kw_baseline_shift_line = janet.kw("baseline-shift-line");
     kw_wrap = janet.kw("wrap");
     kw_text_align = janet.kw("text-align");
     kw_values = janet.kw("values");
@@ -174,6 +221,10 @@ pub fn init() void {
     kw_grid = janet.kw("grid");
     kw_scroll = janet.kw("scroll");
     kw_skew = janet.kw("skew");
+    kw_bar_width = janet.kw("bar-width");
+    kw_bar_gap = janet.kw("bar-gap");
+    kw_fade_start = janet.kw("fade-start");
+    kw_min_bar_height = janet.kw("min-bar-height");
     kw_dir = janet.kw("dir");
     kw_up = janet.kw("up");
     kw_down = janet.kw("down");
@@ -251,6 +302,8 @@ pub fn walkHiccup(node: jc.Janet) void {
         walkCurve(true, attrs);
     } else if (janetKeywordEql(tag, kw_tri)) {
         walkTriangle(attrs);
+    } else if (janetKeywordEql(tag, kw_net_spark)) {
+        walkNetSpark(attrs);
     } else {
         log.warn("unknown hiccup tag, skipping", .{});
     }
@@ -271,7 +324,7 @@ fn walkContainer(direction: clay.LayoutDirection, attrs: jc.Janet, children: []c
     // The background_color set by applyContainerAttrs is moved into the
     // SkewBgData so Clay doesn't also emit a rectangle behind it.
     if (jc.janet_checktype(attrs, jc.JANET_NIL) == 0) {
-        const skew_val = janet.janetGet(attrs, kw_skew);
+        const skew_val = janetAttrGet(attrs, kw_skew);
         if (jc.janet_checktype(skew_val, jc.JANET_NIL) == 0) {
             const skew = janetToF32(skew_val) orelse 0;
             if (skew != 0 and skew_count < MAX_SKEW_BGS) {
@@ -315,13 +368,13 @@ fn walkTriangle(attrs: jc.Janet) void {
     var data = TriData{};
 
     if (jc.janet_checktype(attrs, jc.JANET_NIL) == 0) {
-        const color_val = janet.janetGet(attrs, kw_color);
+        const color_val = janetAttrGet(attrs, kw_color);
         if (jc.janet_checktype(color_val, jc.JANET_NIL) == 0) {
             const col = parseColor(color_val);
             data.color = .{ col[0] / 255.0, col[1] / 255.0, col[2] / 255.0, col[3] / 255.0 };
         }
 
-        const dir_val = janet.janetGet(attrs, kw_dir);
+        const dir_val = janetAttrGet(attrs, kw_dir);
         if (jc.janet_checktype(dir_val, jc.JANET_NIL) == 0) {
             if (janetKeywordEql(dir_val, kw_up)) {
                 data.dir = .up;
@@ -364,6 +417,7 @@ fn walkText(attrs: jc.Janet, children: []const jc.Janet) void {
 
     var text_config = clay.TextElementConfig{};
     applyTextAttrs(&text_config, attrs);
+    text_config.user_data = parseTextTweak(attrs);
 
     clay.cdefs.Clay__OpenTextElement(
         clay.String.fromSlice(text_slice),
@@ -381,7 +435,7 @@ fn walkCurve(is_line: bool, attrs: jc.Janet) void {
 
     if (jc.janet_checktype(attrs, jc.JANET_NIL) == 0) {
         // :values — array of 0-1 floats
-        const values_val = janet.janetGet(attrs, kw_values);
+        const values_val = janetAttrGet(attrs, kw_values);
         if (jc.janet_checktype(values_val, jc.JANET_NIL) == 0) {
             const items = janetIndexedSlice(values_val) orelse &[0]jc.Janet{};
             const n: usize = @min(items.len, MAX_CURVE_VALUES);
@@ -392,7 +446,7 @@ fn walkCurve(is_line: bool, attrs: jc.Janet) void {
         }
 
         // :values2 — secondary data series (0-1 floats, rendered as line overlay)
-        const values2_val = janet.janetGet(attrs, kw_values2);
+        const values2_val = janetAttrGet(attrs, kw_values2);
         if (jc.janet_checktype(values2_val, jc.JANET_NIL) == 0) {
             const items2 = janetIndexedSlice(values2_val) orelse &[0]jc.Janet{};
             const n2: usize = @min(items2.len, MAX_CURVE_VALUES);
@@ -403,51 +457,51 @@ fn walkCurve(is_line: bool, attrs: jc.Janet) void {
         }
 
         // :color — primary color (0-255 RGBA)
-        const color_val = janet.janetGet(attrs, kw_color);
+        const color_val = janetAttrGet(attrs, kw_color);
         if (jc.janet_checktype(color_val, jc.JANET_NIL) == 0) {
             const col = parseColor(color_val);
             data.color = .{ col[0] / 255.0, col[1] / 255.0, col[2] / 255.0, col[3] / 255.0 };
         }
 
         // :color2 — speculative/secondary color (0-255 RGBA)
-        const color2_val = janet.janetGet(attrs, kw_color2);
+        const color2_val = janetAttrGet(attrs, kw_color2);
         if (jc.janet_checktype(color2_val, jc.JANET_NIL) == 0) {
             const col = parseColor(color2_val);
             data.color2 = .{ col[0] / 255.0, col[1] / 255.0, col[2] / 255.0, col[3] / 255.0 };
         }
 
         // :fill — boundary between real and speculative data (0-1)
-        const fill_val = janet.janetGet(attrs, kw_fill);
+        const fill_val = janetAttrGet(attrs, kw_fill);
         if (jc.janet_checktype(fill_val, jc.JANET_NIL) == 0) {
             data.fill = janetToF32(fill_val) orelse 1.0;
         }
 
         // :thickness — line stroke width in pixels
-        const thick_val = janet.janetGet(attrs, kw_thickness);
+        const thick_val = janetAttrGet(attrs, kw_thickness);
         if (jc.janet_checktype(thick_val, jc.JANET_NIL) == 0) {
             data.thickness = janetToF32(thick_val) orelse 1.5;
         }
 
         // :smooth — enable Catmull-Rom interpolation (boolean)
-        const smooth_val = janet.janetGet(attrs, kw_smooth);
+        const smooth_val = janetAttrGet(attrs, kw_smooth);
         if (jc.janet_checktype(smooth_val, jc.JANET_NIL) == 0) {
             data.smooth = jc.janet_truthy(smooth_val) != 0;
         }
 
         // :mirror — mirrored chart (values1 up, values2 down from center)
-        const mirror_val = janet.janetGet(attrs, kw_mirror);
+        const mirror_val = janetAttrGet(attrs, kw_mirror);
         if (jc.janet_checktype(mirror_val, jc.JANET_NIL) == 0) {
             data.mirror = jc.janet_truthy(mirror_val) != 0;
         }
 
         // :scroll — spatial scroll offset (0-1, shifts sample coordinate)
-        const scroll_val = janet.janetGet(attrs, kw_scroll);
+        const scroll_val = janetAttrGet(attrs, kw_scroll);
         if (jc.janet_checktype(scroll_val, jc.JANET_NIL) == 0) {
             data.scroll = janetToF32(scroll_val) orelse 0;
         }
 
         // :grid — grid lines: true (default 3 even), int N (N even), or [pos ...] (0-1 floats)
-        const grid_val = janet.janetGet(attrs, kw_grid);
+        const grid_val = janetAttrGet(attrs, kw_grid);
         if (jc.janet_checktype(grid_val, jc.JANET_NIL) == 0) {
             const grid_items = janetIndexedSlice(grid_val);
             if (grid_items) |items| {
@@ -490,6 +544,88 @@ fn walkCurve(is_line: bool, attrs: jc.Janet) void {
     clay.cdefs.Clay__CloseElement();
 }
 
+fn walkNetSpark(attrs: jc.Janet) void {
+    if (net_spark_count >= MAX_NET_SPARKS) {
+        log.warn("too many net-spark elements ({d}), skipping", .{MAX_NET_SPARKS});
+        return;
+    }
+
+    var data = NetSparkData{};
+
+    if (jc.janet_checktype(attrs, jc.JANET_NIL) == 0) {
+        const values_val = janetAttrGet(attrs, kw_values);
+        if (jc.janet_checktype(values_val, jc.JANET_NIL) == 0) {
+            const items = janetIndexedSlice(values_val) orelse &[0]jc.Janet{};
+            const n: usize = @min(items.len, MAX_NET_SPARK_VALUES);
+            for (items[0..n], 0..) |item, i| {
+                data.values[i] = janetToF32(item) orelse 0;
+            }
+            data.value_count = @intCast(n);
+        }
+
+        const values2_val = janetAttrGet(attrs, kw_values2);
+        if (jc.janet_checktype(values2_val, jc.JANET_NIL) == 0) {
+            const items2 = janetIndexedSlice(values2_val) orelse &[0]jc.Janet{};
+            const n2: usize = @min(items2.len, MAX_NET_SPARK_VALUES);
+            for (items2[0..n2], 0..) |item, i| {
+                data.values2[i] = janetToF32(item) orelse 0;
+            }
+            data.value_count2 = @intCast(n2);
+        }
+
+        const color_val = janetAttrGet(attrs, kw_color);
+        if (jc.janet_checktype(color_val, jc.JANET_NIL) == 0) {
+            const col = parseColor(color_val);
+            data.color = .{ col[0] / 255.0, col[1] / 255.0, col[2] / 255.0, col[3] / 255.0 };
+        }
+
+        const color2_val = janetAttrGet(attrs, kw_color2);
+        if (jc.janet_checktype(color2_val, jc.JANET_NIL) == 0) {
+            const col = parseColor(color2_val);
+            data.color2 = .{ col[0] / 255.0, col[1] / 255.0, col[2] / 255.0, col[3] / 255.0 };
+        }
+
+        const skew_val = janetAttrGet(attrs, kw_skew);
+        if (jc.janet_checktype(skew_val, jc.JANET_NIL) == 0) {
+            data.skew = janetToF32(skew_val) orelse data.skew;
+        }
+
+        const bar_width_val = janetAttrGet(attrs, kw_bar_width);
+        if (jc.janet_checktype(bar_width_val, jc.JANET_NIL) == 0) {
+            data.bar_width = @max(1.0, janetToF32(bar_width_val) orelse data.bar_width);
+        }
+
+        const bar_gap_val = janetAttrGet(attrs, kw_bar_gap);
+        if (jc.janet_checktype(bar_gap_val, jc.JANET_NIL) == 0) {
+            data.bar_gap = @max(0.0, janetToF32(bar_gap_val) orelse data.bar_gap);
+        }
+
+        const fade_start_val = janetAttrGet(attrs, kw_fade_start);
+        if (jc.janet_checktype(fade_start_val, jc.JANET_NIL) == 0) {
+            data.fade_start = std.math.clamp(janetToF32(fade_start_val) orelse data.fade_start, 0.1, 0.98);
+        }
+
+        const min_bar_height_val = janetAttrGet(attrs, kw_min_bar_height);
+        if (jc.janet_checktype(min_bar_height_val, jc.JANET_NIL) == 0) {
+            data.min_bar_height = @max(0.0, janetToF32(min_bar_height_val) orelse data.min_bar_height);
+        }
+    }
+
+    net_spark_storage[net_spark_count] = data;
+    const data_ptr: *anyopaque = @ptrCast(&net_spark_storage[net_spark_count]);
+    net_spark_count += 1;
+
+    var config = clay.ElementDeclaration{
+        .custom = .{ .custom_data = data_ptr },
+    };
+
+    applyContainerAttrs(&config, attrs);
+
+    clay.cdefs.Clay__OpenElement();
+    clay.cdefs.Clay__ConfigureOpenElement(config);
+    clay.cdefs.Clay__CloseElement();
+}
+
 // ---------------------------------------------------------------------------
 // Attribute parsing
 // ---------------------------------------------------------------------------
@@ -498,25 +634,25 @@ fn applyContainerAttrs(config: *clay.ElementDeclaration, attrs: jc.Janet) void {
     if (jc.janet_checktype(attrs, jc.JANET_NIL) != 0) return;
 
     // :w
-    const w_val = janet.janetGet(attrs, kw_w);
+    const w_val = janetAttrGet(attrs, kw_w);
     if (jc.janet_checktype(w_val, jc.JANET_NIL) == 0) {
         config.layout.sizing.w = parseSizing(w_val);
     }
 
     // :h
-    const h_val = janet.janetGet(attrs, kw_h);
+    const h_val = janetAttrGet(attrs, kw_h);
     if (jc.janet_checktype(h_val, jc.JANET_NIL) == 0) {
         config.layout.sizing.h = parseSizing(h_val);
     }
 
     // :pad
-    const pad_val = janet.janetGet(attrs, kw_pad);
+    const pad_val = janetAttrGet(attrs, kw_pad);
     if (jc.janet_checktype(pad_val, jc.JANET_NIL) == 0) {
         config.layout.padding = parsePadding(pad_val);
     }
 
     // :gap
-    const gap_val = janet.janetGet(attrs, kw_gap);
+    const gap_val = janetAttrGet(attrs, kw_gap);
     if (jc.janet_checktype(gap_val, jc.JANET_NIL) == 0) {
         if (jc.janet_checktype(gap_val, jc.JANET_NUMBER) != 0) {
             config.layout.child_gap = floatToU16(jc.janet_unwrap_number(gap_val));
@@ -524,32 +660,32 @@ fn applyContainerAttrs(config: *clay.ElementDeclaration, attrs: jc.Janet) void {
     }
 
     // :align-x
-    const ax_val = janet.janetGet(attrs, kw_align_x);
+    const ax_val = janetAttrGet(attrs, kw_align_x);
     if (jc.janet_checktype(ax_val, jc.JANET_NIL) == 0) {
         config.layout.child_alignment.x = parseAlignX(ax_val);
     }
 
     // :align-y
-    const ay_val = janet.janetGet(attrs, kw_align_y);
+    const ay_val = janetAttrGet(attrs, kw_align_y);
     if (jc.janet_checktype(ay_val, jc.JANET_NIL) == 0) {
         config.layout.child_alignment.y = parseAlignY(ay_val);
     }
 
     // :bg
-    const bg_val = janet.janetGet(attrs, kw_bg);
+    const bg_val = janetAttrGet(attrs, kw_bg);
     if (jc.janet_checktype(bg_val, jc.JANET_NIL) == 0) {
         config.background_color = parseColor(bg_val);
     }
 
     // :radius
-    const radius_val = janet.janetGet(attrs, kw_radius);
+    const radius_val = janetAttrGet(attrs, kw_radius);
     if (jc.janet_checktype(radius_val, jc.JANET_NIL) == 0) {
         config.corner_radius = parseRadius(radius_val);
     }
 
     // :border-color + :border-width
-    const bc_val = janet.janetGet(attrs, kw_border_color);
-    const bw_val = janet.janetGet(attrs, kw_border_width);
+    const bc_val = janetAttrGet(attrs, kw_border_color);
+    const bw_val = janetAttrGet(attrs, kw_border_width);
     if (jc.janet_checktype(bc_val, jc.JANET_NIL) == 0) {
         config.border.color = parseColor(bc_val);
     }
@@ -558,7 +694,7 @@ fn applyContainerAttrs(config: *clay.ElementDeclaration, attrs: jc.Janet) void {
     }
 
     // :id
-    const id_val = janet.janetGet(attrs, kw_id);
+    const id_val = janetAttrGet(attrs, kw_id);
     if (jc.janet_checktype(id_val, jc.JANET_NIL) == 0) {
         if (jc.janet_checktype(id_val, jc.JANET_STRING) != 0) {
             const s = jc.janet_unwrap_string(id_val);
@@ -572,13 +708,13 @@ fn applyTextAttrs(config: *clay.TextElementConfig, attrs: jc.Janet) void {
     if (jc.janet_checktype(attrs, jc.JANET_NIL) != 0) return;
 
     // :color
-    const color_val = janet.janetGet(attrs, kw_color);
+    const color_val = janetAttrGet(attrs, kw_color);
     if (jc.janet_checktype(color_val, jc.JANET_NIL) == 0) {
         config.color = parseColor(color_val);
     }
 
     // :font
-    const font_val = janet.janetGet(attrs, kw_font);
+    const font_val = janetAttrGet(attrs, kw_font);
     if (jc.janet_checktype(font_val, jc.JANET_NIL) == 0) {
         if (jc.janet_checktype(font_val, jc.JANET_NUMBER) != 0) {
             config.font_id = floatToU16(jc.janet_unwrap_number(font_val));
@@ -586,7 +722,7 @@ fn applyTextAttrs(config: *clay.TextElementConfig, attrs: jc.Janet) void {
     }
 
     // :size
-    const size_val = janet.janetGet(attrs, kw_size);
+    const size_val = janetAttrGet(attrs, kw_size);
     if (jc.janet_checktype(size_val, jc.JANET_NIL) == 0) {
         if (jc.janet_checktype(size_val, jc.JANET_NUMBER) != 0) {
             config.font_size = floatToU16(jc.janet_unwrap_number(size_val));
@@ -594,7 +730,7 @@ fn applyTextAttrs(config: *clay.TextElementConfig, attrs: jc.Janet) void {
     }
 
     // :wrap
-    const wrap_val = janet.janetGet(attrs, kw_wrap);
+    const wrap_val = janetAttrGet(attrs, kw_wrap);
     if (jc.janet_checktype(wrap_val, jc.JANET_NIL) == 0) {
         if (janetKeywordEql(wrap_val, kw_words)) {
             config.wrap_mode = .words;
@@ -606,7 +742,7 @@ fn applyTextAttrs(config: *clay.TextElementConfig, attrs: jc.Janet) void {
     }
 
     // :text-align
-    const ta_val = janet.janetGet(attrs, kw_text_align);
+    const ta_val = janetAttrGet(attrs, kw_text_align);
     if (jc.janet_checktype(ta_val, jc.JANET_NIL) == 0) {
         if (janetKeywordEql(ta_val, kw_left)) {
             config.alignment = .left;
@@ -616,6 +752,50 @@ fn applyTextAttrs(config: *clay.TextElementConfig, attrs: jc.Janet) void {
             config.alignment = .right;
         }
     }
+}
+
+fn parseTextTweak(attrs: jc.Janet) ?*anyopaque {
+    if (jc.janet_checktype(attrs, jc.JANET_NIL) != 0) return null;
+
+    var tweak = TextTweak{};
+
+    const dx_val = janetAttrGet(attrs, kw_dx);
+    if (jc.janet_checktype(dx_val, jc.JANET_NIL) == 0) {
+        tweak.dx = janetToF32(dx_val) orelse 0;
+    }
+
+    const dy_val = janetAttrGet(attrs, kw_dy);
+    if (jc.janet_checktype(dy_val, jc.JANET_NIL) == 0) {
+        tweak.dy = janetToF32(dy_val) orelse 0;
+    }
+
+    const baseline_shift_val = janetAttrGet(attrs, kw_baseline_shift);
+    if (jc.janet_checktype(baseline_shift_val, jc.JANET_NIL) == 0) {
+        tweak.baseline_shift_px = janetToF32(baseline_shift_val) orelse 0;
+    }
+
+    const baseline_shift_line_val = janetAttrGet(attrs, kw_baseline_shift_line);
+    if (jc.janet_checktype(baseline_shift_line_val, jc.JANET_NIL) == 0) {
+        tweak.baseline_shift_line = janetToF32(baseline_shift_line_val) orelse 0;
+    }
+
+    if (tweak.dx == 0 and
+        tweak.dy == 0 and
+        tweak.baseline_shift_px == 0 and
+        tweak.baseline_shift_line == 0)
+    {
+        return null;
+    }
+
+    if (text_tweak_count >= MAX_TEXT_TWEAKS) {
+        log.warn("too many text tweaks ({d}), ignoring", .{MAX_TEXT_TWEAKS});
+        return null;
+    }
+
+    text_tweak_storage[text_tweak_count] = tweak;
+    const ptr: *anyopaque = @ptrCast(&text_tweak_storage[text_tweak_count]);
+    text_tweak_count += 1;
+    return ptr;
 }
 
 // ---------------------------------------------------------------------------
@@ -754,6 +934,15 @@ fn parseAlignY(val: jc.Janet) clay.LayoutAlignmentY {
 // Helpers
 // ---------------------------------------------------------------------------
 
+fn janetAttrGet(collection: jc.Janet, key: jc.Janet) jc.Janet {
+    if (jc.janet_checktype(collection, jc.JANET_TABLE) != 0) {
+        return jc.janet_table_rawget(jc.janet_unwrap_table(collection), key);
+    } else if (jc.janet_checktype(collection, jc.JANET_STRUCT) != 0) {
+        return jc.janet_struct_rawget(jc.janet_unwrap_struct(collection), key);
+    }
+    return jc.janet_wrap_nil();
+}
+
 fn janetIndexedSlice(val: jc.Janet) ?[]const jc.Janet {
     var items: [*c]const jc.Janet = undefined;
     var len: i32 = 0;
@@ -767,7 +956,7 @@ fn janetIndexedSlice(val: jc.Janet) ?[]const jc.Janet {
 }
 
 fn janetKeywordEql(a: jc.Janet, b: jc.Janet) bool {
-    return jc.janet_equals(a, b) != 0;
+    return a.u64 == b.u64;
 }
 
 fn janetToF64(val: jc.Janet) ?f64 {

@@ -94,8 +94,9 @@
       (def tag (get tags i))
       (def occupied (and tag (get tag :occupied false)))
       (def focused (and tag (get tag :focused false)))
-      (array/push items {:label (string (if focused "● " (if occupied "○ " "  "))
-                                        "Tag " i)
+      (array/push items {:label (string/format "%sTag %d"
+                                        (if focused "● " (if occupied "○ " "  "))
+                                        i)
                          :kind :tag
                          :tag-num i})))
   items)
@@ -138,15 +139,17 @@
       (put :launcher/apps unique-apps)
       (put :launcher/app-items (launcher/build-app-items unique-apps))))
 
-(reg-event-handler :init
-  (fn [cofx event]
-    {:db (launcher/cache-apps (cofx :db))
-     :timer {:delay 60 :event [:launcher/refresh] :repeat true :id :launcher-refresh}}))
+  (reg-event-handler :init
+    (fn [cofx event]
+      {:db (launcher/cache-apps (cofx :db))
+       :render :launcher
+       :timer {:delay 60 :event [:launcher/refresh] :repeat true :id :launcher-refresh}}))
 
-(reg-event-handler :launcher/refresh
-  (fn [cofx event]
-    {:db (launcher/cache-apps (cofx :db))
-     :dispatch [:wm/query-actions]}))
+  (reg-event-handler :launcher/refresh
+    (fn [cofx event]
+      {:db (launcher/cache-apps (cofx :db))
+       :render :launcher
+       :dispatch [:wm/query-actions]}))
 
 # --- Subscriptions ---
 
@@ -181,7 +184,7 @@
                     :window accent
                     :tag muted
                     subtle))
-  [:row {:id (string "result-" idx) :w :grow :h 32
+  [:row {:id (string/format "result-%d" idx) :w :grow :h 32
          :bg (if active (theme :base02) surface-color)
          :radius 4 :pad [4 12] :align-y :center :gap 8}
     [:row {:w 4 :h 16 :bg (if active kind-color [0 0 0 0]) :radius 2}]
@@ -224,9 +227,9 @@
         (case mode
           :command "Enter to dispatch action · Esc to cancel"
           :eval "Enter to evaluate · Esc to cancel"
-          (string (length results) " result"
-                  (if (not= (length results) 1) "s" "")
-                  " · !apps @windows #tags >actions :cmd =eval"))]]])
+          (string/format "%d result%s · !apps @windows #tags >actions :cmd =eval"
+                  (length results)
+                  (if (not= (length results) 1) "s" "")))]]])
 
 (reg-view :launcher launcher-view)
 
@@ -251,7 +254,9 @@
                         :anchor {:top true}
                         :margin {:top 200}
                         :keyboard-interactivity :exclusive}}
-     :anim {:id :launcher/reveal :to 1 :duration 0.15 :easing :ease-out-cubic}}))
+       :render :launcher
+       :anim {:id :launcher/reveal :to 1 :duration 0.15 :easing :ease-out-cubic
+              :surface :launcher}}))
 
 (reg-event-handler :launcher/close
   (fn [cofx event]
@@ -260,7 +265,9 @@
              (put :launcher/query "")
              (put :launcher/items [])
              (put :launcher/selected 0))
+     :render :launcher
      :anim {:id :launcher/reveal :to 0 :duration 0.12 :easing :ease-in-out-quad
+            :surface :launcher
             :on-complete [:launcher/destroy]}
      :dispatch [:launcher/refresh]}))
 
@@ -336,7 +343,8 @@
           {:db (launcher/set-query db
                  (if (> (length query) 0)
                    (string/slice query 0 (- (length query) 1))
-                   ""))}
+                   ""))
+           :render :launcher}
 
           # Ctrl+W: delete word
           (and (= sym "w") (info :ctrl))
@@ -347,28 +355,34 @@
                      (-- end))
                    (while (and (> end 0) (not= (get query (- end 1)) (chr " ")))
                      (-- end))
-                   (string/slice query 0 end)))}
+                   (string/slice query 0 end)))
+           :render :launcher}
 
           # Ctrl+U: clear line
           (and (= sym "u") (info :ctrl))
-          {:db (launcher/set-query db "")}
+          {:db (launcher/set-query db "")
+           :render :launcher}
 
           (or (= sym "Up") (and (= sym "p") (info :ctrl)) (and (= sym "k") (info :ctrl)))
-          {:db (put db :launcher/selected (max 0 (- selected 1)))}
+          {:db (put db :launcher/selected (max 0 (- selected 1)))
+           :render :launcher}
 
           (or (= sym "Down") (and (= sym "n") (info :ctrl)) (and (= sym "j") (info :ctrl)))
           {:db (put db :launcher/selected (min (max 0 (- result-count 1))
-                                               (+ selected 1)))}
+                                               (+ selected 1)))
+           :render :launcher}
 
           (= sym "Tab")
           (let [[mode _] (parse-mode query)
                 next-mode (case mode :all :app :app :window :window :tag :tag :action :action :command :command :eval :eval :all)
                 prefix (case next-mode :app "!" :window "@" :tag "#" :action ">" :command ":" :eval "=" "")]
-            {:db (launcher/set-query db prefix)})
+            {:db (launcher/set-query db prefix)
+             :render :launcher})
 
           # Regular text input
           (and (> (length text) 0) (not (info :ctrl)) (not (info :alt)) (not (info :super)))
-          {:db (launcher/set-query db (string query text))})))))
+          {:db (launcher/set-query db (string query text))
+           :render :launcher})))))
 
 # --- Pointer handling (launcher results) ---
 
@@ -381,6 +395,7 @@
         (def idx (scan-number (string/slice id 7)))
         (when idx
           {:db (put db :launcher/selected idx)
+           :render :launcher
            :dispatch [:launcher/select]})))))
 
 (reg-event-handler :scroll
@@ -392,10 +407,12 @@
       (def result-count (length (get db :launcher/results [])))
       (cond
         (= dir "up")
-        {:db (put db :launcher/selected (max 0 (- selected 1)))}
+        {:db (put db :launcher/selected (max 0 (- selected 1)))
+         :render :launcher}
         (= dir "down")
         {:db (put db :launcher/selected (min (max 0 (- result-count 1))
-                                              (+ selected 1)))}))))
+                                              (+ selected 1)))
+         :render :launcher}))))
 
 # --- Signal integration: compositor signals can trigger the launcher ---
 

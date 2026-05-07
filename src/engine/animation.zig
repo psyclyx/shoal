@@ -156,8 +156,8 @@ pub const FrameClock = struct {
     }
 
     /// Advance the clock. Returns delta time in seconds since last tick.
-    pub fn tick(self: *FrameClock) f32 {
-        const now = std.time.nanoTimestamp();
+    pub fn tick(self: *FrameClock, io: std.Io) f32 {
+        const now = std.Io.Clock.awake.now(io).nanoseconds;
         if (self.last_time_ns) |last| {
             const delta_ns = now - last;
             self.dt = @as(f32, @floatFromInt(delta_ns)) / 1_000_000_000.0;
@@ -259,7 +259,7 @@ test "anyActive detects active animations" {
 
 test "frame clock first tick returns zero" {
     var clock = FrameClock.init();
-    const dt = clock.tick();
+    const dt = clock.tick(std.Options.debug_io);
     try std.testing.expectEqual(@as(f32, 0.0), dt);
     try std.testing.expect(clock.last_time_ns != null);
 }
