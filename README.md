@@ -41,18 +41,19 @@ See [docs/architecture.md](docs/architecture.md) for the full design.
 ## Scripts
 
 A shoal script is a Janet file that `(use ...)`s the modules it needs and
-registers at least one view. Run one with:
+declares at least one surface. Run one with:
 
 ```sh
 shoal run path/to/script.janet [args...]
 ```
 
-Args after the script path are exposed as `script-args` inside the script.
-Two examples ship in `src/lib/example/`:
+Args after the script path are exposed as `script-args`. Three examples
+ship in `src/lib/example/`:
 
 | Script | Description |
 |--------|-------------|
-| `bar.janet` | Status bar with workspaces, title, minimap, CPU/mem/disk/net/audio/battery, clock. Takes `sway` or `tidepool` as `script-args`. |
+| `bar.janet` | Status bar with workspaces, title, minimap, CPU/mem/disk/net/audio/battery, clock. Takes `sway` or `tidepool` as the first script-arg. |
+| `dmenu.janet` | Fuzzy picker — reads items from stdin, writes selection to stdout, exits. `printf 'a\nb' \| shoal run dmenu.janet '> '` |
 | `minimal.janet` | Smallest possible config — just a clock. |
 
 Other subcommands:
@@ -61,6 +62,38 @@ Other subcommands:
 shoal list                  # list running shoal instances
 shoal signal <inst> <name>  # send an event to a running instance
 ```
+
+A script with no surfaces (or one whose surfaces are all destroyed)
+exits naturally once its event queue drains — no `{:exit 0}` needed
+for one-shot pickers.
+
+## Surfaces
+
+Every layer-shell surface is declared with `reg-surface`:
+
+```janet
+(reg-surface :name
+  {:layer :top                 # :background :bottom :top :overlay
+   :anchor {:bottom true       # any subset of {:top :bottom :left :right}
+            :left true :right true}
+   :height 0                   # 0 = auto-size to content
+   :exclusive-zone 38
+   :margin {:top 0 :right 0 :bottom 0 :left 0}
+   :keyboard-interactivity :none  # :none :exclusive :on-demand
+   :input-region :default      # :default or :empty (click-through)
+   :namespace "shoal"
+   :per-output false           # true = one instance per wl_output
+   :lazy false}                # true = register view, don't auto-create
+  view-fn)
+```
+
+`:per-output true` is the bar pattern — one instance per monitor.
+The default is single-instance, which the compositor places on the
+focused output (good for OSDs, launchers, pickers).
+
+`:lazy true` registers the view function without creating a surface.
+Use it for transient overlays that pop up via `{:surface :create ...}`
+fx and for `:render-to-shm` views that have no wayland surface.
 
 ## Modules
 
@@ -74,7 +107,6 @@ integration that implements it.
 | `launcher.janet` | Universal command palette — apps, windows, tags, compositor actions, eval |
 | `osd.janet` | Volume/brightness on-screen display |
 | `decorator.janet` | Window decoration renderer (tidepool) |
-| `dmenu.janet` | dmenu-compatible stdin/stdout picker (`shoal run --dmenu ...`) |
 
 ## User Configuration
 
@@ -87,27 +119,8 @@ compose modules however you like:
   10-sway.janet     # or tidepool, or your own compositor glue
   20-clock.janet
   30-sysinfo.janet
-  90-bar.janet      # your custom bar view
+  90-bar.janet      # your custom bar with reg-surface
 ```
-
-Surface and theme config go in `~/.config/shoal/config.json`:
-
-```json
-{
-  "surfaces": [{
-    "layer": "top",
-    "height": 36,
-    "exclusive_zone": 40,
-    "anchor": {"top": true, "left": true, "right": true}
-  }],
-  "theme": {
-    "bg":   [11, 4, 0, 255],
-    "text": [184, 172, 154, 255]
-  }
-}
-```
-
-Theme keys map to `(theme :key)` in Janet.
 
 ## Building
 

@@ -5,67 +5,6 @@ let
 
   hasStylix = (config ? stylix) && (config.stylix.enable or false);
 
-  # Build config.json for a single config (theme + surfaces)
-  surfaceType = lib.types.submodule {
-    options = {
-      layer = lib.mkOption {
-        type = lib.types.enum [ "background" "bottom" "top" "overlay" ];
-        default = "top";
-      };
-
-      anchor = lib.mkOption {
-        type = lib.types.submodule {
-          options = {
-            top = lib.mkOption { type = lib.types.bool; default = false; };
-            bottom = lib.mkOption { type = lib.types.bool; default = true; };
-            left = lib.mkOption { type = lib.types.bool; default = true; };
-            right = lib.mkOption { type = lib.types.bool; default = true; };
-          };
-        };
-        default = {};
-      };
-
-      width = lib.mkOption {
-        type = lib.types.ints.unsigned;
-        default = 0;
-      };
-
-      height = lib.mkOption {
-        type = lib.types.ints.unsigned;
-        default = 0;
-        description = "Surface height in pixels. 0 = auto-size to content.";
-      };
-
-      exclusive_zone = lib.mkOption {
-        type = lib.types.int;
-        default = 0;
-        description = "Exclusive zone in pixels. 0 = auto (follows height + margins).";
-      };
-
-      margin = lib.mkOption {
-        type = lib.types.submodule {
-          options = {
-            top = lib.mkOption { type = lib.types.int; default = 0; };
-            right = lib.mkOption { type = lib.types.int; default = 0; };
-            bottom = lib.mkOption { type = lib.types.int; default = 0; };
-            left = lib.mkOption { type = lib.types.int; default = 0; };
-          };
-        };
-        default = {};
-      };
-
-      namespace = lib.mkOption {
-        type = lib.types.str;
-        default = "shoal";
-      };
-
-      keyboard_interactivity = lib.mkOption {
-        type = lib.types.enum [ "none" "exclusive" "on_demand" ];
-        default = "none";
-      };
-    };
-  };
-
   systemdUnitType = lib.types.submodule {
     options = {
       enable = lib.mkOption {
@@ -135,7 +74,7 @@ let
         '';
         example = {
           "10-compositor" = "(use /compositor/sway)";
-          "20-bar" = "(reg-view (fn [] [:row ...]))";
+          "20-bar" = "(reg-surface :default {:per-output true} (fn [] [:row ...]))";
         };
       };
 
@@ -143,12 +82,6 @@ let
         type = lib.types.attrsOf (lib.types.either lib.types.str lib.types.ints.positive);
         default = {};
         description = "Base16 theme colors and font config.";
-      };
-
-      surfaces = lib.mkOption {
-        type = lib.types.attrsOf surfaceType;
-        default = {};
-        description = "Named surfaces. Each surface creates a layer-shell surface on all outputs.";
       };
 
       systemd = lib.mkOption {
@@ -171,19 +104,9 @@ let
       }
     ) conf.modules))
 
-    # config.json for theme/surfaces
-    (lib.mkIf (conf.surfaces != {} || conf.theme != {}) {
-      "${configDir}/config.json".text = let
-        surfaceList = lib.mapAttrsToList (_: surf: {
-          inherit (surf)
-            layer width height exclusive_zone margin namespace
-            keyboard_interactivity;
-          anchor = lib.filterAttrs (_: v: v) surf.anchor;
-        }) conf.surfaces;
-      in builtins.toJSON (
-        { surfaces = surfaceList; }
-        // lib.optionalAttrs (conf.theme != {}) { theme = conf.theme; }
-      );
+    # config.json for theme
+    (lib.mkIf (conf.theme != {}) {
+      "${configDir}/config.json".text = builtins.toJSON { theme = conf.theme; };
     })
   ];
 
@@ -198,7 +121,7 @@ let
     };
 
     Service = {
-      ExecStart = "${lib.getExe cfg.package} ${config.xdg.configHome}/shoal/${name}/main.janet";
+      ExecStart = "${lib.getExe cfg.package} run ${config.xdg.configHome}/shoal/${name}/main.janet";
       Environment = lib.mapAttrsToList (k: v: "${k}=${v}") conf.systemd.environment;
       Restart = conf.systemd.restart;
       RestartSec = conf.systemd.restartSec;
@@ -227,10 +150,10 @@ in {
       '';
       example = {
         default = {
-          modules.bar = "(reg-view (fn [] [:row ...]))";
+          modules.bar = "(reg-surface :default {:per-output true} (fn [] [:row ...]))";
         };
         osd = {
-          modules.osd = "(reg-surface :osd ...)";
+          modules.osd = "(reg-surface :osd {:layer :overlay} osd-view)";
           systemd.after = [ "graphical-session.target" "shoal-default.service" ];
         };
       };
@@ -248,12 +171,6 @@ in {
       default = {};
       description = "Legacy: Theme for default config. Use configs.default.theme instead.";
     };
-
-    surfaces = lib.mkOption {
-      type = lib.types.attrsOf surfaceType;
-      default = {};
-      description = "Legacy: Surfaces for default config. Use configs.default.surfaces instead.";
-    };
   };
 
   config = lib.mkIf cfg.enable (lib.mkMerge [
@@ -262,11 +179,10 @@ in {
     }
 
     # Legacy support: merge into configs.default
-    (lib.mkIf (cfg.modules != {} || cfg.theme != {} || cfg.surfaces != {}) {
+    (lib.mkIf (cfg.modules != {} || cfg.theme != {}) {
       programs.shoal.configs.default = {
         modules = cfg.modules;
         theme = cfg.theme;
-        surfaces = cfg.surfaces;
       };
     })
 
