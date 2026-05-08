@@ -27,9 +27,6 @@ pub const IndexedView = jutil.IndexedView;
 const framework_source = @embedFile("../lib/core/framework.janet");
 const json_source = @embedFile("../lib/core/json.janet");
 
-// Dmenu mode - embedded for standalone operation
-const dmenu_source = @embedFile("../lib/module/dmenu.janet");
-
 /// Initialize the Janet VM. Must be called before any other Janet operations.
 pub fn init() !void {
     if (c.janet_init() != 0) return error.JanetInitFailed;
@@ -176,7 +173,7 @@ pub const Dispatch = struct {
     fn_set_theme: Janet = undefined,
 
     /// Load the shoal framework into a fresh environment. Sets up registries.
-    pub fn initBoot(self: *Dispatch, io: std.Io, environ_map: *std.process.Environ.Map, theme: theme_mod.Theme, dmenu_mode: bool) !void {
+    pub fn initBoot(self: *Dispatch, io: std.Io, environ_map: *std.process.Environ.Map, theme: theme_mod.Theme) !void {
         self.io = io;
         self.environ_map = environ_map;
         self.spawns.io = io;
@@ -214,10 +211,6 @@ pub const Dispatch = struct {
 
         // Inject theme colors into the environment (before modules which read them)
         self.injectTheme(theme);
-
-        if (dmenu_mode) {
-            self.loadDmenuModule();
-        }
 
         // Cache lookup functions from the environment
         self.fn_get_handler = envLookup(self.env, "get-handler") orelse return error.BootMissingGetHandler;
@@ -1468,28 +1461,6 @@ pub const Dispatch = struct {
 
         log.info("loaded {d} user config file(s) from {s}", .{ loaded, dir_path });
         return loaded;
-    }
-
-    /// Load only the dmenu module (skips all other modules).
-    pub fn loadDmenuModule(self: *Dispatch) void {
-        _ = self.loadSource(dmenu_source.ptr, "dmenu.janet");
-    }
-
-    /// Inject items into the Janet db for dmenu mode.
-    pub fn injectDmenuItems(self: *Dispatch, items: []const []const u8, prompt: []const u8) void {
-        const arr = c.janet_array(@intCast(items.len));
-        for (items) |item| {
-            const s = c.janet_string(@ptrCast(item.ptr), @as(i32, @intCast(item.len)));
-            c.janet_array_push(arr, c.janet_wrap_string(s));
-        }
-
-        // Set :dmenu/items and :dmenu/prompt in the db table
-        if (c.janet_checktype(self.db, c.JANET_TABLE) != 0) {
-            const t = c.janet_unwrap_table(self.db);
-            c.janet_table_put(t, kw("dmenu/items"), c.janet_wrap_array(arr));
-            const ps = c.janet_string(@ptrCast(prompt.ptr), @as(i32, @intCast(prompt.len)));
-            c.janet_table_put(t, kw("dmenu/prompt"), c.janet_wrap_string(ps));
-        }
     }
 
     /// Get all registered surface configs from Janet.

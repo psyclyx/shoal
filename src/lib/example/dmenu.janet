@@ -1,13 +1,15 @@
-# dmenu — stdin/stdout item picker
+#!/usr/bin/env shoal
+# dmenu.janet — stdin/stdout fuzzy item picker
 #
-# Minimal module for dmenu compatibility mode. Reads items from
-# :dmenu/items in the db (injected by Zig from stdin), presents
-# them in a single overlay surface, and writes selection to stdout.
+# Reads lines from stdin, presents them in an overlay surface with
+# fuzzy filtering, writes the selection to stdout, and exits.
+# Run with: shoal run dmenu.janet [prompt]
 
-# --- Helpers ---
+(def prompt (or (script-args 0) ":"))
+
+# --- Fuzzy match ---
 
 (defn- fuzzy-score [query label]
-  "Fuzzy match with scoring. Returns score or nil."
   (when (and query label (> (length query) 0) (> (length label) 0))
     (def q (string/ascii-lower query))
     (def l (string/ascii-lower label))
@@ -38,23 +40,13 @@
       (sort scored |(> ($0 :score) ($1 :score)))
       (map |($ :item) scored))))
 
-(defn- clamp [v lo hi]
-  (min hi (max lo v)))
+(defn- clamp [v lo hi] (min hi (max lo v)))
 
 # --- Subscriptions ---
 
-(reg-sub :dmenu/query
-  (fn [db] (get db :dmenu/query "")))
-
-(reg-sub :dmenu/selected
-  (fn [db] (get db :dmenu/selected 0)))
-
-(reg-sub :dmenu/prompt
-  (fn [db] (get db :dmenu/prompt ":")))
-
-(reg-sub :dmenu/total
-  (fn [db] (length (get db :dmenu/items []))))
-
+(reg-sub :dmenu/query (fn [db] (get db :dmenu/query "")))
+(reg-sub :dmenu/selected (fn [db] (get db :dmenu/selected 0)))
+(reg-sub :dmenu/total (fn [db] (length (get db :dmenu/items []))))
 (reg-sub :dmenu/results
   (fn [db]
     (filter-items (get db :dmenu/items []) (get db :dmenu/query ""))))
@@ -80,7 +72,6 @@
 
 (defn dmenu-view []
   (let [query (sub :dmenu/query)
-        prompt (sub :dmenu/prompt)
         results (sub :dmenu/results)
         selected (sub :dmenu/selected)
         reveal (anim :dmenu/reveal)
@@ -93,19 +84,16 @@
 
     [:col {:w 1600 :h :grow :bg [(bg 0) (bg 1) (bg 2) alpha] :radius 16 :pad 24
            :align-x :center}
-      # Input field
       [:row {:h 96 :w :grow
              :bg [(surface-color 0) (surface-color 1) (surface-color 2) alpha]
              :radius 12 :pad [16 32] :align-y :center :gap 16}
         [:text {:color muted :size 32} prompt]
         [:text {:color text-color :size 36}
           (string query "│")]]
-      # Results list
       [:col {:w :grow :h :grow :gap 4 :pad [16 0 0 0]}
         ;(seq [i :range [scroll-off visible-end]
                :let [item (results i)]]
            (result-item i item selected))]
-      # Footer with count and keybind reference
       [:row {:h 56 :w :grow :align-y :center :pad [0 16] :gap 32}
         [:text {:color subtle :size 22}
           (string/format "%d / %d" (length results) (sub :dmenu/total))]
@@ -113,19 +101,39 @@
         [:text {:color subtle :size 22}
           "Ret select · S-Ret literal · Esc cancel · C-w word · C-u clear · ↑↓ nav"]]]))
 
-(reg-view :dmenu dmenu-view)
+(reg-surface :dmenu
+  {:layer :overlay
+   :anchor {:top true :left true :right true}
+   :height 1400
+   :margin {:top 60}
+   :keyboard-interactivity :exclusive
+   :namespace "shoal-dmenu"}
+  dmenu-view)
 
-# --- Event Handlers ---
+# --- Lifecycle ---
 
 (reg-event-handler :init
-  (fn [cofx event]
-    {:anim {:id :dmenu/reveal :to 1 :duration 0.15 :easing :ease-out-cubic
+  (fn [_ _]
+    {:async-stdin true
+     :anim {:id :dmenu/reveal :to 1 :duration 0.15 :easing :ease-out-cubic
             :surface :dmenu}}))
 
-# Close on keyboard focus loss (compositor sends this on click-outside)
-(reg-event-handler :keyboard-leave
+(reg-event-handler :stdin/line
   (fn [cofx event]
-    {:exit 1}))
+    (let [db (cofx :db)
+          line (event 1)
+          items (get db :dmenu/items @[])]
+      {:db (put db :dmenu/items (array/push (array/slice items) line))
+       :render :dmenu})))
+
+(reg-event-handler :stdin/eof
+  (fn [_ _] {:render :dmenu}))
+
+# Compositor click-outside dismiss
+(reg-event-handler :keyboard-leave
+  (fn [_ _] {:exit 1}))
+
+# --- Keyboard ---
 
 (reg-event-handler :key
   (fn [cofx event]
@@ -139,12 +147,10 @@
               selected (get db :dmenu/selected 0)
               results (filter-items items query)
               result-count (length results)]
-
       (cond
         (= sym "Escape")
         {:exit 1}
 
-        # Shift+Return: submit raw query text, ignoring autocomplete selection
         (and (= sym "Return") (info :shift))
         (if (> (length query) 0)
           {:stdout query :exit 0}
@@ -196,7 +202,6 @@
                                            (+ selected 1)))
          :render :dmenu}
 
-        # Regular text input
         (and (> (length text) 0) (not (info :ctrl)) (not (info :alt)) (not (info :super)))
         (let [new-query (string query text)
               new-results (filter-items items new-query)]
@@ -206,7 +211,7 @@
                                           (max 0 (- (length new-results) 1)))))
            :render :dmenu})))))))
 
-# --- Pointer handling ---
+# --- Pointer ---
 
 (reg-event-handler :click
   (fn [cofx event]

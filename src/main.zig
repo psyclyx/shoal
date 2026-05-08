@@ -39,8 +39,6 @@ const Args = struct {
     subcommand: Subcommand,
     config_paths: []const []const u8,
     script_args: []const []const u8,
-    dmenu: bool = false,
-    dmenu_prompt: []const u8 = "",
     instance_name: ?[]const u8 = null,
     signal_target: ?[]const u8 = null,
     signal_event: ?[]const u8 = null,
@@ -53,8 +51,6 @@ fn parseArgs(allocator: std.mem.Allocator, process_args: std.process.Args) !Args
     var config_paths = try std.ArrayList([]const u8).initCapacity(allocator, 8);
     var script_args = try std.ArrayList([]const u8).initCapacity(allocator, 8);
     var subcommand: Subcommand = .run;
-    var dmenu = false;
-    var dmenu_prompt: []const u8 = "";
     var instance_name: ?[]const u8 = null;
     var signal_target: ?[]const u8 = null;
     var signal_event: ?[]const u8 = null;
@@ -81,11 +77,7 @@ fn parseArgs(allocator: std.mem.Allocator, process_args: std.process.Args) !Args
 
     var after_double_dash = false;
     while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--dmenu")) {
-            dmenu = true;
-        } else if (std.mem.eql(u8, arg, "-p")) {
-            dmenu_prompt = args.next() orelse "";
-        } else if (std.mem.eql(u8, arg, "-n")) {
+        if (std.mem.eql(u8, arg, "-n")) {
             instance_name = args.next() orelse "";
         } else if (std.mem.eql(u8, arg, "--")) {
             after_double_dash = true;
@@ -108,8 +100,6 @@ fn parseArgs(allocator: std.mem.Allocator, process_args: std.process.Args) !Args
         .subcommand = subcommand,
         .config_paths = try config_paths.toOwnedSlice(allocator),
         .script_args = try script_args.toOwnedSlice(allocator),
-        .dmenu = dmenu,
-        .dmenu_prompt = dmenu_prompt,
         .instance_name = instance_name,
         .signal_target = signal_target,
         .signal_event = signal_event,
@@ -281,7 +271,7 @@ pub fn main(init: std.process.Init) !void {
     defer janet.deinit();
 
     dispatch = janet.createDispatch();
-    try dispatch.initBoot(init.io, init.environ_map, theme_mod.default(), cli_args.dmenu);
+    try dispatch.initBoot(init.io, init.environ_map, theme_mod.default());
     dispatch.setScriptArgs(cli_args.script_args);
     dispatch.initFileReader(init.io);
     defer dispatch.deinitFileReader();
@@ -293,10 +283,7 @@ pub fn main(init: std.process.Init) !void {
     dispatch.setupLoadPath(cli_args.config_paths);
 
     // Load config files
-    if (cli_args.dmenu) {
-        dispatch.loadDmenuModule();
-    } else if (cli_args.config_paths.len > 0) {
-        // Load specified config files (resolve to absolute paths)
+    if (cli_args.config_paths.len > 0) {
         var cwd_buf: [4096]u8 = undefined;
         const cwd_len = std.process.currentPath(init.io, &cwd_buf) catch 0;
         const cwd: []const u8 = if (cwd_len > 0) cwd_buf[0..cwd_len] else "/";
@@ -305,7 +292,6 @@ pub fn main(init: std.process.Init) !void {
             const abs_path = if (std.fs.path.isAbsolute(path))
                 path
             else blk: {
-                // Resolve relative path to absolute
                 const parts = [_][]const u8{ cwd, path };
                 break :blk std.fs.path.resolve(allocator, &parts) catch path;
             };
@@ -316,37 +302,6 @@ pub fn main(init: std.process.Init) !void {
         _ = dispatch.loadUserConfig();
     }
 
-    // In dmenu mode: read stdin items and inject into db
-    if (cli_args.dmenu) {
-        var stdin_buf: [65536]u8 = undefined;
-        var bytes: usize = 0;
-        while (bytes < stdin_buf.len) {
-            const n = std.Io.File.stdin().readStreaming(init.io, &.{stdin_buf[bytes..]}) catch |err| {
-                switch (err) {
-                    error.EndOfStream => {},
-                    else => {},
-                }
-                break;
-            };
-            if (n == 0) break;
-            bytes += n;
-        }
-        const content = stdin_buf[0..bytes];
-
-        // Collect line slices (pointing into stdin_buf)
-        var item_ptrs: [4096][]const u8 = undefined;
-        var item_count: usize = 0;
-        var lines = std.mem.splitScalar(u8, content, '\n');
-        while (lines.next()) |line| {
-            if (line.len > 0 and item_count < item_ptrs.len) {
-                item_ptrs[item_count] = line;
-                item_count += 1;
-            }
-        }
-
-        dispatch.injectDmenuItems(item_ptrs[0..item_count], cli_args.dmenu_prompt);
-    }
-
     // Dispatch :init — all modules register :init handlers (composed automatically)
     dispatch.enqueue(janet.makeEvent("init"));
     _ = dispatch.processQueue();
@@ -355,7 +310,7 @@ pub fn main(init: std.process.Init) !void {
     const surface_configs = dispatch.getSurfaceConfigs();
     const has_surfaces = surface_configs != null and janet.c.janet_checktype(surface_configs.?, janet.c.JANET_ARRAY) != 0;
 
-    if (!has_surfaces and !cli_args.dmenu) {
+    if (!has_surfaces) {
         log.info("no surfaces registered; exiting", .{});
         return;
     }
@@ -382,36 +337,29 @@ pub fn main(init: std.process.Init) !void {
     // populate the per-output slots claimed during wl_output binding;
     // single-instance surfaces append after that range.
     const output_slot_count = surface_count;
-    if (cli_args.dmenu) {
-        // dmenu mode: single surface, compositor picks the focused output
-        surfaces[output_slot_count] = .{};
-        surface_count = output_slot_count + 1;
-        createLayerSurface(&surfaces[output_slot_count], comp, ls, null, "dmenu", default_surface_config);
-    } else if (has_surfaces) {
-        const configs_arr = janet.c.janet_unwrap_array(surface_configs.?);
-        const count = configs_arr.*.count;
-        for (0..@as(usize, @intCast(count))) |i| {
-            const cfg_val = configs_arr.*.data[@intCast(i)];
-            if (janet.c.janet_checktype(cfg_val, janet.c.JANET_TABLE) == 0) continue;
+    const configs_arr = janet.c.janet_unwrap_array(surface_configs.?);
+    const count = configs_arr.*.count;
+    for (0..@as(usize, @intCast(count))) |i| {
+        const cfg_val = configs_arr.*.data[@intCast(i)];
+        if (janet.c.janet_checktype(cfg_val, janet.c.JANET_TABLE) == 0) continue;
 
-            const name_val = janet.janetGet(cfg_val, janet.kw("name"));
-            if (janet.c.janet_checktype(name_val, janet.c.JANET_KEYWORD) == 0) continue;
-            const name_str = std.mem.span(janet.c.janet_unwrap_keyword(name_val));
+        const name_val = janet.janetGet(cfg_val, janet.kw("name"));
+        if (janet.c.janet_checktype(name_val, janet.c.JANET_KEYWORD) == 0) continue;
+        const name_str = std.mem.span(janet.c.janet_unwrap_keyword(name_val));
 
-            const surf_cfg = parseJanetSurfaceConfig(cfg_val);
+        const surf_cfg = parseJanetSurfaceConfig(cfg_val);
 
-            if (surf_cfg.per_output) {
-                for (surfaces[0..output_slot_count]) |*surf| {
-                    if (surf.output != null) {
-                        createLayerSurface(surf, comp, ls, surf.output, name_str, surf_cfg);
-                    }
+        if (surf_cfg.per_output) {
+            for (surfaces[0..output_slot_count]) |*surf| {
+                if (surf.output != null) {
+                    createLayerSurface(surf, comp, ls, surf.output, name_str, surf_cfg);
                 }
-            } else {
-                if (surface_count >= MAX_SURFACES) break;
-                surfaces[surface_count] = .{};
-                createLayerSurface(&surfaces[surface_count], comp, ls, null, name_str, surf_cfg);
-                surface_count += 1;
             }
+        } else {
+            if (surface_count >= MAX_SURFACES) break;
+            surfaces[surface_count] = .{};
+            createLayerSurface(&surfaces[surface_count], comp, ls, null, name_str, surf_cfg);
+            surface_count += 1;
         }
     }
 
