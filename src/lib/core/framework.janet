@@ -238,34 +238,6 @@
   []
   *current-output*)
 
-# --- Views ---
-
-(var- *view-fn* nil)
-(def- named-views
-  "Registry: keyword → view-fn for named surfaces."
-  @{})
-
-(defn reg-view
-  "Register a view function.
-
-  One arity (default view, used by the primary surface):
-    (reg-view view-fn)
-
-  Two arities (named view, for additional surfaces):
-    (reg-view :name view-fn)"
-  [name-or-fn &opt view-fn]
-  (if view-fn
-    (put named-views name-or-fn view-fn)
-    (set *view-fn* name-or-fn)))
-
-(defn get-view-fn
-  "Return a view function. With no args, returns the default view.
-  With a keyword, returns the named view or nil."
-  [&opt name]
-  (if name
-    (get named-views name)
-    *view-fn*))
-
 # --- Internal handlers ---
 
 # IPC reconnect: timer fires this event with the original connect spec.
@@ -280,29 +252,40 @@
   @{})
 
 (defn reg-surface
-  "Register a surface with its view function and layer shell config.
+  "Register a layer-shell surface.
 
-   Two arities:
-     (reg-surface :name view-fn) — named surface with defaults
+   Forms:
+     (reg-surface :name view-fn)
      (reg-surface :name {:layer :overlay :anchor {:top true} ...} view-fn)
 
    Config options:
+     :per-output            — Create one surface per wl_output (default: false)
+     :lazy                  — Don't auto-create at :init; await :surface :create fx
      :layer                 — :background, :bottom, :top, :overlay (default: :top)
-     :anchor                — {:top true :left true ...} (default: all false = compositor chooses)
+     :anchor                — {:top true :left true ...} (default: all false)
      :width                 — Width in pixels (default: 0 = full output width)
-     :height                — Height in pixels (default: auto-sized from content)
+     :height                — Height in pixels (default: 0 = auto-size to content)
      :margin                — {:top 0 :right 0 :bottom 0 :left 0}
-     :exclusive-zone        — Exclusive zone for panel stacking (default: auto from height + margins)
+     :exclusive-zone        — Exclusive zone (default: 0)
      :keyboard-interactivity — :none, :exclusive, :on-demand (default: :none)
-     :input-region          — :default or :empty for click-through overlays (default: :default)
+     :input-region          — :default or :empty for click-through (default: :default)
+     :namespace             — wl_layer_surface namespace (default: \"shoal\")
 
-   The view-fn returns hiccup for this surface each frame.
-   Call (reg-surface) during config load; Zig creates surfaces on :init."
+   At :init, Zig creates a surface per non-lazy registration. Lazy entries
+   register the view but defer creation until a :surface :create fx fires."
   [name & args]
   (def [config view-fn] (match args
                           [vf]              [{} vf]
                           [cfg vf]          [cfg vf]))
   (put surface-registry name {:view view-fn :config config}))
+
+(defn reg-view
+  "Register a named view function without a surface config. The view is
+   looked up when something else references the name — for example a
+   :surface :create fx with overrides, or :render-to-shm into a buffer.
+   Equivalent to (reg-surface name {:lazy true} view-fn)."
+  [name view-fn]
+  (put surface-registry name {:view view-fn :config {:lazy true}}))
 
 (defn get-surface
   "Get surface registration by name. Returns {:view :config} or nil."
@@ -314,13 +297,17 @@
   []
   (keys surface-registry))
 
+(defn get-view-fn
+  "Look up the view function registered for a surface name."
+  [&opt name]
+  (when name
+    (when-let [entry (get surface-registry name)] (entry :view))))
+
 (defn get-surface-config
-  "Get surface config for Zig. Returns config table with defaults applied.
-   Special name :default uses reg-view's default view if no surface registered."
+  "Get surface config for Zig. Returns config table with defaults applied,
+   or nil if name is not registered."
   [name]
-  (def entry (get surface-registry name))
-  (if entry
-    # Merge defaults with user config
+  (when-let [entry (get surface-registry name)]
     (let [cfg (entry :config)]
       {:layer (get cfg :layer :top)
        :anchor (get cfg :anchor {})
@@ -331,39 +318,23 @@
        :keyboard-interactivity (get cfg :keyboard-interactivity :none)
        :input-region (get cfg :input-region :default)
        :namespace (get cfg :namespace "shoal")
-       :view (entry :view)})
-    # Default surface: use reg-view's default view
-    (when (= name :default)
-      {:layer :top
-       :anchor {:bottom true :left true :right true}
-       :width 0
-       :height 0
-       :margin {}
-       :exclusive-zone 0
-       :keyboard-interactivity :none
-       :input-region :default
-       :namespace "shoal"
-       :view *view-fn*})))
+       :per-output (get cfg :per-output false)
+       :lazy (get cfg :lazy false)})))
 
 (defn has-surface?
-  "Check if a surface is registered (or :default has a view)."
+  "Check if a surface is registered."
   [name]
-  (if (get surface-registry name)
-    true
-    (and (= name :default) *view-fn*)))
+  (truthy? (get surface-registry name)))
 
 (defn get-all-surface-configs
-  "Get all surface configs for init. Returns array of {:name :layer :anchor ...}.
-   Always includes :default if a default view is registered."
+  "Get configs for all non-lazy registered surfaces. Returns array of
+   {:name :layer :anchor :per-output ...} for Zig to create at :init."
   []
   (def result @[])
-  # Check for default view
-  (when *view-fn*
-    (array/push result (merge {:name :default} (get-surface-config :default))))
-  # Add all named surfaces
   (each name (keys surface-registry)
-    (unless (= name :default)
-      (array/push result (merge {:name name} (get-surface-config name)))))
+    (let [cfg (get-surface-config name)]
+      (unless (get cfg :lazy)
+        (array/push result (merge {:name name} cfg)))))
   result)
 
 # --- Theme ---

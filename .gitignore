@@ -1,6 +1,8 @@
 zig-out/
 zig-cache/
 .zig-cache/
+zig-pkg/
+perf-*.data
 .direnv/
 result
 result-*

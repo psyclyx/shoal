@@ -57,7 +57,15 @@
           (string/format "%d (muted)" (math/floor value))
           (string/format "%d%%" (math/floor value)))]]])
 
-(reg-view :osd osd-view)
+(reg-surface :osd
+  {:layer :overlay
+   :width 320
+   :height 120
+   :anchor {:top true}
+   :margin {:top 80}
+   :keyboard-interactivity :none
+   :input-region :empty}
+  osd-view)
 
 # --- Show / Hide ---
 
@@ -73,18 +81,6 @@
    :anim {:id :osd/reveal :to 1 :duration 0.12 :easing :ease-out-cubic
           :surface :osd}
    :timer {:delay 1.5 :event [:osd/hide] :id :osd-timeout}})
-
-(reg-event-handler :init
-  (fn [cofx event]
-    {:surface
-      {:create {:name :osd
-                :layer :overlay
-                :width 320
-                :height 120
-                :anchor {:top true}
-                :margin {:top 80}
-                :keyboard-interactivity :none
-                :input-region :empty}}}))
 
 (reg-event-handler :osd/hide
   (fn [cofx event]

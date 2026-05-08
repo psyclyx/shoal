@@ -113,14 +113,14 @@
         [:text {:color subtle :size 22}
           "Ret select · S-Ret literal · Esc cancel · C-w word · C-u clear · ↑↓ nav"]]]))
 
-(reg-view dmenu-view)
+(reg-view :dmenu dmenu-view)
 
 # --- Event Handlers ---
 
 (reg-event-handler :init
   (fn [cofx event]
     {:anim {:id :dmenu/reveal :to 1 :duration 0.15 :easing :ease-out-cubic
-            :surface :default}}))
+            :surface :dmenu}}))
 
 # Close on keyboard focus loss (compositor sends this on click-outside)
 (reg-event-handler :keyboard-leave
@@ -166,11 +166,11 @@
                    (put :dmenu/query new-query)
                    (put :dmenu/selected (clamp selected 0
                                           (max 0 (- (length new-results) 1)))))
-           :render :default})
+           :render :dmenu})
 
         (and (= sym "u") (info :ctrl))
         {:db (-> db (put :dmenu/query "") (put :dmenu/selected 0))
-         :render :default}
+         :render :dmenu}
 
         (and (= sym "w") (info :ctrl))
         (let [new-query (do
@@ -185,16 +185,16 @@
                    (put :dmenu/query new-query)
                    (put :dmenu/selected (clamp selected 0
                                           (max 0 (- (length new-results) 1)))))
-           :render :default})
+           :render :dmenu})
 
         (or (= sym "Up") (and (= sym "p") (info :ctrl)) (and (= sym "k") (info :ctrl)))
         {:db (put db :dmenu/selected (max 0 (- selected 1)))
-         :render :default}
+         :render :dmenu}
 
         (or (= sym "Down") (and (= sym "n") (info :ctrl)) (and (= sym "j") (info :ctrl)))
         {:db (put db :dmenu/selected (min (max 0 (- result-count 1))
                                            (+ selected 1)))
-         :render :default}
+         :render :dmenu}
 
         # Regular text input
         (and (> (length text) 0) (not (info :ctrl)) (not (info :alt)) (not (info :super)))
@@ -204,7 +204,7 @@
                    (put :dmenu/query new-query)
                    (put :dmenu/selected (clamp selected 0
                                           (max 0 (- (length new-results) 1)))))
-           :render :default})))))))
+           :render :dmenu})))))))
 
 # --- Pointer handling ---
 
@@ -231,8 +231,8 @@
       (cond
         (= dir "up")
         {:db (put db :dmenu/selected (max 0 (- selected 1)))
-         :render :default}
+         :render :dmenu}
         (= dir "down")
         {:db (put db :dmenu/selected (min (max 0 (- result-count 1))
                                            (+ selected 1)))
-         :render :default}))))
+         :render :dmenu}))))

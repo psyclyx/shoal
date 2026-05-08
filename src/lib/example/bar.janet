@@ -341,4 +341,8 @@
       (= id "title")
       {:dispatch [:wm/focus (if (= dir "up") "prev" "next")]})))
 
-(reg-view bar-view)
+(reg-surface :default
+  {:per-output true
+   :anchor {:bottom true :left true :right true}
+   :exclusive-zone BAR-H}
+  bar-view)

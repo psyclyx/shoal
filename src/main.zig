@@ -245,8 +245,8 @@ var layout: Layout = undefined;
 var frame_clock: animation.FrameClock = animation.FrameClock.init();
 var dispatch: janet.Dispatch = undefined;
 
-// Default surface config (for dmenu mode or when no surfaces registered)
-const DefaultSurfaceConfig = struct {
+// Surface configuration parsed from Janet (for both load-time and dynamic).
+const SurfaceConfig = struct {
     const InputRegion = enum { default, empty };
 
     layer: config_mod.Config.Layer = .top,
@@ -258,8 +258,9 @@ const DefaultSurfaceConfig = struct {
     namespace: [:0]const u8 = "shoal",
     keyboard_interactivity: config_mod.Config.KeyboardInteractivity = .none,
     input_region: InputRegion = .default,
+    per_output: bool = false,
 };
-var default_surface_config: DefaultSurfaceConfig = .{};
+var default_surface_config: SurfaceConfig = .{};
 
 fn monotonicMillis(io: std.Io) i64 {
     const ns = std.Io.Clock.awake.now(io).nanoseconds;
@@ -352,9 +353,9 @@ pub fn main(init: std.process.Init) !void {
     const surface_configs = dispatch.getSurfaceConfigs();
     const has_surfaces = surface_configs != null and janet.c.janet_checktype(surface_configs.?, janet.c.JANET_ARRAY) != 0;
 
-    // If no surfaces registered and not dmenu mode, create a default surface
     if (!has_surfaces and !cli_args.dmenu) {
-        log.info("no surfaces registered, creating default surface", .{});
+        log.info("no surfaces registered; exiting", .{});
+        return;
     }
 
     const display = try wl.Display.connect(null);
@@ -375,48 +376,40 @@ pub fn main(init: std.process.Init) !void {
 
     if (surface_count == 0) return error.NoOutputs;
 
-    // Create surfaces
+    // Create surfaces from the Janet surface registry. Per-output surfaces
+    // populate the per-output slots claimed during wl_output binding;
+    // single-instance surfaces append after that range.
+    const output_slot_count = surface_count;
     if (cli_args.dmenu) {
         // dmenu mode: single surface, compositor picks the focused output
-        surfaces[0] = .{};
-        surface_count = 1;
-        createLayerSurface(&surfaces[0], comp, ls, null, default_surface_config);
+        surfaces[output_slot_count] = .{};
+        surface_count = output_slot_count + 1;
+        createLayerSurface(&surfaces[output_slot_count], comp, ls, null, "dmenu", default_surface_config);
     } else if (has_surfaces) {
-        // Create surfaces from Janet registry
         const configs_arr = janet.c.janet_unwrap_array(surface_configs.?);
         const count = configs_arr.*.count;
         for (0..@as(usize, @intCast(count))) |i| {
-            if (surface_count >= MAX_SURFACES) break;
             const cfg_val = configs_arr.*.data[@intCast(i)];
             if (janet.c.janet_checktype(cfg_val, janet.c.JANET_TABLE) == 0) continue;
 
-            // Parse config from Janet
+            const name_val = janet.janetGet(cfg_val, janet.kw("name"));
+            if (janet.c.janet_checktype(name_val, janet.c.JANET_KEYWORD) == 0) continue;
+            const name_str = std.mem.span(janet.c.janet_unwrap_keyword(name_val));
+
             const surf_cfg = parseJanetSurfaceConfig(cfg_val);
 
-            // For :default surface, create on all outputs
-            if (janet.c.janet_checktype(janet.janetGet(cfg_val, janet.kw("name")), janet.c.JANET_KEYWORD) != 0) {
-                const name = janet.c.janet_unwrap_keyword(janet.janetGet(cfg_val, janet.kw("name")));
-                const name_str = std.mem.span(name);
-                if (std.mem.eql(u8, name_str, "default")) {
-                    // Create on all outputs
-                    for (surfaces[0..surface_count]) |*surf| {
-                        if (surf.output != null) {
-                            createLayerSurface(surf, comp, ls, surf.output, surf_cfg);
-                        }
+            if (surf_cfg.per_output) {
+                for (surfaces[0..output_slot_count]) |*surf| {
+                    if (surf.output != null) {
+                        createLayerSurface(surf, comp, ls, surf.output, name_str, surf_cfg);
                     }
-                    continue;
                 }
+            } else {
+                if (surface_count >= MAX_SURFACES) break;
+                surfaces[surface_count] = .{};
+                createLayerSurface(&surfaces[surface_count], comp, ls, null, name_str, surf_cfg);
+                surface_count += 1;
             }
-
-            // Named surface: single output (compositor chooses)
-            surfaces[surface_count] = .{};
-            createLayerSurface(&surfaces[surface_count], comp, ls, null, surf_cfg);
-            surface_count += 1;
-        }
-    } else {
-        // Default surface on all outputs
-        for (surfaces[0..surface_count]) |*surf| {
-            createLayerSurface(surf, comp, ls, surf.output, default_surface_config);
         }
     }
 
@@ -485,8 +478,18 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    // Make first surface current for subsystem init
-    if (!surfaces[0].makeCurrent()) return error.EGLMakeCurrentFailed;
+    // Make first valid surface current for subsystem init.
+    // Per-output slots without a layer-shell surface are skipped.
+    {
+        var any_current = false;
+        for (surfaces[0..surface_count]) |*surf| {
+            if (surf.egl_surface != c.EGL_NO_SURFACE and surf.makeCurrent()) {
+                any_current = true;
+                break;
+            }
+        }
+        if (!any_current) return error.EGLMakeCurrentFailed;
+    }
 
     // Initialize subsystems
     renderer = try Renderer.init(allocator);
@@ -788,9 +791,7 @@ fn markAllDirty() void {
 }
 
 fn markDefaultDirty() void {
-    for (surfaces[0..surface_count]) |*surf| {
-        if (surf.view_name_str == null) markSurfaceDirty(surf);
-    }
+    markNamedDirty("default");
 }
 
 fn markDynamicDirty() void {
@@ -1223,7 +1224,7 @@ fn parseJanetKI(spec: janet.Janet) ?Config.KeyboardInteractivity {
     return null;
 }
 
-fn parseJanetInputRegion(spec: janet.Janet) ?DefaultSurfaceConfig.InputRegion {
+fn parseJanetInputRegion(spec: janet.Janet) ?SurfaceConfig.InputRegion {
     const val = janet.janetGet(spec, janet.kw("input-region"));
     if (janet.c.janet_checktype(val, janet.c.JANET_KEYWORD) == 0) return null;
     const name = std.mem.span(janet.c.janet_unwrap_keyword(val));
@@ -1270,7 +1271,7 @@ fn janetIntField(collection: janet.Janet, key: [:0]const u8) i32 {
     return @intFromFloat(janet.c.janet_unwrap_number(val));
 }
 
-fn parseJanetSurfaceConfig(spec: janet.Janet) DefaultSurfaceConfig {
+fn parseJanetSurfaceConfig(spec: janet.Janet) SurfaceConfig {
     return .{
         .layer = parseJanetLayer(spec) orelse .top,
         .anchor = parseJanetAnchor(spec),
@@ -1280,10 +1281,11 @@ fn parseJanetSurfaceConfig(spec: janet.Janet) DefaultSurfaceConfig {
         .margin = parseJanetMargin(spec),
         .keyboard_interactivity = parseJanetKI(spec) orelse .none,
         .input_region = parseJanetInputRegion(spec) orelse .default,
+        .per_output = janetBoolField(spec, "per-output"),
     };
 }
 
-fn applyInputRegion(comp: *wl.Compositor, wl_surface: *wl.Surface, input_region: DefaultSurfaceConfig.InputRegion) void {
+fn applyInputRegion(comp: *wl.Compositor, wl_surface: *wl.Surface, input_region: SurfaceConfig.InputRegion) void {
     switch (input_region) {
         .default => {},
         .empty => {
@@ -1302,7 +1304,8 @@ fn createLayerSurface(
     comp: *wl.Compositor,
     ls: *zwlr.LayerShellV1,
     output: ?*wl.Output,
-    cfg: DefaultSurfaceConfig,
+    name_str: ?[:0]const u8,
+    cfg: SurfaceConfig,
 ) void {
     surf.wl_surface = comp.createSurface() catch return;
     surf.layer_surface = ls.getLayerSurface(
@@ -1311,6 +1314,8 @@ fn createLayerSurface(
         wlLayer(cfg.layer),
         cfg.namespace,
     ) catch return;
+
+    if (name_str) |n| surf.view_name_str = n;
 
     const ls_surf = surf.layer_surface.?;
     const initial_h: u32 = if (cfg.height == 0) 48 else cfg.height;

@@ -11,4 +11,4 @@
     [:text {:color [248 248 242 255] :size 20}
       (sub :clock/time)]])
 
-(reg-view minimal-view)
+(reg-surface :default {} minimal-view)
