@@ -273,7 +273,8 @@ pub fn main(init: std.process.Init) !void {
     defer janet.deinit();
 
     dispatch = janet.createDispatch();
-    try dispatch.initBoot(init.io, init.environ_map, theme_mod.default());
+    const theme = config_mod.loadTheme(allocator, null);
+    try dispatch.initBoot(init.io, init.environ_map, theme);
     dispatch.setScriptArgs(cli_args.script_args);
     dispatch.initFileReader(init.io);
     defer dispatch.deinitFileReader();
