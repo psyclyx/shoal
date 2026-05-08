@@ -216,10 +216,12 @@ var prev_hover_strs: [MAX_HOVER_IDS][MAX_HOVER_ID_LEN]u8 = [_][MAX_HOVER_ID_LEN]
 var prev_hover_lens: [MAX_HOVER_IDS]usize = [_]usize{0} ** MAX_HOVER_IDS;
 var prev_hover_count: usize = 0;
 
-// Per-output surfaces (static) + dynamic surfaces
+// Surfaces array layout:
+//   [0..output_slot_count)         per-output slots (one per wl_output)
+//   [output_slot_count..surface_count)  single-instance surfaces, destroyable via fx
 var surfaces: [MAX_SURFACES]Surface = [_]Surface{.{}} ** MAX_SURFACES;
 var surface_count: usize = 0;
-var static_surface_count: usize = 0;
+var output_slot_count: usize = 0;
 
 // Shared EGL
 var egl_display: c.EGLDisplay = c.EGL_NO_DISPLAY;
@@ -333,10 +335,10 @@ pub fn main(init: std.process.Init) !void {
 
     if (surface_count == 0) return error.NoOutputs;
 
-    // Create surfaces from the Janet surface registry. Per-output surfaces
-    // populate the per-output slots claimed during wl_output binding;
-    // single-instance surfaces append after that range.
-    const output_slot_count = surface_count;
+    // Slots [0..surface_count) are per-output surfaces (claimed during
+    // wl_output binding). Single-instance surfaces append above this line
+    // and are destroyable via :surface :destroy fx.
+    output_slot_count = surface_count;
     const configs_arr = janet.c.janet_unwrap_array(surface_configs.?);
     const count = configs_arr.*.count;
     for (0..@as(usize, @intCast(count))) |i| {
@@ -457,9 +459,7 @@ pub fn main(init: std.process.Init) !void {
     layout = try Layout.init(allocator, &text_renderer, &renderer);
     defer layout.deinit(allocator);
 
-    static_surface_count = surface_count;
-
-    log.info("shoal running on {d} output(s)", .{surface_count});
+    log.info("shoal running with {d} surface(s) across {d} output slot(s)", .{ surface_count, output_slot_count });
 
     // Force initial render — request frame callback BEFORE render so the
     // callback is associated with this commit (wl_surface.frame takes effect
@@ -673,6 +673,14 @@ pub fn main(init: std.process.Init) !void {
         });
         processSurfaceRequests();
         processShmRenderRequests();
+
+        // No surfaces left and nothing queued — natural one-shot exit.
+        if (liveSurfaceCount() == 0 and dispatch.queue_count == 0) {
+            log.info("no surfaces remain; exiting", .{});
+            running = false;
+            break;
+        }
+
         const invalidation_start_ns = trace.nowNs();
         processRenderInvalidations();
         trace.log("main.loop-end loop={d} spawn_ready={d} ipc_ready={d} total_ms={d:.3} invalidation_ms={d:.3}", .{
@@ -759,7 +767,7 @@ fn markDefaultDirty() void {
 }
 
 fn markDynamicDirty() void {
-    for (surfaces[static_surface_count..surface_count]) |*surf| {
+    for (surfaces[output_slot_count..surface_count]) |*surf| {
         markSurfaceDirty(surf);
     }
 }
@@ -817,6 +825,14 @@ fn processRenderInvalidations() void {
 // Dynamic surface lifecycle
 // ---------------------------------------------------------------------------
 
+fn liveSurfaceCount() usize {
+    var n: usize = 0;
+    for (surfaces[0..surface_count]) |*s| {
+        if (s.wl_surface != null) n += 1;
+    }
+    return n;
+}
+
 fn processSurfaceRequests() void {
     const requests = dispatch.drainSurfaceRequests();
     trace.log("surface.requests-drain count={d}", .{requests.len});
@@ -870,7 +886,7 @@ fn createDynamicSurface(spec: janet.Janet) void {
 
     // Check for duplicate name
     const name_str = std.mem.span(jc.janet_unwrap_keyword(name_val));
-    for (surfaces[static_surface_count..surface_count]) |*existing| {
+    for (surfaces[output_slot_count..surface_count]) |*existing| {
         if (existing.is_dynamic and existing.view_name_str != null) {
             const existing_name: []const u8 = existing.view_name_str.?;
             if (std.mem.eql(u8, existing_name, name_str)) {
@@ -944,7 +960,7 @@ fn destroyDynamicSurface(name_val: janet.Janet) void {
 
     const name_str = std.mem.span(jc.janet_unwrap_keyword(name_val));
 
-    for (surfaces[static_surface_count..surface_count], static_surface_count..surface_count) |*surf, idx| {
+    for (surfaces[output_slot_count..surface_count], output_slot_count..surface_count) |*surf, idx| {
         if (surf.is_dynamic and surf.view_name_str != null) {
             const surf_name: []const u8 = surf.view_name_str.?;
             if (std.mem.eql(u8, surf_name, name_str)) {
