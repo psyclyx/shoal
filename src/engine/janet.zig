@@ -5,6 +5,7 @@ const jutil = @import("jutil.zig");
 const spawn_mod = @import("spawn.zig");
 const ipc_mod = @import("ipc.zig");
 const fileio = @import("fileio.zig");
+const stdin_mod = @import("stdin.zig");
 const theme_mod = @import("theme.zig");
 const trace = @import("trace.zig");
 const log = std.log.scoped(.janet);
@@ -83,6 +84,7 @@ const fx_order = [_][:0]const u8{
     "spawn",
     "exec",
     "async-slurp",
+    "async-stdin",
     "ipc",
     "surface",
     "render-to-shm",
@@ -146,6 +148,9 @@ pub const Dispatch = struct {
 
     // Async file reader (worker thread)
     file_reader: ?fileio.AsyncReader = null,
+
+    // Streaming stdin reader (line-by-line, no worker thread)
+    stdin_reader: ?stdin_mod.StdinReader = null,
 
     // Surface lifecycle requests (processed by main.zig)
     surface_requests: [MAX_SURFACE_REQUESTS]Janet = undefined,
@@ -431,6 +436,8 @@ pub const Dispatch = struct {
                 self.ipcs.handleFx(fx_val, self.eventSink());
             } else if (std.mem.eql(u8, fx_name, "async-slurp")) {
                 self.handleAsyncSlurpFx(fx_val);
+            } else if (std.mem.eql(u8, fx_name, "async-stdin")) {
+                self.handleAsyncStdinFx(fx_val);
             } else if (std.mem.eql(u8, fx_name, "surface")) {
                 self.enqueueSurfaceRequest(fx_val);
             } else if (std.mem.eql(u8, fx_name, "render-to-shm")) {
@@ -1111,6 +1118,37 @@ pub const Dispatch = struct {
     pub fn getFileReaderPollFd(self: *Dispatch) ?std.posix.fd_t {
         if (self.file_reader) |*r| return r.getPollFd();
         return null;
+    }
+
+    // -------------------------------------------------------------------
+    // Streaming stdin
+    // -------------------------------------------------------------------
+
+    pub fn initStdinReader(self: *Dispatch, io: std.Io) void {
+        self.stdin_reader = stdin_mod.StdinReader.init(io);
+    }
+
+    pub fn deinitStdinReader(self: *Dispatch) void {
+        if (self.stdin_reader) |*r| r.deinit();
+        self.stdin_reader = null;
+    }
+
+    pub fn onStdinReadable(self: *Dispatch) void {
+        if (self.stdin_reader) |*r| r.onReadable(self.eventSink());
+    }
+
+    pub fn getStdinPollFd(self: *Dispatch) ?std.posix.fd_t {
+        if (self.stdin_reader) |*r| return r.getPollFd();
+        return null;
+    }
+
+    /// Handle :async-stdin fx. Truthy value starts streaming stdin lines.
+    /// :stdin/line "..." is dispatched per line; :stdin/eof on close.
+    fn handleAsyncStdinFx(self: *Dispatch, val: Janet) void {
+        const enabled = c.janet_checktype(val, c.JANET_BOOLEAN) != 0 and
+            c.janet_unwrap_boolean(val) != 0;
+        if (!enabled) return;
+        if (self.stdin_reader) |*r| r.start();
     }
 
     /// Build an EventSink that routes enqueue/timer calls back to this Dispatch.

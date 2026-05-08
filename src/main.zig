@@ -285,6 +285,8 @@ pub fn main(init: std.process.Init) !void {
     dispatch.setScriptArgs(cli_args.script_args);
     dispatch.initFileReader(init.io);
     defer dispatch.deinitFileReader();
+    dispatch.initStdinReader(init.io);
+    defer dispatch.deinitStdinReader();
     defer dispatch.deinitDispatch();
 
     // Set up load path: config dirs, then sholib
@@ -568,6 +570,13 @@ pub fn main(init: std.process.Init) !void {
             nfds += 1;
             break :blk idx;
         } else null;
+        // Streaming stdin reader
+        const stdin_fd_idx: ?usize = if (dispatch.getStdinPollFd()) |fd| blk: {
+            poll_fds[nfds] = .{ .fd = fd, .events = std.posix.POLL.IN, .revents = 0 };
+            const idx = nfds;
+            nfds += 1;
+            break :blk idx;
+        } else null;
         const spawn_fd_start = nfds;
         nfds += dispatch.fillSpawnPollFds(poll_fds[nfds..]);
         const ipc_fd_start = nfds;
@@ -647,6 +656,13 @@ pub fn main(init: std.process.Init) !void {
                     poll_fds[idx].revents,
                     trace.elapsedMs(start_ns),
                 });
+            }
+        }
+
+        // Process streaming stdin
+        if (stdin_fd_idx) |idx| {
+            if (poll_fds[idx].revents & (std.posix.POLL.IN | std.posix.POLL.HUP) != 0) {
+                dispatch.onStdinReadable();
             }
         }
 
