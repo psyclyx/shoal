@@ -13,6 +13,8 @@
 (def SPARKLINE-W 4)     # Sparkline bar width
 (def SPARKLINE-GAP 2)   # Gap between sparkline bars
 (def N-NET-SPARK 15)    # 15s network window sampled at visible bar midpoints
+(def NET-SPARK-W 3)     # Network spark bar width
+(def NET-SPARK-GAP 3)   # Gap between network spark bars
 (def NET-SPARK-HEADROOM 0.78) # Bars fade from this line to the edge
 
 # --- Section ---
@@ -92,8 +94,8 @@
    Values are linear normalized rates; values above 1 fade into the edge."
   [rx-vals tx-vals rx-color tx-color &opt opts]
   (def h (get opts :height 38))
-  (def bar-w (get opts :bar-width SPARKLINE-W))
-  (def gap (get opts :gap SPARKLINE-GAP))
+  (def bar-w (get opts :bar-width NET-SPARK-W))
+  (def gap (get opts :gap NET-SPARK-GAP))
   (def fade-start (get opts :fade-start NET-SPARK-HEADROOM))
   (def n (max (length rx-vals) (length tx-vals)))
   (def skew-pad (math/ceil (* SLANT (/ h 2))))

@@ -229,12 +229,13 @@
   (let [net (sub :net)
         rx (get net :rx-rate 0)
         tx (get net :tx-rate 0)
-        spark (net-spark-values net N-NET-SPARK
-                {:bar-width SPARKLINE-W :gap SPARKLINE-GAP})
-        rx-values (spark :rx)
-        tx-values (spark :tx)]
+        spark (net-spark-values net N-NET-SPARK)
+        scroll (bar-scroll (get net :tick-clock 0) NET-SAMPLE-SEC)
+        rx-values (scroll-bars (spark :rx) scroll)
+        tx-values (scroll-bars (spark :tx) scroll)]
     (section net-bg {}
-      (network-spark rx-values tx-values (tint green 205) (tint cyan 205) {})
+      (network-spark rx-values tx-values (tint green 205) (tint cyan 205)
+                     {:gap NET-SPARK-GAP})
       [:col {:gap 1}
         [:text {:color green :size 13} (string/format "rx %s" (fmt-rate rx))]
         [:text {:color cyan :size 13} (string/format "tx %s" (fmt-rate tx))]])))

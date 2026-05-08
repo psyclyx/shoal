@@ -1028,7 +1028,7 @@ fn appendNetSparkHalfInstances(
     upper: bool,
     color: [4]f32,
 ) !void {
-    if (value <= 0 or half_h <= 0 or color[3] <= 0) return;
+    if (value < 0 or half_h <= 0 or color[3] <= 0) return;
 
     const bar_h = @max(@max(min_bar_height, 0.0), value * half_h);
     const fade_start_px = std.math.clamp(fade_start, 0.1, 0.98) * half_h;
@@ -1466,7 +1466,7 @@ fn appendSparkColumnHalfPaths(
     fade_start: f32,
     upper: bool,
 ) !void {
-    if (value <= 0 or half_h <= 0) return;
+    if (value < 0 or half_h <= 0) return;
 
     const bar_h = @max(@max(min_bar_height, 0.0), value * half_h);
     const fade_start_px = std.math.clamp(fade_start, 0.1, 0.98) * half_h;
