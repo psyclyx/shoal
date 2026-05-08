@@ -121,7 +121,7 @@ let
     };
 
     Service = {
-      ExecStart = "${lib.getExe cfg.package} run ${config.xdg.configHome}/shoal/${name}/main.janet";
+      ExecStart = "${lib.getExe cfg.package} run ${config.xdg.configHome}/shoal/${name}";
       Environment = lib.mapAttrsToList (k: v: "${k}=${v}") conf.systemd.environment;
       Restart = conf.systemd.restart;
       RestartSec = conf.systemd.restartSec;

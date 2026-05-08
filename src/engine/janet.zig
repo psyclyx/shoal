@@ -1323,15 +1323,25 @@ pub const Dispatch = struct {
         return true;
     }
 
-    /// Try to load a Janet file from disk. Returns true if loaded successfully.
-    pub fn loadFileFromDisk(self: *Dispatch, path: []const u8) bool {
+    /// Try to load a Janet config from disk. If path is a directory, loads
+    /// every *.janet file inside it alphabetically; otherwise loads the
+    /// single file. Returns true if at least one file loaded.
+    pub fn loadConfigPath(self: *Dispatch, path: []const u8) bool {
+        if (std.Io.Dir.openDirAbsolute(self.io, path, .{ .iterate = true })) |dir_handle| {
+            var dir = dir_handle;
+            defer dir.close(self.io);
+            return self.loadDirContents(path, &dir) > 0;
+        } else |_| {}
+        return self.loadJanetFile(path);
+    }
+
+    fn loadJanetFile(self: *Dispatch, path: []const u8) bool {
         if (path.len == 0 or path.len >= 4095) return false;
 
         var path_z: [4096]u8 = undefined;
         @memcpy(path_z[0..path.len], path);
         path_z[path.len] = 0;
 
-        // Read up to 1MB
         var content_buf: [1 << 20]u8 = undefined;
         const content = std.Io.Dir.cwd().readFile(self.io, path, &content_buf) catch return false;
         const n = content.len;
@@ -1346,6 +1356,40 @@ pub const Dispatch = struct {
         }
         log.info("loaded {s}", .{path_z[0..path.len :0]});
         return true;
+    }
+
+    /// Load every *.janet file in `dir` alphabetically. Returns count loaded.
+    fn loadDirContents(self: *Dispatch, dir_path: []const u8, dir: *std.Io.Dir) usize {
+        var names: [64][]const u8 = undefined;
+        var name_storage: [64][256]u8 = undefined;
+        var count: usize = 0;
+
+        var iter = dir.iterate();
+        while (iter.next(self.io) catch null) |entry| {
+            const name = entry.name;
+            if (!std.mem.endsWith(u8, name, ".janet")) continue;
+            if (count >= 64) break;
+            const len = @min(name.len, 255);
+            @memcpy(name_storage[count][0..len], name[0..len]);
+            names[count] = name_storage[count][0..len];
+            count += 1;
+        }
+        if (count == 0) return 0;
+
+        std.mem.sortUnstable([]const u8, names[0..count], {}, struct {
+            fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+                return std.mem.order(u8, a, b) == .lt;
+            }
+        }.lessThan);
+
+        var path_buf: [4096]u8 = undefined;
+        var loaded: usize = 0;
+        for (names[0..count]) |name| {
+            const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, name }) catch continue;
+            if (self.loadJanetFile(full_path)) loaded += 1;
+        }
+        log.info("loaded {d} file(s) from {s}", .{ loaded, dir_path });
+        return loaded;
     }
 
     /// Set up the Janet load path: config dirs first, then sholib.
@@ -1423,44 +1467,7 @@ pub const Dispatch = struct {
 
         var dir = std.Io.Dir.openDirAbsolute(self.io, dir_path, .{ .iterate = true }) catch return 0;
         defer dir.close(self.io);
-
-        // Collect .janet filenames, sort alphabetically
-        var names: [64][]const u8 = undefined;
-        var name_storage: [64][256]u8 = undefined;
-        var count: usize = 0;
-
-        var iter = dir.iterate();
-        while (iter.next(self.io) catch null) |entry| {
-            const name = entry.name;
-            if (!std.mem.endsWith(u8, name, ".janet")) continue;
-            if (count >= 64) break;
-            const len = @min(name.len, 255);
-            @memcpy(name_storage[count][0..len], name[0..len]);
-            names[count] = name_storage[count][0..len];
-            count += 1;
-        }
-
-        if (count == 0) return 0;
-
-        // Sort alphabetically
-        std.mem.sortUnstable([]const u8, names[0..count], {}, struct {
-            fn lessThan(_: void, a: []const u8, b: []const u8) bool {
-                return std.mem.order(u8, a, b) == .lt;
-            }
-        }.lessThan);
-
-        // Load each file
-        var path_buf: [4096]u8 = undefined;
-        var loaded: usize = 0;
-        for (names[0..count]) |name| {
-            const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, name }) catch continue;
-            if (self.loadFileFromDisk(full_path)) {
-                loaded += 1;
-            }
-        }
-
-        log.info("loaded {d} user config file(s) from {s}", .{ loaded, dir_path });
-        return loaded;
+        return self.loadDirContents(dir_path, &dir);
     }
 
     /// Get all registered surface configs from Janet.

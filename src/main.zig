@@ -298,7 +298,7 @@ pub fn main(init: std.process.Init) !void {
                 const parts = [_][]const u8{ cwd, path };
                 break :blk std.fs.path.resolve(allocator, &parts) catch path;
             };
-            _ = dispatch.loadFileFromDisk(abs_path);
+            _ = dispatch.loadConfigPath(abs_path);
         }
     } else {
         // Auto-discover config files in ~/.config/shoal/

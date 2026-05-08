@@ -45,9 +45,10 @@ declares at least one surface. Run one with:
 
 ```sh
 shoal run path/to/script.janet [args...]
+shoal run path/to/dir [args...]      # loads every *.janet inside, alphabetically
 ```
 
-Args after the script path are exposed as `script-args`. Three examples
+Args after the path are exposed as `script-args`. Three examples
 ship in `src/lib/example/`:
 
 | Script | Description |
