@@ -183,10 +183,10 @@
   (let [cpu (sub :cpu)
         pct (get cpu :percent 0)
         bars (or (get cpu :bars) (array/new-filled (+ N-SPARKLINE 1) 0))
-        scroll (bar-scroll (get cpu :tick-clock 0) 2.0)
-        values (scroll-bars bars scroll)]
+        scroll (bar-scroll (get cpu :tick-clock 0) 2.0)]
     (section cpu-bg {}
-      (sparkline-bars values cpu-bar-color {})
+      (sparkline bars {:colors (map cpu-bar-color bars)
+                       :scroll scroll})
       (icon-cpu (local-pct-color pct)))))
 
 (defn mem-view []
@@ -212,12 +212,10 @@
         rx (get net :rx-rate 0)
         tx (get net :tx-rate 0)
         spark (net-spark-values net N-NET-SPARK)
-        scroll (bar-scroll (get net :tick-clock 0) NET-SAMPLE-SEC)
-        rx-values (scroll-bars (spark :rx) scroll)
-        tx-values (scroll-bars (spark :tx) scroll)]
+        scroll (bar-scroll (get net :tick-clock 0) NET-SAMPLE-SEC)]
     (section net-bg {}
-      (network-spark rx-values tx-values (tint green 205) (tint cyan 205)
-                     {:gap NET-SPARK-GAP})
+      (network-spark (spark :rx) (spark :tx) (tint green 205) (tint cyan 205)
+                     {:scroll scroll})
       [:col {:gap 1}
         [:text {:color green :size 13} (string/format "rx %s" (fmt-rate rx))]
         [:text {:color cyan :size 13} (string/format "tx %s" (fmt-rate tx))]])))

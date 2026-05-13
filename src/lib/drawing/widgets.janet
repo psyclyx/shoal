@@ -47,62 +47,56 @@
     [:row {:w 8 :h fill-h :bg bar-color :skew SLANT}]])
 
 # --- Sparkline helpers ---
+#
+# Bars slide physically left as scroll goes 0 → 1; the leftmost bar
+# fades out as it leaves and the rightmost fades in. Pass the raw N+1
+# sample buffer plus the current scroll fraction.
 
-(defn scroll-bars
-  "Interpolate N-SPARKLINE values from N+1 buffer with fractional scroll offset f."
-  [bars f]
-  (seq [i :range [0 N-SPARKLINE]
-        :let [a (get bars i 0)
-              b (get bars (+ i 1) 0)]]
-    (+ (* (- 1 f) a) (* f b))))
+(defn sparkline
+  "Single-series sparkline. Bars grow from the bottom of the row.
+   Bars slide left as scroll goes 0 → 1.
 
-(defn sparkline-bars
-  "Render N-SPARKLINE parallelogram bars with varying heights and colors.
-   opts can include :height (default 38)."
-  [values color-fn &opt opts]
+   :colors  optional per-bar color array (parallel to values)
+   :color   fallback color when :colors not given
+   :scroll  fractional scroll offset 0 → 1 (default 0)
+   :bar-width, :bar-gap, :height, :skew"
+  [values &opt opts]
+  (default opts {})
   (def h (get opts :height 38))
-  (def skew-pad (math/ceil (* SLANT h)))
-  [:row {:h h :align-y :bottom :gap SPARKLINE-GAP :pad [0 skew-pad 0 0]}
-    ;(seq [i :range [0 N-SPARKLINE]
-           :let [v (max 0 (min 1 (get values i 0)))
-                 bar-h (max MIN-BAR-H (math/round (* h v)))]]
-      [:row {:w SPARKLINE-W :h bar-h :bg (color-fn v) :skew SLANT}])])
-
-(defn sparkline-mirror
-  "Mirrored parallelogram bars: rx grows up from center, tx grows down.
-   Per-bar column sized to fit the / offset.
-   opts can include :height (default 38)."
-  [rx-vals tx-vals rx-color-fn tx-color-fn &opt opts]
-  (def h (get opts :height 38))
-  (def half-h (math/floor (/ h 2)))
-  (def skew-pad (math/ceil (* SLANT h)))
-  (def mirror-offset (math/ceil (* SLANT half-h)))
-  [:row {:h h :gap SPARKLINE-GAP :pad [0 skew-pad 0 mirror-offset]}
-    ;(seq [i :range [0 N-SPARKLINE]
-           :let [rv (max 0 (min 1 (get rx-vals i 0)))
-                 tv (max 0 (min 1 (get tx-vals i 0)))
-                 rx-h (max MIN-BAR-H (math/round (* half-h rv)))
-                 tx-h (max MIN-BAR-H (math/round (* half-h tv)))
-                 rx-offset (math/floor (* SLANT tx-h))]]
-      [:col {:w (+ SPARKLINE-W rx-offset) :h h :align-y :center}
-        [:row {:pad [0 0 0 rx-offset]}
-          [:row {:w SPARKLINE-W :h rx-h :bg (rx-color-fn rv) :skew SLANT}]]
-        [:row {:w SPARKLINE-W :h tx-h :bg (tx-color-fn tv) :skew SLANT}]])])
+  (def bar-w (get opts :bar-width SPARKLINE-W))
+  (def gap (get opts :bar-gap SPARKLINE-GAP))
+  (def skew (get opts :skew SLANT))
+  (def n (length values))
+  (def skew-pad (math/ceil (* (math/abs skew) h)))
+  (def w (+ (* n bar-w) (* (max 0 (- n 1)) gap) (* 2 skew-pad)))
+  [:sparkline (merge {:w w :h h
+                      :values values
+                      :scroll (get opts :scroll 0)
+                      :bar-width bar-w :bar-gap gap
+                      :skew skew}
+                     (if-let [colors (get opts :colors)]
+                       {:colors colors}
+                       {:color (get opts :color (theme :text))}))])
 
 (defn network-spark
   "Mirrored network spark with centered slanted bars.
-   Values are linear normalized rates; values above 1 fade into the edge."
+   rx grows up from center, tx grows down. Bars slide left as scroll
+   goes 0 → 1. Values are linear normalized rates; values above
+   fade-start fade out vertically to suggest headroom."
   [rx-vals tx-vals rx-color tx-color &opt opts]
+  (default opts {})
   (def h (get opts :height 38))
   (def bar-w (get opts :bar-width NET-SPARK-W))
-  (def gap (get opts :gap NET-SPARK-GAP))
+  (def gap (get opts :bar-gap (get opts :gap NET-SPARK-GAP)))
   (def fade-start (get opts :fade-start NET-SPARK-HEADROOM))
   (def n (max (length rx-vals) (length tx-vals)))
   (def skew-pad (math/ceil (* SLANT (/ h 2))))
   (def w (+ (* n bar-w) (* (max 0 (- n 1)) gap) (* 2 skew-pad)))
-  [:net-spark {:w w :h h
+  [:sparkline {:w w :h h
                :values rx-vals :values2 tx-vals
                :color rx-color :color2 tx-color
+               :mirror true
+               :scroll (get opts :scroll 0)
                :skew SLANT
                :bar-width bar-w :bar-gap gap
                :fade-start fade-start}])
@@ -159,17 +153,6 @@
   [:row {:gap 0 :align-y :center :skew SLANT}
     [:row {:w 4 :h 8 :bg color}]
     [:tri {:w 7 :h 13 :dir :left :color color}]])
-
-(defn icon-launcher
-  "Grid: 2x2 angled dots."
-  [color]
-  [:col {:gap 3}
-    [:row {:gap 3}
-      [:row {:w 5 :h 5 :bg color :skew SLANT}]
-      [:row {:w 5 :h 5 :bg color :skew SLANT}]]
-    [:row {:gap 3}
-      [:row {:w 5 :h 5 :bg color :skew SLANT}]
-      [:row {:w 5 :h 5 :bg color :skew SLANT}]]])
 
 # --- Minimap ---
 

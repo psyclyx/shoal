@@ -275,7 +275,7 @@
   (max NET-ZOOM-FLOOR (/ peak NET-ZOOM-HEADROOM-LINE)))
 
 (defn net-spark-values
-  "Return count+1 normalized rx/tx samples for use with scroll-bars."
+  "Return count+1 normalized rx/tx samples for the network sparkline."
   [net count &opt opts]
   (let [now (os/clock :monotonic)
         zoom (max NET-ZOOM-FLOOR (net-zoom-at net now))
