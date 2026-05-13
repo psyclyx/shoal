@@ -13,7 +13,8 @@ var kw_text: jc.Janet = undefined;
 var kw_area: jc.Janet = undefined;
 var kw_line: jc.Janet = undefined;
 var kw_tri: jc.Janet = undefined;
-var kw_net_spark: jc.Janet = undefined;
+var kw_sparkline: jc.Janet = undefined;
+var kw_colors: jc.Janet = undefined;
 var kw_w: jc.Janet = undefined;
 var kw_h: jc.Janet = undefined;
 var kw_pad: jc.Janet = undefined;
@@ -81,7 +82,7 @@ var coerced_count: usize = 0;
 // every struct and dispatching in layout.zig. All custom payloads in this
 // file MUST have `header: CustomHeader` as their first field.
 
-pub const CustomKind = enum(u32) { curve, skew_bg, triangle, net_spark };
+pub const CustomKind = enum(u32) { curve, skew_bg, triangle, sparkline };
 
 pub const CustomHeader = extern struct {
     kind: CustomKind,
@@ -89,8 +90,8 @@ pub const CustomHeader = extern struct {
 
 pub const MAX_CURVES = 16;
 pub const MAX_CURVE_VALUES = 64;
-pub const MAX_NET_SPARKS = 16;
-pub const MAX_NET_SPARK_VALUES = 64;
+pub const MAX_SPARKLINES = 16;
+pub const MAX_SPARKLINE_VALUES = 64;
 
 pub const CurveData = struct {
     header: CustomHeader = .{ .kind = .curve },
@@ -122,12 +123,14 @@ pub const TriData = struct {
     dir: renderer_mod.TriDir = .up,
 };
 
-pub const NetSparkData = struct {
-    header: CustomHeader = .{ .kind = .net_spark },
-    values: [MAX_NET_SPARK_VALUES]f32 = [_]f32{0} ** MAX_NET_SPARK_VALUES,
+pub const SparklineData = struct {
+    header: CustomHeader = .{ .kind = .sparkline },
+    values: [MAX_SPARKLINE_VALUES]f32 = [_]f32{0} ** MAX_SPARKLINE_VALUES,
     value_count: u32 = 0,
-    values2: [MAX_NET_SPARK_VALUES]f32 = [_]f32{0} ** MAX_NET_SPARK_VALUES,
+    values2: [MAX_SPARKLINE_VALUES]f32 = [_]f32{0} ** MAX_SPARKLINE_VALUES,
     value_count2: u32 = 0,
+    colors: [MAX_SPARKLINE_VALUES][4]f32 = [_][4]f32{.{ 0, 0, 0, 0 }} ** MAX_SPARKLINE_VALUES,
+    color_count: u32 = 0,
     color: [4]f32 = .{ 0, 0, 0, 0 },
     color2: [4]f32 = .{ 0, 0, 0, 0 },
     skew: f32 = 0.3,
@@ -135,6 +138,8 @@ pub const NetSparkData = struct {
     bar_gap: f32 = 2,
     min_bar_height: f32 = 2,
     fade_start: f32 = 0.78,
+    scroll: f32 = 0,
+    mirror: bool = false,
 };
 
 pub const MAX_SKEW_BGS = 256;
@@ -157,8 +162,8 @@ var skew_count: usize = 0;
 var tri_storage: [MAX_TRIS]TriData = undefined;
 var tri_count: usize = 0;
 
-var net_spark_storage: [MAX_NET_SPARKS]NetSparkData = undefined;
-var net_spark_count: usize = 0;
+var sparkline_storage: [MAX_SPARKLINES]SparklineData = undefined;
+var sparkline_count: usize = 0;
 
 var text_tweak_storage: [MAX_TEXT_TWEAKS]TextTweak = undefined;
 var text_tweak_count: usize = 0;
@@ -169,7 +174,7 @@ pub fn beginPass() void {
     curve_count = 0;
     skew_count = 0;
     tri_count = 0;
-    net_spark_count = 0;
+    sparkline_count = 0;
     text_tweak_count = 0;
 }
 
@@ -190,7 +195,8 @@ pub fn init() void {
     kw_area = janet.kw("area");
     kw_line = janet.kw("line");
     kw_tri = janet.kw("tri");
-    kw_net_spark = janet.kw("net-spark");
+    kw_sparkline = janet.kw("sparkline");
+    kw_colors = janet.kw("colors");
     kw_w = janet.kw("w");
     kw_h = janet.kw("h");
     kw_pad = janet.kw("pad");
@@ -302,8 +308,8 @@ pub fn walkHiccup(node: jc.Janet) void {
         walkCurve(true, attrs);
     } else if (janetKeywordEql(tag, kw_tri)) {
         walkTriangle(attrs);
-    } else if (janetKeywordEql(tag, kw_net_spark)) {
-        walkNetSpark(attrs);
+    } else if (janetKeywordEql(tag, kw_sparkline)) {
+        walkSparkline(attrs);
     } else {
         log.warn("unknown hiccup tag, skipping", .{});
     }
@@ -544,19 +550,19 @@ fn walkCurve(is_line: bool, attrs: jc.Janet) void {
     clay.cdefs.Clay__CloseElement();
 }
 
-fn walkNetSpark(attrs: jc.Janet) void {
-    if (net_spark_count >= MAX_NET_SPARKS) {
-        log.warn("too many net-spark elements ({d}), skipping", .{MAX_NET_SPARKS});
+fn walkSparkline(attrs: jc.Janet) void {
+    if (sparkline_count >= MAX_SPARKLINES) {
+        log.warn("too many sparkline elements ({d}), skipping", .{MAX_SPARKLINES});
         return;
     }
 
-    var data = NetSparkData{};
+    var data = SparklineData{};
 
     if (jc.janet_checktype(attrs, jc.JANET_NIL) == 0) {
         const values_val = janetAttrGet(attrs, kw_values);
         if (jc.janet_checktype(values_val, jc.JANET_NIL) == 0) {
             const items = janetIndexedSlice(values_val) orelse &[0]jc.Janet{};
-            const n: usize = @min(items.len, MAX_NET_SPARK_VALUES);
+            const n: usize = @min(items.len, MAX_SPARKLINE_VALUES);
             for (items[0..n], 0..) |item, i| {
                 data.values[i] = janetToF32(item) orelse 0;
             }
@@ -566,7 +572,7 @@ fn walkNetSpark(attrs: jc.Janet) void {
         const values2_val = janetAttrGet(attrs, kw_values2);
         if (jc.janet_checktype(values2_val, jc.JANET_NIL) == 0) {
             const items2 = janetIndexedSlice(values2_val) orelse &[0]jc.Janet{};
-            const n2: usize = @min(items2.len, MAX_NET_SPARK_VALUES);
+            const n2: usize = @min(items2.len, MAX_SPARKLINE_VALUES);
             for (items2[0..n2], 0..) |item, i| {
                 data.values2[i] = janetToF32(item) orelse 0;
             }
@@ -583,6 +589,17 @@ fn walkNetSpark(attrs: jc.Janet) void {
         if (jc.janet_checktype(color2_val, jc.JANET_NIL) == 0) {
             const col = parseColor(color2_val);
             data.color2 = .{ col[0] / 255.0, col[1] / 255.0, col[2] / 255.0, col[3] / 255.0 };
+        }
+
+        const colors_val = janetAttrGet(attrs, kw_colors);
+        if (jc.janet_checktype(colors_val, jc.JANET_NIL) == 0) {
+            const items = janetIndexedSlice(colors_val) orelse &[0]jc.Janet{};
+            const n: usize = @min(items.len, MAX_SPARKLINE_VALUES);
+            for (items[0..n], 0..) |item, i| {
+                const col = parseColor(item);
+                data.colors[i] = .{ col[0] / 255.0, col[1] / 255.0, col[2] / 255.0, col[3] / 255.0 };
+            }
+            data.color_count = @intCast(n);
         }
 
         const skew_val = janetAttrGet(attrs, kw_skew);
@@ -609,11 +626,21 @@ fn walkNetSpark(attrs: jc.Janet) void {
         if (jc.janet_checktype(min_bar_height_val, jc.JANET_NIL) == 0) {
             data.min_bar_height = @max(0.0, janetToF32(min_bar_height_val) orelse data.min_bar_height);
         }
+
+        const scroll_val = janetAttrGet(attrs, kw_scroll);
+        if (jc.janet_checktype(scroll_val, jc.JANET_NIL) == 0) {
+            data.scroll = std.math.clamp(janetToF32(scroll_val) orelse 0, 0.0, 1.0);
+        }
+
+        const mirror_val = janetAttrGet(attrs, kw_mirror);
+        if (jc.janet_checktype(mirror_val, jc.JANET_NIL) == 0) {
+            data.mirror = jc.janet_truthy(mirror_val) != 0;
+        }
     }
 
-    net_spark_storage[net_spark_count] = data;
-    const data_ptr: *anyopaque = @ptrCast(&net_spark_storage[net_spark_count]);
-    net_spark_count += 1;
+    sparkline_storage[sparkline_count] = data;
+    const data_ptr: *anyopaque = @ptrCast(&sparkline_storage[sparkline_count]);
+    sparkline_count += 1;
 
     var config = clay.ElementDeclaration{
         .custom = .{ .custom_data = data_ptr },

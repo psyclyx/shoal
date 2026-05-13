@@ -222,9 +222,9 @@ pub const Layout = struct {
                                     tri.dir,
                                 );
                             },
-                            .net_spark => {
-                                const spark: *const hiccup.NetSparkData = @ptrCast(@alignCast(ptr));
-                                self.renderer.drawNetSpark(
+                            .sparkline => {
+                                const spark: *const hiccup.SparklineData = @ptrCast(@alignCast(ptr));
+                                self.renderer.drawSparkline(
                                     bb.x,
                                     bb.y,
                                     bb.width,
@@ -235,11 +235,14 @@ pub const Layout = struct {
                                     spark.value_count2,
                                     spark.color,
                                     spark.color2,
+                                    spark.colors[0..spark.color_count],
                                     spark.skew,
                                     spark.bar_width,
                                     spark.bar_gap,
                                     spark.min_bar_height,
                                     spark.fade_start,
+                                    spark.scroll,
+                                    spark.mirror,
                                 );
                             },
                         }

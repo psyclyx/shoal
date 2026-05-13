@@ -13,8 +13,8 @@
             .hash = "zclay-0.2.2-Ej1rkP3RAACYZGzQB5NGPaqfySgKfO26NYk5Ja6Z15gC",
         },
         .snail = .{
-            .url = "https://github.com/psyclyx/snail/archive/9825c5bd654e5b9202b017fdf5946bf566cdb840.tar.gz",
-            .hash = "snail-0.4.1-vw75SE6UagBhwNwI3IRNOn1i9ehrmDJLcPup7TXS_91C",
+            .url = "https://github.com/psyclyx/snail/archive/8b066f773b0148d4f68cdc656c65a30e398fb2ea.tar.gz",
+            .hash = "snail-0.6.0-vw75SG7vbAA0zyWzczHDa1NvHuUzG-RBejqcT-HarM33",
         },
     },
     .fingerprint = 0xfdab4966dbf31d14,
