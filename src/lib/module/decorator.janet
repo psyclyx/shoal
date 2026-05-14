@@ -87,64 +87,45 @@
 
 # -- Event handlers --
 
-(defn- render-decoration [id params]
-  "Trigger FBO render into the shared mmap buffer."
-  {:render-to-shm {:view (keyword (string/format "deco-%d" id))
-                    :width (get params "width" 100)
-                    :height (get params "height" DECO-H)
-                    :stride (get params "stride")
-                    :path (get params "shm-path" "")}})
+(defn- render-spec [entry]
+  "FBO render spec for one decoration entry."
+  {:view (keyword (string/format "deco-%d" (get entry "id")))
+   :width (get entry "width" 100)
+   :height (get entry "height" DECO-H)
+   :stride (get entry "stride")
+   :path (get entry "shm-path" "")})
 
-(reg-event-handler :decoration/create
+(reg-event-handler :decoration/state
   (fn [cofx event]
     (def params (get event 1))
-    (def id (get params "id"))
+    (def entries (get params "decorations" []))
     (def db (cofx :db))
-    (def decos (get db :decorations {}))
-    (def new-decos (merge decos {id params}))
-    (reg-view (keyword (string/format "deco-%d" id)) (deco-view-for id))
-      (merge {:db (put db :decorations new-decos)
-              :render []}
-             (render-decoration id params))))
-
-(reg-event-handler :decoration/update
-  (fn [cofx event]
-    (def params (get event 1))
-    (def id (get params "id"))
-    (def db (cofx :db))
-    (def decos (get db :decorations {}))
-    (when-let [existing (get decos id)]
-      (def updated (merge existing params))
-        (merge {:db (put db :decorations (merge decos {id updated}))
-                :render []}
-               (render-decoration id updated)))))
-
-(reg-event-handler :decoration/resize
-  (fn [cofx event]
-    (def params (get event 1))
-    (def id (get params "id"))
-    (def db (cofx :db))
-    (def decos (get db :decorations {}))
-    (when-let [existing (get decos id)]
-      # Resize changes the shared buffer — tidepool recreates the memfd.
-      # The new shm-path comes in the resize params.
-      (def updated (merge existing params))
-        (merge {:db (put db :decorations (merge decos {id updated}))
-                :render []}
-               (render-decoration id updated)))))
-
-(reg-event-handler :decoration/destroy
-  (fn [cofx event]
-    (def params (get event 1))
-    (def id (get params "id"))
-    (def db (cofx :db))
-    (def decos (get db :decorations {}))
-    (def new-decos (table/clone decos))
-    (put new-decos id nil)
-      {:db (put db :decorations new-decos)
-       :render []}))
+    (def old-decos (get db :decorations {}))
+    # Index incoming entries by id.
+    (def new-decos @{})
+    (each e entries (put new-decos (get e "id") e))
+    # Register a view for every freshly-appearing id. Views read the
+    # current entry out of the db when called, so we never need to
+    # re-register on update.
+    (eachk id new-decos
+      (when (nil? (get old-decos id))
+        (reg-view (keyword (string/format "deco-%d" id)) (deco-view-for id))))
+    # Anything whose entry differs (new id, content change, or resized
+    # buffer) needs a fresh render.
+    (def renders @[])
+    (eachp [id entry] new-decos
+      (when (not (deep= entry (get old-decos id)))
+        (array/push renders (render-spec entry))))
+    (def result @{:db (put db :decorations new-decos) :render []})
+    (when (> (length renders) 0)
+      (put result :render-to-shm renders))
+    result))
 
 (reg-event-handler :tp/connected
+  (fn [cofx event]
+    {:dispatch [:decorator/register]}))
+
+(reg-event-handler :decorator/register
   (fn [cofx event]
     {:ipc {:send {:name :tidepool
                   :data (string (json/encode {"jsonrpc" "2.0" "id" 1

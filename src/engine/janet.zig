@@ -992,6 +992,24 @@ pub const Dispatch = struct {
     }
 
     fn enqueueShmRenderRequest(self: *Dispatch, val: Janet) void {
+        // Accept either a single spec or an array of specs so a snapshot
+        // handler can request renders for every changed decoration in one
+        // fx — fx composition otherwise collapses duplicate keys.
+        if (c.janet_checktype(val, c.JANET_TUPLE) != 0 or
+            c.janet_checktype(val, c.JANET_ARRAY) != 0)
+        {
+            const view = jutil.janetIndexedView(val);
+            if (view.items) |items| {
+                for (items[0..@intCast(view.len)]) |item| {
+                    self.enqueueOneShmRenderRequest(item);
+                }
+            }
+            return;
+        }
+        self.enqueueOneShmRenderRequest(val);
+    }
+
+    fn enqueueOneShmRenderRequest(self: *Dispatch, val: Janet) void {
         if (self.shm_render_request_count >= MAX_SURFACE_REQUESTS) {
             log.warn("render-to-shm request queue full", .{});
             trace.log("dispatch.shm-request-drop count={d} capacity={d}", .{ self.shm_render_request_count, MAX_SURFACE_REQUESTS });

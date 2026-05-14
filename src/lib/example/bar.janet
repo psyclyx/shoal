@@ -20,6 +20,7 @@
 (use "module/sysinfo")
 (use "module/launcher")
 (use "module/osd")
+(use "module/decorator")
 
 # Load drawing helpers
 (use "stdlib/util")

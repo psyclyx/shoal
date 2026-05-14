@@ -75,15 +75,6 @@
     "focus:changed" (tp/apply-title db params)
     db))
 
-(defn- tp/handle-decoration-event [method params]
-  "Dispatch decoration events to the decorator module."
-  (case method
-    "decoration:create"  {:dispatch [:decoration/create params]}
-    "decoration:update"  {:dispatch [:decoration/update params]}
-    "decoration:resize"  {:dispatch [:decoration/resize params]}
-    "decoration:destroy" {:dispatch [:decoration/destroy params]}
-    nil))
-
 # -- IPC connection --
 
 (reg-event-handler :init
@@ -121,7 +112,7 @@
     (def payload (get event 1))
     (when payload
       (var db (cofx :db))
-      (var extra-fx nil)
+      (var deco-params nil)
       (try
         (do
           (def data (json/decode payload))
@@ -129,14 +120,13 @@
             (def method (get data "method"))
             (def params (get data "params"))
             (when (and method params)
-              # Decoration events dispatch to the decorator module
-              (if (string/has-prefix? "decoration:" method)
-                (set extra-fx (tp/handle-decoration-event method params))
+              (if (= method "decoration:state")
+                (set deco-params params)
                 (set db (tp/handle-notification db method params))))))
         ([err]
           (eprintf "tidepool: recv error: %s" (string err))))
-      (if extra-fx
-        (merge {:db db :render []} extra-fx)
+      (if deco-params
+        {:db db :render [] :dispatch [:decoration/state deco-params]}
         {:db db :render :default}))))
 
 # -- Action dispatch --
