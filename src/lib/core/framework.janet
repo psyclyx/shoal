@@ -274,9 +274,13 @@
    At :init, Zig creates a surface per non-lazy registration. Lazy entries
    register the view but defer creation until a :surface :create fx fires."
   [name & args]
+  # Order matters: Janet's tuple-pattern `[vf]` matches any indexed
+  # value of length >= 1, so the 2-arg form must be matched first or
+  # the config table ends up bound to view-fn and the actual config
+  # silently becomes {}.
   (def [config view-fn] (match args
-                          [vf]              [{} vf]
-                          [cfg vf]          [cfg vf]))
+                          [cfg vf]          [cfg vf]
+                          [vf]              [{} vf]))
   (put surface-registry name {:view view-fn :config config}))
 
 (defn reg-view
