@@ -17,6 +17,7 @@ const c = @cImport({
     @cDefine("GL_GLEXT_PROTOTYPES", "1");
     @cInclude("wayland-egl.h");
     @cInclude("EGL/egl.h");
+    @cInclude("EGL/eglext.h");
     @cInclude("GL/gl.h");
     @cInclude("GL/glext.h");
 });
@@ -147,11 +148,15 @@ const Surface = struct {
         );
         if (self.egl_window == null) return error.EGLWindowFailed;
 
+        const surface_attribs = [_]c.EGLint{
+            c.EGL_GL_COLORSPACE_KHR, c.EGL_GL_COLORSPACE_SRGB_KHR,
+            c.EGL_NONE,
+        };
         self.egl_surface = c.eglCreateWindowSurface(
             egl_display,
             egl_config,
             @ptrCast(self.egl_window),
-            null,
+            &surface_attribs,
         );
         if (self.egl_surface == c.EGL_NO_SURFACE) {
             c.wl_egl_window_destroy(self.egl_window);
@@ -450,10 +455,13 @@ pub fn main(init: std.process.Init) !void {
 
     // Initialize subsystems
     renderer = try Renderer.init(allocator);
-    defer renderer.deinit();
 
-    text_renderer = try TextRenderer.init(allocator);
+    text_renderer = TextRenderer.init(allocator) catch |err| {
+        renderer.deinit();
+        return err;
+    };
     defer text_renderer.deinit();
+    defer renderer.deinit();
 
     // Load default font (theme can be customized in Janet)
     _ = text_renderer.loadFont("monospace", 14) catch |err| {
