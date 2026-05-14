@@ -230,9 +230,12 @@ pub const Dispatch = struct {
         log.info("shoal framework loaded, dispatch ready", .{});
     }
 
-    /// Define script-args in environment (accessible as script-args)
+    /// Define script-args in environment (accessible as script-args).
+    /// Always defined — even empty — so user code can call `(script-args 0)`
+    /// or `(get script-args 0)` without first checking that the symbol
+    /// exists. Returns nil for missing indices, which composes naturally
+    /// with `or` for default values.
     pub fn setScriptArgs(self: *Dispatch, args: []const []const u8) void {
-        if (args.len == 0) return;
         const arr = c.janet_array(@intCast(args.len));
         for (args) |arg| {
             const s = c.janet_string(@ptrCast(arg.ptr), @intCast(arg.len));
@@ -1454,8 +1457,10 @@ pub const Dispatch = struct {
             } else |_| {}
         }
 
-        // Add sholib (installed stdlib)
-        const sholib = "/usr/share/shoal/lib";
+        // Add sholib (installed stdlib). Honour $SHOAL_LIB so packagers
+        // (Nix, distros that don't use /usr) can point at the actual
+        // install path; fall back to the FHS default otherwise.
+        const sholib = self.environ_map.get("SHOAL_LIB") orelse "/usr/share/shoal/lib";
         const sholib_janet = c.janet_string(@ptrCast(sholib.ptr), @intCast(sholib.len));
         c.janet_array_push(load_path_arr, c.janet_wrap_string(sholib_janet));
 
