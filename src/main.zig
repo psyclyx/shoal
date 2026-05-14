@@ -856,14 +856,14 @@ fn processSingleSurfaceRequest(req: janet.Janet) void {
         return;
     }
 
-    // {:create {:name :launcher :layer :overlay ...}}
+    // {:create {:name :osd :layer :overlay ...}}
     const create_val = janet.janetGet(req, janet.kw("create"));
     if (jc.janet_checktype(create_val, jc.JANET_NIL) == 0) {
         createDynamicSurface(create_val);
         return;
     }
 
-    // {:destroy :launcher}
+    // {:destroy :osd}
     const destroy_val = janet.janetGet(req, janet.kw("destroy"));
     if (jc.janet_checktype(destroy_val, jc.JANET_NIL) == 0) {
         destroyDynamicSurface(destroy_val);

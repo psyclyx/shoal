@@ -18,7 +18,6 @@
 # Load data sources and overlays
 (use "module/clock")
 (use "module/sysinfo")
-(use "module/launcher")
 (use "module/osd")
 (use "module/decorator")
 
@@ -54,7 +53,6 @@
 (def disk-bg (blend-bg orange 100 bg))
 (def bat-bg (blend-bg red 100 bg))
 (def clock-bg (blend-bg blue 100 bg))
-(def launcher-bg (blend-bg muted 80 bg))
 (def minimap-bg (blend-bg surface 120 bg))
 
 # --- Subscriptions ---
@@ -261,19 +259,12 @@
 
 # --- Root ---
 
-(defn launcher-view []
-  (section launcher-bg {}
-    [:row {:id "launcher" :align-y :center}
-      (icon-launcher bright)]))
-
 (defn bar-view []
   [:row {:w :grow :h BAR-H :bg bg :align-y :center}
     # Left
-    [:row {:w :grow :gap 10 :pad [0 0 0 0] :align-y :center}
-      (launcher-view)
-      [:row {:pad [0 10] :gap 10 :align-y :center}
-        (workspaces-view)
-        (scroll-minimap)]]
+    [:row {:w :grow :gap 10 :pad [0 10] :align-y :center}
+      (workspaces-view)
+      (scroll-minimap)]
     # Center
     [:row {:w :grow :align-x :center :align-y :center}
       (title-view)]
@@ -306,16 +297,9 @@
 (reg-event-handler :click
   (fn [cofx event]
     (def id (get event 1 ""))
-    (cond
-      (string/has-prefix? "tag-" id)
+    (when (string/has-prefix? "tag-" id)
       (let [tag (scan-number (string/slice id 4))]
-        (when tag {:dispatch [:wm/focus-tag tag]}))
-
-      (= id "launcher")
-      {:dispatch [:launcher/open]}
-
-      (= id "title")
-      {:dispatch [:launcher/open "@"]})))
+        (when tag {:dispatch [:wm/focus-tag tag]})))))
 
 (reg-event-handler :scroll
   (fn [cofx event]

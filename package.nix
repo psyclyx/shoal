@@ -2,6 +2,7 @@
   lib,
   stdenv,
   callPackage,
+  makeWrapper,
   pkg-config,
   wayland,
   wayland-protocols,
@@ -23,6 +24,7 @@ stdenv.mkDerivation (finalAttrs: {
   deps = callPackage ./build.zig.zon.nix {};
 
   nativeBuildInputs = [
+    makeWrapper
     pkg-config
     wayland-scanner
     zig_0_16.hook
@@ -46,6 +48,11 @@ stdenv.mkDerivation (finalAttrs: {
   postInstall = ''
     mkdir -p $out/share/shoal
     cp -r $src/src/lib $out/share/shoal/lib
+
+    # The runtime falls back to /usr/share/shoal/lib if SHOAL_LIB is
+    # unset, which is wrong on Nix. Pin it to the installed copy.
+    wrapProgram $out/bin/shoal \
+      --set-default SHOAL_LIB $out/share/shoal/lib
   '';
 
   meta = {

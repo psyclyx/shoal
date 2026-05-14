@@ -1,8 +1,8 @@
 # Architecture
 
 Shoal is a Wayland layer-shell toolkit. It provides a reactive UI framework
-for building desktop shell surfaces — status bars, launchers, notification
-popups, OSD overlays, and anything else that lives on a layer-shell surface.
+for building desktop shell surfaces — status bars, notification popups,
+OSD overlays, and anything else that lives on a layer-shell surface.
 
 ---
 
@@ -60,9 +60,7 @@ Reusable, compositor-agnostic data sources and views. Loaded from
 | `clock.janet` | Clock data source (1s timer, os/date) |
 | `sysinfo.janet` | CPU, memory, battery, disk, network, audio data sources |
 | `bar.janet` | Status bar view (workspaces, title, system info) |
-| `launcher.janet` | Universal seam: launcher/command palette (apps, windows, tags, actions) |
 | `osd.janet` | Volume/brightness on-screen display |
-| `dmenu.janet` | dmenu compatibility: stdin/stdout item picker (loaded in `--dmenu` mode) |
 
 Modules consume the `wm/*` subscription interface. They do not depend on any
 specific compositor — they work with whichever compositor integration is loaded.
@@ -88,8 +86,8 @@ The active preset is imported by the engine at compile time.
 
 | File | Compositor | Modules |
 |------|-----------|---------|
-| `tidepool.zig` | tidepool | clock, sysinfo, bar, launcher, osd |
-| `sway.zig` | sway | clock, sysinfo, bar, launcher, osd |
+| `tidepool.zig` | tidepool | clock, sysinfo, bar, osd |
+| `sway.zig` | sway | clock, sysinfo, bar, osd |
 
 To switch presets, change the import in `src/engine/janet.zig`.
 
@@ -132,7 +130,7 @@ Compositor (tidepool, sway, ...)
   → registers wm/* action handlers (focus-tag, close, zoom, ...)
   → dispatches :wm/signal for compositor signals
 
-Modules (bar, launcher, osd, ...)
+Modules (bar, osd, ...)
   → subscribe to wm/* for display
   → dispatch wm/* actions on user interaction
   → react to :wm/signal events
@@ -179,7 +177,7 @@ Named views support multiple surfaces:
 
 ```janet
 (reg-view my-bar)                    # default view
-(reg-view :launcher launcher-view)   # named view for a launcher surface
+(reg-view :osd osd-view)             # named view for a second surface
 ```
 
 ---

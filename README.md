@@ -1,7 +1,7 @@
 # Shoal
 
 Wayland layer-shell toolkit for building desktop shell surfaces — status bars,
-launchers, OSD overlays, and more.
+OSD overlays, and more.
 
 ## Architecture
 
@@ -48,13 +48,12 @@ shoal run path/to/script.janet [args...]
 shoal run path/to/dir [args...]      # loads every *.janet inside, alphabetically
 ```
 
-Args after the path are exposed as `script-args`. Three examples
+Args after the path are exposed as `script-args`. Two examples
 ship in `src/lib/example/`:
 
 | Script | Description |
 |--------|-------------|
 | `bar.janet` | Status bar with workspaces, title, minimap, CPU/mem/disk/net/audio/battery, clock. Takes `sway` or `tidepool` as the first script-arg. |
-| `dmenu.janet` | Fuzzy picker — reads items from stdin, writes selection to stdout, exits. `printf 'a\nb' \| shoal run dmenu.janet '> '` |
 | `minimal.janet` | Smallest possible config — just a clock. |
 
 Other subcommands:
@@ -90,7 +89,7 @@ Every layer-shell surface is declared with `reg-surface`:
 
 `:per-output true` is the bar pattern — one instance per monitor.
 The default is single-instance, which the compositor places on the
-focused output (good for OSDs, launchers, pickers).
+focused output (good for OSDs and pickers).
 
 `:lazy true` registers the view function without creating a surface.
 Use it for transient overlays that pop up via `{:surface :create ...}`
@@ -105,7 +104,6 @@ integration that implements it.
 |--------|-------------|
 | `clock.janet` | Clock data source (1s timer) |
 | `sysinfo.janet` | CPU/memory/disk/network/battery/audio polling (/proc, /sys, pactl) |
-| `launcher.janet` | Universal command palette — apps, windows, tags, compositor actions, eval |
 | `osd.janet` | Volume/brightness on-screen display |
 | `decorator.janet` | Window decoration renderer (tidepool) |
 

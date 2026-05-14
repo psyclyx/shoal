@@ -78,6 +78,18 @@ let
         };
       };
 
+      args = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [];
+        description = ''
+          Positional script arguments appended to the `shoal run`
+          command line. Available to Janet code as `script-args`.
+          Useful for parameterizing bundled configs like the example
+          bar (which takes the compositor name).
+        '';
+        example = [ "tidepool" ];
+      };
+
       theme = lib.mkOption {
         type = lib.types.attrsOf (lib.types.either lib.types.str lib.types.ints.positive);
         default = {};
@@ -121,7 +133,11 @@ let
     };
 
     Service = {
-      ExecStart = "${lib.getExe cfg.package} run ${config.xdg.configHome}/shoal/${name}";
+      ExecStart = lib.concatStringsSep " " ([
+        (lib.getExe cfg.package)
+        "run"
+        "${config.xdg.configHome}/shoal/${name}"
+      ] ++ map lib.escapeShellArg conf.args);
       Environment = lib.mapAttrsToList (k: v: "${k}=${v}") conf.systemd.environment;
       Restart = conf.systemd.restart;
       RestartSec = conf.systemd.restartSec;
@@ -208,6 +224,7 @@ in {
           hex = lib.toHexString a;
         in if builtins.stringLength hex == 1 then "0${hex}" else hex;
       in lib.mkDefault ({
+        # Raw base16 (also consumed by widgets that want a specific slot).
         base00 = "#${colors.base00}${alphaHex}";
         base01 = "#${colors.base01}";
         base02 = "#${colors.base02}";
@@ -224,6 +241,25 @@ in {
         base0D = "#${colors.base0D}";
         base0E = "#${colors.base0E}";
         base0F = "#${colors.base0F}";
+        # Semantic aliases used by the framework default theme and the
+        # bundled bar/modules. base16 → semantic mapping follows the
+        # standard styling guide (base00 = bg, base05 = fg, base08–0E =
+        # accent ramp).
+        bg = "#${colors.base00}${alphaHex}";
+        surface = "#${colors.base01}";
+        overlay = "#${colors.base02}";
+        muted = "#${colors.base03}";
+        subtle = "#${colors.base04}";
+        text = "#${colors.base05}";
+        bright = "#${colors.base07}";
+        red = "#${colors.base08}";
+        orange = "#${colors.base09}";
+        yellow = "#${colors.base0A}";
+        green = "#${colors.base0B}";
+        cyan = "#${colors.base0C}";
+        blue = "#${colors.base0D}";
+        purple = "#${colors.base0E}";
+        accent = "#${colors.base0D}";
         font_family = fonts.monospace.name;
         font_size = fonts.sizes.desktop;
       });
