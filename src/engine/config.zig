@@ -26,13 +26,27 @@ pub const Config = struct {
     };
 };
 
-/// Read theme from $XDG_CONFIG_HOME/shoal/config.json (or the explicit path),
-/// returning the default theme if the file is missing or malformed.
-pub fn loadTheme(allocator: std.mem.Allocator, explicit_path: ?[]const u8) Theme {
+/// Read theme from a config.json. Search order:
+///   1. `explicit_path`, if given.
+///   2. `<hint>/config.json` if `hint` is a directory, otherwise
+///      `<dirname(hint)>/config.json` if `hint` is a file. This lets
+///      callers pass the same config path used for `shoal run` and pick
+///      up the per-config config.json that lives next to the modules.
+///   3. `$XDG_CONFIG_HOME/shoal/config.json` (legacy single-config layout).
+/// Falls back to the default theme if no candidate file exists.
+pub fn loadTheme(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    explicit_path: ?[]const u8,
+    hint: ?[]const u8,
+) Theme {
     var path_buf: [4096]u8 = undefined;
-    const path = explicit_path orelse resolveConfigPath(&path_buf) orelse return theme_mod.default();
+    const path = explicit_path
+        orelse resolveFromHint(io, &path_buf, hint)
+        orelse resolveConfigPath(&path_buf)
+        orelse return theme_mod.default();
 
-    const contents = std.Io.Dir.cwd().readFileAlloc(std.Options.debug_io, path, allocator, .limited(1 << 20)) catch |err| switch (err) {
+    const contents = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(1 << 20)) catch |err| switch (err) {
         error.FileNotFound => return theme_mod.default(),
         else => {
             log.warn("config.json read failed: {}", .{err});
@@ -50,6 +64,20 @@ pub fn loadTheme(allocator: std.mem.Allocator, explicit_path: ?[]const u8) Theme
     if (parsed.value != .object) return theme_mod.default();
     const theme_val = parsed.value.object.get("theme") orelse return theme_mod.default();
     return theme_mod.fromJson(allocator, theme_val) catch theme_mod.default();
+}
+
+fn resolveFromHint(io: std.Io, buf: []u8, hint: ?[]const u8) ?[]const u8 {
+    const h = hint orelse return null;
+    // Treat as directory if it is one; otherwise use its parent.
+    if (std.Io.Dir.cwd().openDir(io, h, .{})) |dir| {
+        var d = dir;
+        d.close(io);
+        return std.fmt.bufPrint(buf, "{s}/config.json", .{h}) catch null;
+    } else |_| {}
+    if (std.fs.path.dirname(h)) |parent| {
+        return std.fmt.bufPrint(buf, "{s}/config.json", .{parent}) catch null;
+    }
+    return null;
 }
 
 fn resolveConfigPath(buf: []u8) ?[]const u8 {

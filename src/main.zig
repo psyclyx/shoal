@@ -273,7 +273,11 @@ pub fn main(init: std.process.Init) !void {
     defer janet.deinit();
 
     dispatch = janet.createDispatch();
-    const theme = config_mod.loadTheme(allocator, null);
+    const theme_hint: ?[]const u8 = if (cli_args.config_paths.len > 0)
+        cli_args.config_paths[0]
+    else
+        null;
+    const theme = config_mod.loadTheme(init.io, allocator, null, theme_hint);
     try dispatch.initBoot(init.io, init.environ_map, theme);
     dispatch.setScriptArgs(cli_args.script_args);
     dispatch.initFileReader(init.io);
