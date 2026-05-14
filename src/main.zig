@@ -134,6 +134,12 @@ const Surface = struct {
     view_name_str: ?[:0]const u8 = null,
     // Dynamic surfaces are created/destroyed from Janet via :surface fx
     is_dynamic: bool = false,
+    // Config snapshot fields needed after creation. Auto-size only
+    // touches exclusive_zone when the surface declared one — overlay
+    // surfaces with cfg.exclusive_zone==0 must not start reserving
+    // area just because their rendered content has a height.
+    cfg_exclusive_zone: i32 = 0,
+    cfg_margin: config_mod.Config.Margin = .{},
 
     const frame_watchdog_ms: i64 = 500;
 
@@ -956,6 +962,8 @@ fn createDynamicSurface(spec: janet.Janet) void {
         .layer_surface = layer_surface,
         .is_dynamic = true,
         .view_name_str = std.mem.span(jc.janet_unwrap_keyword(name_val)),
+        .cfg_exclusive_zone = exclusive_zone,
+        .cfg_margin = margin,
     };
     layer_surface.setListener(*Surface, layerSurfaceListener, surf);
     wl_surface.commit();
@@ -1309,6 +1317,8 @@ fn createLayerSurface(
     ) catch return;
 
     if (name_str) |n| surf.view_name_str = n;
+    surf.cfg_exclusive_zone = cfg.exclusive_zone;
+    surf.cfg_margin = cfg.margin;
 
     const ls_surf = surf.layer_surface.?;
     const initial_h: u32 = if (cfg.height == 0) 48 else cfg.height;
@@ -1474,8 +1484,15 @@ fn renderSurface(surf: *Surface) bool {
         if (target_h > 0 and target_h != surf.height) {
             if (surf.layer_surface) |ls_surf| {
                 ls_surf.setSize(surf.width, target_h);
-                const margin_v: u32 = @intCast(@max(0, default_surface_config.margin.top) + @max(0, default_surface_config.margin.bottom));
-                ls_surf.setExclusiveZone(@intCast(target_h + margin_v));
+                // Only re-derive exclusive_zone for surfaces that
+                // actually reserve area (e.g. the bar). Overlay /
+                // popup surfaces declared exclusive_zone == 0; we
+                // must preserve that or the compositor reserves
+                // space wherever the overlay happens to land.
+                if (surf.cfg_exclusive_zone > 0) {
+                    const margin_v: u32 = @intCast(@max(0, surf.cfg_margin.top) + @max(0, surf.cfg_margin.bottom));
+                    ls_surf.setExclusiveZone(@intCast(target_h + margin_v));
+                }
                 surf.wl_surface.?.commit();
                 trace.log("render.autosize name={s} old_h={d} target_h={d}", .{
                     surfaceTraceName(surf),
