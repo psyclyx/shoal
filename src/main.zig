@@ -641,6 +641,7 @@ pub fn main(init: std.process.Init) !void {
             {
                 log.warn("frame callback watchdog triggered, resetting", .{});
                 surf.frame_pending = false;
+                markSurfaceDirty(surf);
             }
         }
 
