@@ -1,7 +1,20 @@
 let
-  sources = import ./npins;
-  pkgs = import sources.nixpkgs {};
+  npins = import ./npins;
+  overlay = import ./overlay.nix;
 in
-pkgs.callPackage ./package.nix {
-  snail-src = sources.snail;
+{ nixpkgs ? npins.nixpkgs
+, pkgs ? import nixpkgs { }
+, snail-src ? npins.snail
+}:
+let
+  # surface snail-src by name so package.nix's `snail-src` callPackage arg
+  # resolves it; superproject overrides snail-src to point at sibling lib/snail.
+  finalPkgs = (pkgs.extend (_: _: { snail-src = snail-src; })).extend overlay;
+in
+{
+  packages = { inherit (finalPkgs) shoal; };
+  inherit overlay;
+  shell = import ./shell.nix { pkgs = finalPkgs; };
+  default = finalPkgs.shoal;
+  homeManagerModules.default = import ./nix/hm-module.nix;
 }

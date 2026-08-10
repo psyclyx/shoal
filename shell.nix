@@ -1,4 +1,4 @@
-{ pkgs ? import (import ./npins).nixpkgs {} }:
+{ pkgs }:
 
 pkgs.mkShell {
   nativeBuildInputs = with pkgs; [

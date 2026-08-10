@@ -1,1 +1,1 @@
-final: prev: { shoal = prev.callPackage ./package.nix {}; }
+final: _prev: { shoal = final.callPackage ./package.nix { }; }
