@@ -4,21 +4,25 @@
       "type": "Channel",
       "name": "nixos-unstable",
       "artifact": "nixexprs.tar.xz",
-      "url": "https://releases.nixos.org/nixos/unstable/nixos-26.11pre1017464.567a49d1913c/nixexprs.tar.xz",
-      "hash": "sha256-rcUHdUtJEvMdNEl2Wq+YpHraHKfcer3KsBscpZEF2Yg="
+      "url": "https://releases.nixos.org/nixos/unstable/nixos-26.11pre1059570.2c423e03bbaf/nixexprs.tar.xz",
+      "hash": "sha256-95aJfHyQTLWslCXFVNB0odgmVkpdmDezQwTg9mhqV1E="
     },
     "snail": {
-      "type": "Git",
+      "type": "GitRelease",
       "repository": {
         "type": "GitHub",
         "owner": "psyclyx",
         "repo": "snail"
       },
-      "branch": "main",
+      "pre_releases": false,
+      "version_upper_bound": null,
+      "release_prefix": null,
       "submodules": false,
-      "revision": "2866541ad69acca35db8b271cf6a05e9dbff3c88",
-      "url": "https://github.com/psyclyx/snail/archive/2866541ad69acca35db8b271cf6a05e9dbff3c88.tar.gz",
-      "hash": "sha256-Fazh/X8NNt0Acv7YrgQrulhOkYRi6Wl2v7b+3qZE6SM="
+      "version": "v0.6.1",
+      "revision": "0fd3bb835b3cf8d34e22d82a886af0237f53c55b",
+      "url": "https://api.github.com/repos/psyclyx/snail/tarball/refs/tags/v0.6.1",
+      "hash": "sha256-Fazh/X8NNt0Acv7YrgQrulhOkYRi6Wl2v7b+3qZE6SM=",
+      "frozen": true
     }
   },
   "version": 8
