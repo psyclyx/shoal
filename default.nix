@@ -4,7 +4,10 @@ let
 in
 { nixpkgs ? npins.nixpkgs
 , pkgs ? import nixpkgs { }
+  # snail is consumed as a Zig *source* via `zig build --system`; shoal keeps
+  # its OWN pinned snail (targets 0.6.1) — deliberate, kept as the default.
 , snail-src ? npins.snail
+, ...
 }:
 let
   # surface snail-src by name so package.nix's `snail-src` callPackage arg
