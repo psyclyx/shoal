@@ -19,7 +19,24 @@ stdenv.mkDerivation (finalAttrs: {
   pname = "shoal";
   version = "0.1.0";
 
-  src = ./.;
+  # Only the files the zig build consumes: the build graph (build.zig +
+  # zon), the scanned protocol XML, and src/ (the module sources plus the
+  # src/lib runtime tree postInstall copies). Entry points (default.nix,
+  # package.nix, overlay.nix, shell.nix), npins/, and docs are not package
+  # inputs, so editing them must not churn the source hash.
+  src = builtins.path {
+    # Preserve the store path name the old `src = ./.` copy had.
+    name = "shoal";
+    path = lib.fileset.toSource {
+      root = ./.;
+      fileset = lib.fileset.unions [
+        ./build.zig
+        ./build.zig.zon
+        ./protocol
+        ./src
+      ];
+    };
+  };
 
   deps = callPackage ./build.zig.zon.nix {};
 
