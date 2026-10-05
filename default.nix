@@ -11,13 +11,13 @@ in
 }:
 let
   # surface snail-src by name so package.nix's `snail-src` callPackage arg
-  # resolves it; superproject overrides snail-src to point at sibling lib/snail.
+  # resolves it; callers may point snail-src at their own snail tree.
   finalPkgs = (pkgs.extend (_: _: { snail-src = snail-src; })).extend overlay;
 in
 {
   packages = { inherit (finalPkgs) shoal; };
   inherit overlay;
-  shell = import ./shell.nix { pkgs = finalPkgs; };
+  shell = import ./nix/shell.nix { pkgs = finalPkgs; };
   default = finalPkgs.shoal;
   homeManagerModules.default = import ./nix/hm-module.nix;
 }

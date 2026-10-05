@@ -1,18 +1,1 @@
-{ pkgs }:
-
-pkgs.mkShell {
-  nativeBuildInputs = with pkgs; [
-    pkg-config
-    wayland-scanner
-    zig_0_16
-  ];
-
-  buildInputs = with pkgs; [
-    wayland
-    wayland-protocols
-    libGL
-    harfbuzz
-    libxkbcommon
-    janet
-  ];
-}
+(import ./default.nix { }).shell
