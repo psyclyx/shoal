@@ -1,1 +1,3 @@
-export NPINS_OVERRIDE_snail=../snail
+# Shoal pins snail itself (0.6.1, see default.nix): ignore any externally
+# supplied snail override. Unsetting an unset variable is a no-op.
+unset NPINS_OVERRIDE_snail
